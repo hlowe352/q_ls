@@ -1,0 +1,12 @@
+[package]
+name = "q-ls"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+q-lexer = { path = "../lexer" }
+q-parser = { path = "../parser" }
+tower-lsp = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

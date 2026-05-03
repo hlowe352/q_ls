@@ -1,0 +1,12 @@
+[package]
+name = "q-parser"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+q-lexer = { path = "../lexer" }
+rowan = { workspace = true }
+smol_str = { workspace = true }
+
+[dev-dependencies]
+expect-test = "1"
