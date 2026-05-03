@@ -1,0 +1,36 @@
+{
+  "name": "q-ls",
+  "displayName": "q/kdb+ Language Support",
+  "description": "Language server for q/kdb+ 4.1",
+  "version": "0.1.0",
+  "publisher": "q-ls",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": ["Programming Languages"],
+  "activationEvents": [
+    "onLanguage:q"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "q",
+        "aliases": ["q", "kdb+"],
+        "extensions": [".q", ".k"],
+        "configuration": "./language-configuration.json"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "watch": "tsc -watch -p ."
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.75.0",
+    "typescript": "^5.0.0"
+  }
+}
