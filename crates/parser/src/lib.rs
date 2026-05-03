@@ -1,4 +1,5 @@
 pub mod event;
+pub mod grammar;
 pub mod parser;
 pub mod syntax_kind;
 pub mod sink;
@@ -12,11 +13,8 @@ use rowan::GreenNode;
 pub fn parse(source: &str) -> Parse {
     let mut p = parser::Parser::new(source);
     let m = p.start();
-    // Temporary: just consume all tokens (grammar comes in Task 5)
-    while !p.at_end() {
-        p.bump();
-    }
-    p.eat_trivia();
+    grammar::root(&mut p);
+    p.eat_trivia(); // trailing trivia
     m.complete(&mut p, SyntaxKind::Root);
 
     let (events, errors) = p.finish();
@@ -47,8 +45,7 @@ mod tests {
     fn parse_preserves_text() {
         let source = "x:42";
         let parse = parse(source);
-        let node = parse.syntax();
-        assert_eq!(node.text().to_string(), source);
+        assert_eq!(parse.syntax().text().to_string(), source);
     }
 
     #[test]
@@ -66,8 +63,81 @@ mod tests {
     }
 
     #[test]
-    fn parse_returns_root() {
+    fn parse_integer_literal() {
+        let parse = parse("42");
+        assert!(parse.errors.is_empty(), "errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn parse_binary_expr() {
         let parse = parse("1+2");
-        assert_eq!(parse.syntax().kind(), SyntaxKind::Root);
+        assert!(parse.errors.is_empty(), "errors: {:?}", parse.errors);
+        assert_eq!(parse.syntax().text().to_string(), "1+2");
+    }
+
+    #[test]
+    fn parse_assignment() {
+        let parse = parse("x:42");
+        assert!(parse.errors.is_empty(), "errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn parse_lambda() {
+        let parse = parse("{[x;y] x+y}");
+        assert!(parse.errors.is_empty(), "errors: {:?}", parse.errors);
+        assert_eq!(parse.syntax().text().to_string(), "{[x;y] x+y}");
+    }
+
+    #[test]
+    fn parse_lambda_no_params() {
+        let parse = parse("{x*x}");
+        assert!(parse.errors.is_empty(), "errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn parse_list() {
+        let parse = parse("(1;2;3)");
+        assert!(parse.errors.is_empty(), "errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn parse_empty_list() {
+        let parse = parse("()");
+        assert!(parse.errors.is_empty(), "errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn parse_conditional() {
+        let parse = parse("$[x>0;x;0]");
+        assert!(parse.errors.is_empty(), "errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn parse_right_to_left() {
+        // Structure should be 2*(3+4), not (2*3)+4
+        let parse = parse("2*3+4");
+        assert!(parse.errors.is_empty());
+        assert_eq!(parse.syntax().text().to_string(), "2*3+4");
+    }
+
+    #[test]
+    fn parse_adverb() {
+        let parse = parse("+/x");
+        assert!(parse.errors.is_empty(), "errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn parse_system_cmd() {
+        let parse = parse("\\l file.q");
+        assert!(parse.errors.is_empty(), "errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn parse_error_recovery() {
+        // Should not panic on malformed input
+        let parse = parse(")invalid");
+        assert!(!parse.errors.is_empty());
+        // Still lossless
+        assert_eq!(parse.syntax().text().to_string(), ")invalid");
     }
 }
