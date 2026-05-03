@@ -1,4 +1,5 @@
 pub mod expressions;
+pub mod qsql;
 
 use crate::parser::Parser;
 use crate::syntax_kind::SyntaxKind;
@@ -25,6 +26,14 @@ pub fn statement(p: &mut Parser) {
         let m = p.start();
         p.bump();
         m.complete(p, SyntaxKind::SystemCmdStmt);
+        return;
+    }
+
+    // qSQL
+    if qsql::at_qsql_keyword(p) {
+        let m = p.start();
+        qsql::parse_qsql(p);
+        m.complete(p, SyntaxKind::ExprStmt);
         return;
     }
 

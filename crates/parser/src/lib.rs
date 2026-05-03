@@ -140,4 +140,47 @@ mod tests {
         // Still lossless
         assert_eq!(parse.syntax().text().to_string(), ")invalid");
     }
+
+    #[test]
+    fn parse_select_simple() {
+        let parse = parse("select from trade");
+        assert!(parse.errors.is_empty(), "errors: {:?}", parse.errors);
+        assert_eq!(parse.syntax().text().to_string(), "select from trade");
+    }
+
+    #[test]
+    fn parse_select_columns() {
+        let parse = parse("select price,size from trade");
+        assert!(parse.errors.is_empty(), "errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn parse_select_where() {
+        let parse = parse("select price,size from trade where sym=`AAPL");
+        assert!(parse.errors.is_empty(), "errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn parse_select_by() {
+        let parse = parse("select avg price by sym from trade");
+        assert!(parse.errors.is_empty(), "errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn parse_update_stmt() {
+        let parse = parse("update price:price*1.1 from trade");
+        assert!(parse.errors.is_empty(), "errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn parse_delete_stmt() {
+        let parse = parse("delete from trade where price<0");
+        assert!(parse.errors.is_empty(), "errors: {:?}", parse.errors);
+    }
+
+    #[test]
+    fn parse_exec_stmt() {
+        let parse = parse("exec price from trade where sym=`GOOG");
+        assert!(parse.errors.is_empty(), "errors: {:?}", parse.errors);
+    }
 }
