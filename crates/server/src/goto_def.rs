@@ -1,5 +1,5 @@
 use tower_lsp::lsp_types::*;
-use q_parser::{SyntaxKind, SyntaxNode, SyntaxElement};
+use q_parser::{SyntaxKind, SyntaxNode};
 use crate::document::Document;
 
 pub fn goto_definition(doc: &Document, pos: Position, uri: &Url) -> Option<GotoDefinitionResponse> {
@@ -19,19 +19,15 @@ pub fn goto_definition(doc: &Document, pos: Position, uri: &Url) -> Option<GotoD
 fn find_definition(root: &SyntaxNode, name: &str) -> Option<usize> {
     for node in root.descendants() {
         if node.kind() == SyntaxKind::AssignStmt {
-            if let Some(first) = node.first_child_or_token() {
-                match first {
-                    SyntaxElement::Node(n) => {
-                        if let Some(token) = n.first_token() {
-                            if token.text() == name {
-                                return Some(token.text_range().start().into());
-                            }
-                        }
-                    }
-                    SyntaxElement::Token(t) => {
-                        if t.text() == name {
-                            return Some(t.text_range().start().into());
-                        }
+            // Get the first child node (LHS, typically IdentExpr)
+            if let Some(lhs) = node.first_child() {
+                // Find the first non-trivia token in the LHS
+                let name_token = lhs.descendants_with_tokens()
+                    .filter_map(|el| el.into_token())
+                    .find(|t| !t.kind().is_trivia());
+                if let Some(token) = name_token {
+                    if token.text() == name {
+                        return Some(token.text_range().start().into());
                     }
                 }
             }

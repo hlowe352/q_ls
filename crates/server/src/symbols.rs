@@ -1,5 +1,5 @@
 use tower_lsp::lsp_types::*;
-use q_parser::{SyntaxKind, SyntaxNode, SyntaxElement};
+use q_parser::{SyntaxKind, SyntaxNode};
 use crate::document::Document;
 
 pub fn document_symbols(doc: &Document) -> Vec<DocumentSymbol> {
@@ -18,13 +18,17 @@ pub fn document_symbols(doc: &Document) -> Vec<DocumentSymbol> {
     symbols
 }
 
+fn first_non_trivia_token(node: &SyntaxNode) -> Option<q_parser::SyntaxToken> {
+    node.descendants_with_tokens()
+        .filter_map(|el| el.into_token())
+        .find(|t| !t.kind().is_trivia())
+}
+
 fn extract_symbol(doc: &Document, node: &SyntaxNode) -> Option<DocumentSymbol> {
-    // Get the name from first child (should be IdentExpr or token)
-    let first = node.first_child_or_token()?;
-    let name = match first {
-        SyntaxElement::Node(n) => n.first_token()?.text().to_string(),
-        SyntaxElement::Token(t) => t.text().to_string(),
-    };
+    // Get the name from the first non-trivia token of the LHS (IdentExpr)
+    let first_child = node.first_child()?;
+    let name_token = first_non_trivia_token(&first_child)?;
+    let name = name_token.text().to_string();
 
     let range = node.text_range();
     let start = doc.position_of(range.start().into());
