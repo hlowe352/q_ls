@@ -532,6 +532,7 @@ name = "q-parser"
 version = "0.1.0"
 dependencies = [
  "expect-test",
+ "logos",
  "q-lexer",
  "rowan",
  "smol_str",

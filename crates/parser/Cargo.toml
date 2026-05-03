@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 q-lexer = { path = "../lexer" }
+logos = { workspace = true }
 rowan = { workspace = true }
 smol_str = { workspace = true }
 
