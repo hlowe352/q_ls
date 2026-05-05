@@ -6,12 +6,14 @@ pub fn document_symbols(doc: &Document) -> Vec<DocumentSymbol> {
     let root = doc.parse().syntax();
     let mut symbols = Vec::new();
 
-    // Only look at top-level statements (direct children of Root)
+    // Top-level statements: assignments are BinExpr(ident, Colon, rhs) inside ExprStmt
     for node in root.children() {
-        if node.kind() == SyntaxKind::AssignStmt {
-            if let Some(sym) = extract_symbol(doc, &node) {
-                symbols.push(sym);
-            }
+        if node.kind() == SyntaxKind::ExprStmt
+            && let Some(bin) = node.first_child()
+            && bin.kind() == SyntaxKind::BinExpr && is_assignment(&bin)
+            && let Some(sym) = extract_symbol(doc, &bin)
+        {
+            symbols.push(sym);
         }
     }
 
@@ -53,6 +55,12 @@ fn extract_symbol(doc: &Document, node: &SyntaxNode) -> Option<DocumentSymbol> {
         selection_range: full_range,
         children: None,
     })
+}
+
+fn is_assignment(node: &SyntaxNode) -> bool {
+    node.children_with_tokens()
+        .filter_map(|el| el.into_token())
+        .any(|t| t.kind() == SyntaxKind::Colon || t.kind() == SyntaxKind::ColonColon)
 }
 
 fn has_lambda(node: &SyntaxNode) -> bool {

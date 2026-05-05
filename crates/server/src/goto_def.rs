@@ -16,19 +16,24 @@ pub fn goto_definition(doc: &Document, pos: Position, uri: &Url) -> Option<GotoD
 }
 
 /// Find the byte offset where `name` is defined (assigned to).
+/// Assignments parse as BinExpr(ident, Colon, rhs).
 fn find_definition(root: &SyntaxNode, name: &str) -> Option<usize> {
     for node in root.descendants() {
-        if node.kind() == SyntaxKind::AssignStmt {
+        if node.kind() == SyntaxKind::BinExpr {
+            // Check if operator is Colon (assignment)
+            let has_colon = node.children_with_tokens()
+                .filter_map(|el| el.into_token())
+                .any(|t| t.kind() == SyntaxKind::Colon || t.kind() == SyntaxKind::ColonColon);
+            if !has_colon { continue; }
+
             // Get the first child node (LHS, typically IdentExpr)
             if let Some(lhs) = node.first_child() {
-                // Find the first non-trivia token in the LHS
                 let name_token = lhs.descendants_with_tokens()
                     .filter_map(|el| el.into_token())
                     .find(|t| !t.kind().is_trivia());
-                if let Some(token) = name_token {
-                    if token.text() == name {
-                        return Some(token.text_range().start().into());
-                    }
+                if let Some(token) = name_token
+                    && token.text() == name {
+                    return Some(token.text_range().start().into());
                 }
             }
         }
