@@ -13,8 +13,8 @@ pub fn root(p: &mut Parser) {
 
 /// Parse a single statement.
 pub fn statement(p: &mut Parser) {
-    // Skip bare newlines
-    while p.at(SyntaxKind::Newline) {
+    // Skip bare newlines and semicolons (statement separators)
+    while p.at(SyntaxKind::Newline) || p.at(SyntaxKind::Semi) {
         p.bump();
     }
     if p.at_end() {
@@ -37,15 +37,8 @@ pub fn statement(p: &mut Parser) {
         return;
     }
 
-    // Expression or assignment
+    // Expression (assignments like `x:42` are parsed as BinExpr(x, :, 42))
     let m = p.start();
     expressions::expr(p);
-
-    if p.at(SyntaxKind::Colon) || p.at(SyntaxKind::ColonColon) {
-        p.bump();
-        expressions::expr(p);
-        m.complete(p, SyntaxKind::AssignStmt);
-    } else {
-        m.complete(p, SyntaxKind::ExprStmt);
-    }
+    m.complete(p, SyntaxKind::ExprStmt);
 }

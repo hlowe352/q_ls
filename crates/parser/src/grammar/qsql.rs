@@ -26,6 +26,16 @@ fn parse_select(p: &mut Parser) {
     let m = p.start();
     p.bump(); // "select"
 
+    // Optional limit: select[n] or select[n;>col]
+    if p.at(SyntaxKind::LBracket) {
+        expressions::parse_arg_list(p);
+    }
+
+    // Optional "distinct"
+    if at_kw(p, "distinct") {
+        p.bump();
+    }
+
     // Optional columns (if not immediately "from" or "by")
     if !at_kw(p, "from") && !at_kw(p, "by") && !p.at_end() && !at_stmt_end(p) {
         parse_column_list(p);
@@ -59,6 +69,11 @@ fn parse_select(p: &mut Parser) {
 fn parse_exec(p: &mut Parser) {
     let m = p.start();
     p.bump(); // "exec"
+
+    // Optional "distinct"
+    if at_kw(p, "distinct") {
+        p.bump();
+    }
 
     if !at_kw(p, "from") && !at_kw(p, "by") && !p.at_end() && !at_stmt_end(p) {
         parse_column_list(p);

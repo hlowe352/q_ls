@@ -36,21 +36,40 @@ fn expr_bp(p: &mut Parser, min_bp: u8) {
             continue;
         }
 
-        // Binary operator
-        let Some(_op) = binary_op(p) else {
-            break;
-        };
+        // Binary operator (or projection if no RHS: `1+` is valid q)
+        if let Some(_op) = binary_op(p) {
+            // Right-to-left: l_bp=1, r_bp=0 → right-associative at equal level
+            let (l_bp, r_bp) = (1u8, 0u8);
+            if l_bp < min_bp {
+                break;
+            }
 
-        // Right-to-left: l_bp=1, r_bp=0 → right-associative at equal level
-        let (l_bp, r_bp) = (1u8, 0u8);
-        if l_bp < min_bp {
-            break;
+            let m = lhs.precede(p);
+            p.bump(); // consume operator
+            // Only parse RHS if next token can be part of an expression.
+            // Otherwise this is a projection (e.g., `1+` or `2*`).
+            if !at_expr_boundary(p) {
+                expr_bp(p, r_bp);
+            }
+            lhs = m.complete(p, SyntaxKind::BinExpr);
+            continue;
         }
 
-        let m = lhs.precede(p);
-        p.bump(); // consume operator
-        expr_bp(p, r_bp);
-        lhs = m.complete(p, SyntaxKind::BinExpr);
+        // Juxtaposition: `f x` — implicit function application.
+        // If the next token can start an expression (atom), treat it as
+        // applying `lhs` to the next expression.
+        if can_start_expr(p) {
+            let (l_bp, r_bp) = (1u8, 0u8);
+            if l_bp < min_bp {
+                break;
+            }
+            let m = lhs.precede(p);
+            expr_bp(p, r_bp);
+            lhs = m.complete(p, SyntaxKind::ApplyExpr);
+            continue;
+        }
+
+        break;
     }
 }
 
@@ -72,8 +91,22 @@ fn atom(p: &mut Parser) -> Option<CompletedMarker> {
             Some(m.complete(p, SyntaxKind::LiteralExpr))
         }
 
-        // Identifiers
+        // Identifiers (with control word detection)
         SyntaxKind::Ident | SyntaxKind::DottedIdent => {
+            // Control words: if[...], do[...], while[...]
+            if kind == SyntaxKind::Ident && p.nth(1) == Some(SyntaxKind::LBracket)
+                && let Some(text) = p.current_text()
+            {
+                let ctrl_kind = match text.as_str() {
+                    "if" => Some(SyntaxKind::IfExpr),
+                    "do" => Some(SyntaxKind::DoExpr),
+                    "while" => Some(SyntaxKind::WhileExpr),
+                    _ => None,
+                };
+                if let Some(sk) = ctrl_kind {
+                    return parse_control_word(p, sk);
+                }
+            }
             let m = p.start();
             p.bump();
             Some(m.complete(p, SyntaxKind::IdentExpr))
@@ -99,12 +132,35 @@ fn atom(p: &mut Parser) -> Option<CompletedMarker> {
         | SyntaxKind::Hash
         | SyntaxKind::Underscore
         | SyntaxKind::Tilde
+        | SyntaxKind::Eq
+        | SyntaxKind::Lt
+        | SyntaxKind::Gt
+        | SyntaxKind::NotEq
+        | SyntaxKind::LtEq
+        | SyntaxKind::GtEq
         | SyntaxKind::At
-        | SyntaxKind::Query => {
+        | SyntaxKind::Query
+        | SyntaxKind::Dot
+        | SyntaxKind::Comma
+        | SyntaxKind::ColonColon
+        | SyntaxKind::CompoundAssign
+        | SyntaxKind::FileOp0
+        | SyntaxKind::FileOp1
+        | SyntaxKind::FileOp2
+        | SyntaxKind::Each
+        | SyntaxKind::EachPrior
+        | SyntaxKind::EachRight
+        | SyntaxKind::EachLeft => {
             let m = p.start();
             p.bump();
-            // If immediately followed by an adverb, don't consume operand now.
-            if !is_adverb(p) {
+            // Don't consume operand if:
+            // - followed by adverb (e.g. `+/x` — let postfix handle it)
+            // - followed by `[` (e.g. `'[f;g]` — let postfix indexing handle it)
+            // - at expression boundary (e.g. `1+;` — projection)
+            if !is_adverb(p)
+                && !at_expr_boundary(p)
+                && p.current() != Some(SyntaxKind::LBracket)
+            {
                 expr_bp(p, 100); // high bp: bind tightly to next token
             }
             Some(m.complete(p, SyntaxKind::UnaryExpr))
@@ -136,7 +192,9 @@ fn atom(p: &mut Parser) -> Option<CompletedMarker> {
         SyntaxKind::Colon => {
             let m = p.start();
             p.bump();
-            expr_bp(p, 100);
+            if !at_expr_boundary(p) && p.current() != Some(SyntaxKind::LBracket) {
+                expr_bp(p, 100);
+            }
             Some(m.complete(p, SyntaxKind::UnaryExpr))
         }
 
@@ -157,12 +215,18 @@ fn parse_paren(p: &mut Parser) -> Option<CompletedMarker> {
         return Some(m.complete(p, SyntaxKind::ListExpr));
     }
 
-    // Table literal: ([] ...)
-    if p.at(SyntaxKind::LBracket) && p.nth(1) == Some(SyntaxKind::RBracket) {
-        p.bump(); // [
-        p.bump(); // ]
+    // Table literal: ([] ...) or keyed table: ([key:val;...] ...)
+    if p.at(SyntaxKind::LBracket) {
+        if p.nth(1) == Some(SyntaxKind::RBracket) {
+            // Simple table: ([] col:val; ...)
+            p.bump(); // [
+            p.bump(); // ]
+        } else {
+            // Keyed table: ([key:val;...] col:val; ...)
+            parse_arg_list(p);
+        }
         while !p.at(SyntaxKind::RParen) && !p.at_end() {
-            expr(p);
+            parse_list_entry(p);
             if !p.eat(SyntaxKind::Semi) {
                 break;
             }
@@ -171,14 +235,14 @@ fn parse_paren(p: &mut Parser) -> Option<CompletedMarker> {
         return Some(m.complete(p, SyntaxKind::TableExpr));
     }
 
-    // First expression
-    expr(p);
+    // First entry (expression or assignment)
+    parse_list_entry(p);
 
     if p.at(SyntaxKind::Semi) {
         // List: (expr; expr; ...)
         while p.eat(SyntaxKind::Semi) {
             if !p.at(SyntaxKind::RParen) {
-                expr(p);
+                parse_list_entry(p);
             }
         }
         p.expect(SyntaxKind::RParen);
@@ -190,16 +254,32 @@ fn parse_paren(p: &mut Parser) -> Option<CompletedMarker> {
     }
 }
 
+/// Parse a control word: if[...], do[...], while[...]
+fn parse_control_word(p: &mut Parser, kind: SyntaxKind) -> Option<CompletedMarker> {
+    let m = p.start();
+    p.bump(); // keyword (if/do/while)
+    parse_arg_list(p);
+    Some(m.complete(p, kind))
+}
+
 fn parse_lambda(p: &mut Parser) -> Option<CompletedMarker> {
     let m = p.start();
     p.bump(); // {
 
-    // Optional parameter list: [x;y;z]
+    // Optional parameter list: [x;y;z] or [x:type;y:type;z]
     if p.at(SyntaxKind::LBracket) {
         let pm = p.start();
         p.bump(); // [
         while !p.at(SyntaxKind::RBracket) && !p.at_end() {
             p.expect(SyntaxKind::Ident);
+            // Optional type annotation: name:type
+            if p.at(SyntaxKind::Colon) {
+                p.bump(); // :
+                // Type can be an identifier, symbol, or expression
+                if !p.at(SyntaxKind::Semi) && !p.at(SyntaxKind::RBracket) {
+                    expr(p);
+                }
+            }
             if !p.eat(SyntaxKind::Semi) {
                 break;
             }
@@ -208,9 +288,9 @@ fn parse_lambda(p: &mut Parser) -> Option<CompletedMarker> {
         pm.complete(p, SyntaxKind::ParamList);
     }
 
-    // Body: expressions separated by ; (newlines are trivia inside braces)
+    // Body: statements separated by ; (assignments allowed inside lambdas)
     while !p.at(SyntaxKind::RBrace) && !p.at_end() {
-        expr(p);
+        parse_lambda_stmt(p);
         if !p.eat(SyntaxKind::Semi) {
             break;
         }
@@ -219,12 +299,37 @@ fn parse_lambda(p: &mut Parser) -> Option<CompletedMarker> {
     Some(m.complete(p, SyntaxKind::Lambda))
 }
 
+/// Parse an entry that may be an expression or assignment.
+/// Since `:` and `::` are now binary operators, assignments like `x:42`
+/// parse as BinExpr(x, :, 42) inside expr().
+fn parse_stmt_or_expr(p: &mut Parser) {
+    let m = p.start();
+    expr(p);
+    m.complete(p, SyntaxKind::ExprStmt);
+}
+
+/// Parse a statement inside a lambda body (expression or assignment).
+fn parse_lambda_stmt(p: &mut Parser) {
+    parse_stmt_or_expr(p);
+}
+
+/// Parse a list entry (expression or assignment, e.g. `0=pos: loc mod 100`).
+fn parse_list_entry(p: &mut Parser) {
+    parse_stmt_or_expr(p);
+}
+
 /// Parse bracketed argument list: [expr;expr;...]
+/// Arguments can be expressions or assignments (e.g. `$[x:cond;true;false]`).
 pub fn parse_arg_list(p: &mut Parser) {
     let m = p.start();
     p.expect(SyntaxKind::LBracket);
     while !p.at(SyntaxKind::RBracket) && !p.at_end() {
-        expr(p);
+        // Allow empty args (trailing semicolons like $[cond;true;])
+        if p.at(SyntaxKind::Semi) {
+            p.bump();
+            continue;
+        }
+        parse_arg_entry(p);
         if !p.eat(SyntaxKind::Semi) {
             break;
         }
@@ -233,9 +338,19 @@ pub fn parse_arg_list(p: &mut Parser) {
     m.complete(p, SyntaxKind::ArgList);
 }
 
+/// Parse a single argument entry (expression or assignment).
+fn parse_arg_entry(p: &mut Parser) {
+    parse_stmt_or_expr(p);
+}
+
 /// Returns the current token if it is a binary (dyadic) operator.
 fn binary_op(p: &Parser) -> Option<SyntaxKind> {
     let kind = p.current()?;
+    // Operator followed by `[` is functional form (op[args]), not dyadic.
+    // e.g. `@[tab;col;:;val]` is amend, `$[cond;t;f]` is conditional.
+    if p.nth(1) == Some(SyntaxKind::LBracket) {
+        return None;
+    }
     match kind {
         SyntaxKind::Plus
         | SyntaxKind::Minus
@@ -248,15 +363,97 @@ fn binary_op(p: &Parser) -> Option<SyntaxKind> {
         | SyntaxKind::Hash
         | SyntaxKind::Underscore
         | SyntaxKind::Tilde
+        | SyntaxKind::Dollar
         | SyntaxKind::At
         | SyntaxKind::Query
         | SyntaxKind::Dot
         | SyntaxKind::Comma
         | SyntaxKind::Eq
+        | SyntaxKind::NotEq
+        | SyntaxKind::LtEq
+        | SyntaxKind::GtEq
         | SyntaxKind::Lt
-        | SyntaxKind::Gt => Some(kind),
+        | SyntaxKind::Gt
+        | SyntaxKind::CompoundAssign
+        | SyntaxKind::FileOp0
+        | SyntaxKind::FileOp1
+        | SyntaxKind::FileOp2
+        | SyntaxKind::Colon
+        | SyntaxKind::ColonColon => Some(kind),
         _ => None,
     }
+}
+
+/// Returns `true` if we're at a statement/expression boundary (no more RHS to parse).
+fn at_expr_boundary(p: &Parser) -> bool {
+    match p.current() {
+        None => true,
+        Some(k) => matches!(
+            k,
+            SyntaxKind::Semi
+                | SyntaxKind::RBrace
+                | SyntaxKind::RBracket
+                | SyntaxKind::RParen
+        ),
+    }
+}
+
+/// Returns `true` if the current token can start an expression (for juxtaposition).
+/// This includes anything handled by `atom()`.
+fn can_start_expr(p: &Parser) -> bool {
+    matches!(
+        p.current(),
+        Some(
+            // Literals
+            SyntaxKind::Integer
+                | SyntaxKind::Float
+                | SyntaxKind::Boolean
+                | SyntaxKind::String
+                | SyntaxKind::Symbol
+                | SyntaxKind::Date
+                | SyntaxKind::Time
+                | SyntaxKind::Timestamp
+                // Identifiers
+                | SyntaxKind::Ident
+                | SyntaxKind::DottedIdent
+                // Delimiters
+                | SyntaxKind::LParen
+                | SyntaxKind::LBrace
+                // Operators (monadic/functional forms)
+                | SyntaxKind::Minus
+                | SyntaxKind::Plus
+                | SyntaxKind::Star
+                | SyntaxKind::Percent
+                | SyntaxKind::Bang
+                | SyntaxKind::Amp
+                | SyntaxKind::Pipe
+                | SyntaxKind::Caret
+                | SyntaxKind::Hash
+                | SyntaxKind::Underscore
+                | SyntaxKind::Tilde
+                | SyntaxKind::Eq
+                | SyntaxKind::Lt
+                | SyntaxKind::Gt
+                | SyntaxKind::NotEq
+                | SyntaxKind::LtEq
+                | SyntaxKind::GtEq
+                | SyntaxKind::At
+                | SyntaxKind::Query
+                | SyntaxKind::Dot
+                | SyntaxKind::Dollar
+                | SyntaxKind::Colon
+                | SyntaxKind::ColonColon
+                | SyntaxKind::Comma
+                | SyntaxKind::CompoundAssign
+                | SyntaxKind::FileOp0
+                | SyntaxKind::FileOp1
+                | SyntaxKind::FileOp2
+                | SyntaxKind::Each
+                | SyntaxKind::EachPrior
+                | SyntaxKind::EachRight
+                | SyntaxKind::EachLeft
+        )
+    )
 }
 
 /// Returns `true` if the current token is an adverb / iterator.
