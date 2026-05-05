@@ -118,6 +118,55 @@ impl CompletedMarker {
 // Parser
 // ---------------------------------------------------------------------------
 
+/// Collapse multi-line comment blocks into single LineComment tokens.
+/// In q, `/` alone at the start of a line opens a block comment,
+/// and `\` alone at the start of a line closes it.
+fn collapse_block_comments(tokens: &mut Vec<LexedToken>) {
+    let mut i = 0;
+    while i < tokens.len() {
+        // Block comment opener: a LineComment whose text is just `/\n` or `/\r\n`
+        // that appears at the start of a line.
+        let is_opener = tokens[i].kind == SyntaxKind::LineComment
+            && tokens[i].text.trim_end_matches(['\r', '\n']) == "/"
+            && (i == 0
+                || tokens[i - 1].kind == SyntaxKind::Newline
+                || tokens[i - 1].text.ends_with('\n'));
+
+        if is_opener {
+            // Find the matching closer: `\` at start of a line
+            let start = i;
+            let mut j = i + 1;
+            let mut found = false;
+            while j < tokens.len() {
+                if tokens[j].kind == SyntaxKind::Backslash
+                    && j > 0
+                    && (tokens[j - 1].kind == SyntaxKind::Newline
+                        || tokens[j - 1].text.ends_with('\n'))
+                {
+                    found = true;
+                    break;
+                }
+                j += 1;
+            }
+            if found {
+                // Merge tokens[start..=j] into one LineComment
+                let text: String =
+                    tokens[start..=j].iter().map(|t| t.text.as_str()).collect();
+                tokens.splice(
+                    start..=j,
+                    std::iter::once(LexedToken {
+                        kind: SyntaxKind::LineComment,
+                        text,
+                    }),
+                );
+                i = start + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+}
+
 pub struct Parser {
     tokens: Vec<LexedToken>,
     pos: usize,
@@ -161,6 +210,11 @@ impl Parser {
             let ws_text = source[last_end..].to_string();
             tokens.push(LexedToken { kind: SyntaxKind::Whitespace, text: ws_text });
         }
+
+        // Post-process: collapse multi-line comment blocks.
+        // In q, `/` alone at start of a line opens a block comment,
+        // `\` alone at start of a line closes it.
+        collapse_block_comments(&mut tokens);
 
         Self {
             tokens,

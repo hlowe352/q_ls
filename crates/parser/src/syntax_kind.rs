@@ -33,10 +33,17 @@ pub enum SyntaxKind {
     Query,
     At,
     Comma,
+    NotEq,
+    LtEq,
+    GtEq,
     Eq,
     Lt,
     Gt,
     Dot,
+    CompoundAssign,
+    FileOp0,
+    FileOp1,
+    FileOp2,
     ColonColon,
     Colon,
     EachPrior,
@@ -52,6 +59,7 @@ pub enum SyntaxKind {
     Semi,
     Newline,
     LineComment,
+    Shebang,
     Exit,
     SystemCmd,
     Backslash,
@@ -124,6 +132,12 @@ pub enum SyntaxKind {
     Block,
     /// `expr[index]` — index / slice expression.
     IndexExpr,
+    /// `if[cond;expr;...]` — if control word.
+    IfExpr,
+    /// `do[n;expr;...]` — do control word.
+    DoExpr,
+    /// `while[cond;expr;...]` — while control word.
+    WhileExpr,
 
     // -----------------------------------------------------------------------
     // Sentinel — must remain last
@@ -161,10 +175,17 @@ impl SyntaxKind {
             q_lexer::Token::Query       => SyntaxKind::Query,
             q_lexer::Token::At          => SyntaxKind::At,
             q_lexer::Token::Comma       => SyntaxKind::Comma,
+            q_lexer::Token::NotEq       => SyntaxKind::NotEq,
+            q_lexer::Token::LtEq        => SyntaxKind::LtEq,
+            q_lexer::Token::GtEq        => SyntaxKind::GtEq,
             q_lexer::Token::Eq          => SyntaxKind::Eq,
             q_lexer::Token::Lt          => SyntaxKind::Lt,
             q_lexer::Token::Gt          => SyntaxKind::Gt,
             q_lexer::Token::Dot         => SyntaxKind::Dot,
+            q_lexer::Token::CompoundAssign => SyntaxKind::CompoundAssign,
+            q_lexer::Token::FileOp0     => SyntaxKind::FileOp0,
+            q_lexer::Token::FileOp1     => SyntaxKind::FileOp1,
+            q_lexer::Token::FileOp2     => SyntaxKind::FileOp2,
             q_lexer::Token::ColonColon  => SyntaxKind::ColonColon,
             q_lexer::Token::Colon       => SyntaxKind::Colon,
             q_lexer::Token::EachPrior   => SyntaxKind::EachPrior,
@@ -180,6 +201,7 @@ impl SyntaxKind {
             q_lexer::Token::Semi        => SyntaxKind::Semi,
             q_lexer::Token::Newline     => SyntaxKind::Newline,
             q_lexer::Token::LineComment => SyntaxKind::LineComment,
+            q_lexer::Token::Shebang     => SyntaxKind::Shebang,
             q_lexer::Token::Exit        => SyntaxKind::Exit,
             q_lexer::Token::SystemCmd   => SyntaxKind::SystemCmd,
             q_lexer::Token::Backslash   => SyntaxKind::Backslash,
@@ -191,7 +213,7 @@ impl SyntaxKind {
     /// Returns `true` for trivia kinds that are typically skipped by the
     /// parser but preserved in the lossless CST.
     pub fn is_trivia(self) -> bool {
-        matches!(self, SyntaxKind::Whitespace | SyntaxKind::Newline | SyntaxKind::LineComment)
+        matches!(self, SyntaxKind::Whitespace | SyntaxKind::Newline | SyntaxKind::LineComment | SyntaxKind::Shebang)
     }
 }
 
