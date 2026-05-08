@@ -24,8 +24,8 @@ pub enum Token {
     /// Note: negative sign is NOT included here; the parser handles unary minus.
     /// Priority 3 keeps hex above the plain decimal regex (default priority 2).
     #[regex(r"0x[0-9A-Fa-f]+", priority = 4)]  // hex
-    #[regex(r"0N[ijhpuv]", priority = 5)]      // typed nulls (guid/timespan/datetime handled separately; timestamp/minute/second for later)
-    #[regex(r"0W[ijhpuv]", priority = 5)]      // typed infs
+    #[regex(r"0N[ijhp]", priority = 5)]        // typed nulls (guid/timespan/datetime/minute/second handled separately)
+    #[regex(r"0W[ijhp]", priority = 5)]        // typed infs
     #[regex(r"[0-9]+[ijh]?")]                   // plain decimal, optional suffix
     Integer,
 
@@ -67,9 +67,19 @@ pub enum Token {
     #[regex(r"0[NW]z", priority = 6)]
     Datetime,
 
-    /// Time literal: `12:30:00.000`, `0Nt`
+    /// Minute literal: `12:30`, `0Nu`, `0Wu`
+    #[regex(r"0[NW]u", priority = 6)]
+    #[regex(r"[0-9]{2}:[0-9]{2}", priority = 6)]
+    Minute,
+
+    /// Second literal: `12:30:45`, `0Nv`, `0Wv`
+    #[regex(r"0[NW]v", priority = 6)]
+    #[regex(r"[0-9]{2}:[0-9]{2}:[0-9]{2}", priority = 6)]
+    Second,
+
+    /// Time literal: `12:30:45.678`, `0Nt` (requires fractional seconds)
     #[regex(r"0Nt")]
-    #[regex(r"[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?")]
+    #[regex(r"[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]+")]
     Time,
 
     /// String literal: `"hello"`, with escape sequences
@@ -728,16 +738,17 @@ mod tests {
 
     #[test]
     fn lex_temporal_infs() {
-        // 0Wm is Month, 0Wg/0Wn/0Wz are their respective types, the rest are Integer
+        // 0Wm is Month, 0Wg/0Wn/0Wz are their respective types
+        // 0Wu is Minute, 0Wv is Second, 0Wp is Integer
         assert_eq!(Token::lexer("0Wm").next(), Some(Ok(Token::Month)));
         assert_eq!(Token::lexer("0Wg").next(), Some(Ok(Token::Guid)));
         assert_eq!(Token::lexer("0Wn").next(), Some(Ok(Token::Timespan)));
         assert_eq!(Token::lexer("0Wz").next(), Some(Ok(Token::Datetime)));
-        // 0Wp, 0Wu, 0Wv are still Integer (handled in future tasks)
-        for s in ["0Wp", "0Wu", "0Wv"] {
-            let mut lex = Token::lexer(s);
-            assert_eq!(lex.next(), Some(Ok(Token::Integer)), "failed for {}", s);
-        }
+        assert_eq!(Token::lexer("0Wu").next(), Some(Ok(Token::Minute)));
+        assert_eq!(Token::lexer("0Wv").next(), Some(Ok(Token::Second)));
+        // 0Wp is still Integer
+        let mut lex = Token::lexer("0Wp");
+        assert_eq!(lex.next(), Some(Ok(Token::Integer)), "failed for 0Wp");
     }
 
     #[test]
@@ -787,5 +798,24 @@ mod tests {
     fn lex_datetime_literal_typed() {
         assert_eq!(Token::lexer("0Nz").next(), Some(Ok(Token::Datetime)));
         assert_eq!(Token::lexer("0Wz").next(), Some(Ok(Token::Datetime)));
+    }
+
+    #[test]
+    fn lex_minute_literal() {
+        assert_eq!(Token::lexer("12:30").next(), Some(Ok(Token::Minute)));
+        assert_eq!(Token::lexer("0Nu").next(), Some(Ok(Token::Minute)));
+        assert_eq!(Token::lexer("0Wu").next(), Some(Ok(Token::Minute)));
+    }
+
+    #[test]
+    fn lex_second_literal() {
+        assert_eq!(Token::lexer("12:30:45").next(), Some(Ok(Token::Second)));
+        assert_eq!(Token::lexer("0Nv").next(), Some(Ok(Token::Second)));
+        assert_eq!(Token::lexer("0Wv").next(), Some(Ok(Token::Second)));
+    }
+
+    #[test]
+    fn lex_time_keeps_fractional() {
+        assert_eq!(Token::lexer("12:30:45.678").next(), Some(Ok(Token::Time)));
     }
 }
