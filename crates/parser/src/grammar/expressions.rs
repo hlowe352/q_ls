@@ -48,10 +48,15 @@ fn expr_bp(p: &mut Parser, min_bp: u8) {
             p.bump(); // consume operator
             // Only parse RHS if next token can be part of an expression.
             // Otherwise this is a projection (e.g., `1+` or `2*`).
-            if !at_expr_boundary(p) {
+            let had_rhs = if !at_expr_boundary(p) {
+                let before = p.events.len();
                 expr_bp(p, r_bp);
-            }
-            lhs = m.complete(p, SyntaxKind::BinExpr);
+                p.events.len() > before
+            } else {
+                false
+            };
+            let kind = if had_rhs { SyntaxKind::BinExpr } else { SyntaxKind::InfixProjection };
+            lhs = m.complete(p, kind);
             continue;
         }
 
@@ -491,6 +496,24 @@ fn is_adverb(p: &Parser) -> bool {
                 | SyntaxKind::EachLeft
         )
     )
+}
+
+#[cfg(test)]
+mod infix_projection_tests {
+    #[test]
+    fn parse_infix_projection() {
+        let parse = crate::parse("1+");
+        let dump = format!("{:#?}", parse.syntax());
+        assert!(dump.contains("InfixProjection"), "got:\n{dump}");
+    }
+
+    #[test]
+    fn parse_full_binary_still_binexpr() {
+        let parse = crate::parse("1+2");
+        let dump = format!("{:#?}", parse.syntax());
+        assert!(dump.contains("BinExpr"), "got:\n{dump}");
+        assert!(!dump.contains("InfixProjection"), "got:\n{dump}");
+    }
 }
 
 #[cfg(test)]
