@@ -1,4 +1,5 @@
 pub mod expressions;
+pub mod keywords;
 pub mod qsql;
 
 use crate::parser::Parser;
