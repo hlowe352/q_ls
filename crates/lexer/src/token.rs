@@ -19,11 +19,11 @@ pub enum Token {
     /// Integer literal (long/int/short/byte suffixes, hex, special nulls/infs)
     ///
     /// Covers: `42`, `42i`, `42j`, `42h`, `0x2A`, `0Ni`, `0Wi`, `-0Wi`,
-    ///         `0Nj`, `0Wj`, `0Nh`, `0Wh`, `0x[0-9A-Fa-f]+`
+    ///         `0Nj`, `0Wj`, `0Nh`, `0Wh`, `0x[0-9A-Fa-f]{1,3}`
     ///
     /// Note: negative sign is NOT included here; the parser handles unary minus.
     /// Priority 3 keeps hex above the plain decimal regex (default priority 2).
-    #[regex(r"0x[0-9A-Fa-f]+", priority = 4)]  // hex
+    #[regex(r"0x[0-9A-Fa-f]{1,3}", priority = 4)]  // hex (1-3 digits)
     #[regex(r"0N[ijhp]", priority = 5)]        // typed nulls (guid/timespan/datetime/minute/second handled separately)
     #[regex(r"0W[ijhp]", priority = 5)]        // typed infs
     #[regex(r"[0-9]+[ijh]?")]                   // plain decimal, optional suffix
@@ -81,6 +81,10 @@ pub enum Token {
     #[regex(r"0Nt")]
     #[regex(r"[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]+")]
     Time,
+
+    /// Byte list literal: `0xABCD`, `0x0011...` (4+ hex chars)
+    #[regex(r"0x[0-9A-Fa-f]{4,}", priority = 6)]
+    ByteList,
 
     /// String literal: `"hello"`, with escape sequences
     #[regex(r#""([^"\\]|\\.)*""#)]
@@ -817,5 +821,16 @@ mod tests {
     #[test]
     fn lex_time_keeps_fractional() {
         assert_eq!(Token::lexer("12:30:45.678").next(), Some(Ok(Token::Time)));
+    }
+
+    #[test]
+    fn lex_byte_list() {
+        assert_eq!(Token::lexer("0xABCD").next(), Some(Ok(Token::ByteList)));
+        assert_eq!(Token::lexer("0x0011223344").next(), Some(Ok(Token::ByteList)));
+    }
+
+    #[test]
+    fn lex_single_byte_stays_integer() {
+        assert_eq!(Token::lexer("0xAB").next(), Some(Ok(Token::Integer)));
     }
 }
