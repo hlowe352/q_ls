@@ -72,7 +72,8 @@ fn expr_bp(p: &mut Parser, min_bp: u8) {
         // Juxtaposition: `f x` — implicit function application.
         // If the next token can start an expression (atom), treat it as
         // applying `lhs` to the next expression.
-        if can_start_expr(p) {
+        // However, don't parse juxtaposition across a newline; that terminates the statement.
+        if can_start_expr(p) && !p.has_preceding_newline() {
             let (l_bp, r_bp) = (1u8, 0u8);
             if l_bp < min_bp {
                 break;

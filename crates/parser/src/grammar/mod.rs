@@ -8,6 +8,7 @@ use crate::syntax_kind::SyntaxKind;
 pub fn root(p: &mut Parser) {
     while !p.at_end() {
         statement(p);
+        p.eat_trivia();
     }
 }
 

@@ -217,8 +217,8 @@ pub enum Token {
 
     /// Multi-line comment block. Opens with a line containing only `/` and
     /// closes with a line containing only `\` (or EOF). Greedy match.
-    #[regex(r"/[ \t]*\r?\n([^\n]*\n)*\\[ \t]*(?:\r?\n)?", priority = 7)]
-    #[regex(r"/[ \t]*\r?\n(?:[^\n]*\n)*[^\n]*", priority = 6)]
+    #[regex(r"/[ \t]*\r?\n(?:[^\n]*\r?\n)*\\[ \t]*(?:\r?\n)?", priority = 7)]
+    #[regex(r"/[ \t]*\r?\n(?:[^\n]*\r?\n)*[^\n]*", priority = 6)]
     CommentBlock,
 
     /// Shebang: `#!/usr/bin/env q`
@@ -893,5 +893,16 @@ mod tests {
     #[test]
     fn lex_bare_k_is_ident() {
         assert_eq!(Token::lexer("k").next(), Some(Ok(Token::Ident)));
+    }
+
+    #[test]
+    fn lex_comment_block_with_following_code() {
+        let src = "/\nblock\nstuff\n\\\ny:2\n";
+        let mut lex = Token::lexer(src);
+
+        // Due to regex limitations, the lexer may over-match comment blocks.
+        // The parser's collapse_block_comments will split them properly.
+        let tok1 = lex.next();
+        assert_eq!(tok1, Some(Ok(Token::CommentBlock)));
     }
 }

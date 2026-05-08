@@ -122,45 +122,89 @@ impl CompletedMarker {
 /// In q, `/` alone at the start of a line opens a block comment,
 /// and `\` alone at the start of a line closes it.
 fn collapse_block_comments(tokens: &mut Vec<LexedToken>) {
+    // The lexer generates CommentBlock tokens, but due to regex limitations in logos,
+    // they may over-match content after the closing backslash. This function splits
+    // such over-matched tokens by finding the line with only a closing backslash.
+    //
+    // A closing line is: optional whitespace, then `\`, then optional whitespace, then EOL.
     let mut i = 0;
     while i < tokens.len() {
-        // Block comment opener: a LineComment whose text is just `/\n` or `/\r\n`
-        // that appears at the start of a line.
-        let is_opener = tokens[i].kind == SyntaxKind::LineComment
-            && tokens[i].text.trim_end_matches(['\r', '\n']) == "/"
-            && (i == 0
-                || tokens[i - 1].kind == SyntaxKind::Newline
-                || tokens[i - 1].text.ends_with('\n'));
+        if tokens[i].kind == SyntaxKind::CommentBlock {
+            let text = tokens[i].text.clone();
 
-        if is_opener {
-            // Find the matching closer: `\` at start of a line
-            let start = i;
-            let mut j = i + 1;
-            let mut found = false;
-            while j < tokens.len() {
-                if tokens[j].kind == SyntaxKind::Backslash
-                    && j > 0
-                    && (tokens[j - 1].kind == SyntaxKind::Newline
-                        || tokens[j - 1].text.ends_with('\n'))
-                {
-                    found = true;
+            // Find the byte position where the closing backslash line ends
+            let lines: Vec<&str> = text.split('\n').collect();
+
+            // Closing line must be at position > 0 (after opening /)
+            for (idx, line) in lines.iter().enumerate() {
+                let trimmed = line.trim();
+
+                // Check if this is a closing backslash line
+                if trimmed == "\\" && idx > 0 {
+                    // Found the closing line; calculate the byte position of its end
+                    let mut line_end_pos = 0;
+                    for (j, l) in lines[..=idx].iter().enumerate() {
+                        line_end_pos += l.len();
+                        if j < idx {
+                            line_end_pos += 1; // +1 for '\n'
+                        }
+                    }
+                    // Add 1 for the final newline if it exists
+                    if line_end_pos < text.len() {
+                        line_end_pos += 1;
+                    }
+
+                    // Check if there's content after the closing line
+                    if line_end_pos < text.len() {
+                        // Split the token
+                        let comment_part = text[..line_end_pos].to_string();
+                        let remaining_part = text[line_end_pos..].to_string();
+
+                        // Replace with just the comment
+                        tokens[i].text = comment_part;
+
+                        // Re-tokenize the remaining part
+                        let mut remaining_tokens = Vec::new();
+                        let mut remaining_lexer = q_lexer::Token::lexer(&remaining_part);
+                        let mut remaining_last_end: usize = 0;
+
+                        while let Some(result) = remaining_lexer.next() {
+                            let span = remaining_lexer.span();
+
+                            // Insert whitespace if there's a gap
+                            if span.start > remaining_last_end {
+                                let ws_text = remaining_part[remaining_last_end..span.start].to_string();
+                                remaining_tokens.push(LexedToken {
+                                    kind: SyntaxKind::Whitespace,
+                                    text: ws_text,
+                                });
+                            }
+
+                            let kind = match result {
+                                Ok(tok) => SyntaxKind::from_token(tok),
+                                Err(_) => SyntaxKind::Error,
+                            };
+                            let text = remaining_part[span.clone()].to_string();
+                            remaining_tokens.push(LexedToken { kind, text });
+                            remaining_last_end = span.end;
+                        }
+
+                        // Insert trailing whitespace if any
+                        if remaining_last_end < remaining_part.len() {
+                            let ws_text = remaining_part[remaining_last_end..].to_string();
+                            remaining_tokens.push(LexedToken {
+                                kind: SyntaxKind::Whitespace,
+                                text: ws_text,
+                            });
+                        }
+
+                        // Insert the remaining tokens after the current position
+                        for (j, tok) in remaining_tokens.into_iter().enumerate() {
+                            tokens.insert(i + 1 + j, tok);
+                        }
+                    }
                     break;
                 }
-                j += 1;
-            }
-            if found {
-                // Merge tokens[start..=j] into one LineComment
-                let text: String =
-                    tokens[start..=j].iter().map(|t| t.text.as_str()).collect();
-                tokens.splice(
-                    start..=j,
-                    std::iter::once(LexedToken {
-                        kind: SyntaxKind::LineComment,
-                        text,
-                    }),
-                );
-                i = start + 1;
-                continue;
             }
         }
         i += 1;
@@ -287,6 +331,19 @@ impl Parser {
     /// Returns `true` when there are no more non-trivia tokens.
     pub fn at_end(&self) -> bool {
         self.current().is_none()
+    }
+
+    /// Returns `true` if there's a newline between current position and next non-trivia token.
+    pub fn has_preceding_newline(&self) -> bool {
+        for i in self.pos..self.tokens.len() {
+            if self.tokens[i].kind == SyntaxKind::Newline {
+                return true;
+            }
+            if !self.tokens[i].kind.is_trivia() {
+                return false;
+            }
+        }
+        false
     }
 
     // -----------------------------------------------------------------------

@@ -886,4 +886,18 @@ show q1b[];
         assert!(parse.errors.is_empty(), "errors: {:?}", parse.errors);
         assert_eq!(parse.syntax().text().to_string(), source);
     }
+
+    // -----------------------------------------------------------------------
+    // Comment blocks
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_with_comment_block_between_stmts() {
+        let src = "x:1\n/\nblock\nstuff\n\\\ny:2\n";
+        let parse = parse(src);
+        let dump = format!("{:#?}", parse.syntax());
+        let count = dump.matches("ExprStmt").count();
+        assert!(count >= 2, "expected ≥2 stmts, got:\n{dump}");
+        assert!(parse.errors.is_empty(), "errors: {:?}", parse.errors);
+    }
 }
