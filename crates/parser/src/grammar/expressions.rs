@@ -140,6 +140,28 @@ fn atom(p: &mut Parser) -> Option<CompletedMarker> {
             Some(m.complete(p, SyntaxKind::IdentExpr))
         }
 
+        // Each (`'`) — special-cased before the generic unary block.
+        // Three distinct forms:
+        //   '[f;g]   → Composition (bracket form)
+        //   'expr    → SignalExpr  (signal/error with operand)
+        //   bare '   → UnaryExpr  (no operand, e.g. used as postfix adverb)
+        SyntaxKind::Each => {
+            let m = p.start();
+            p.bump(); // consume '
+            if p.at(SyntaxKind::LBracket) {
+                // '[f;g] form — composition
+                parse_arg_list(p);
+                Some(m.complete(p, SyntaxKind::Composition))
+            } else if !is_adverb(p) && !at_expr_boundary(p) {
+                // Has an operand — this is a signal/error expression
+                expr_bp(p, 100);
+                Some(m.complete(p, SyntaxKind::SignalExpr))
+            } else {
+                // Bare `'` (no operand, or followed by another adverb)
+                Some(m.complete(p, SyntaxKind::UnaryExpr))
+            }
+        }
+
         // Monadic (unary prefix) operators — consume and parse their operand
         // with high bp so they bind tightly.
         //
@@ -175,7 +197,6 @@ fn atom(p: &mut Parser) -> Option<CompletedMarker> {
         | SyntaxKind::FileOp0
         | SyntaxKind::FileOp1
         | SyntaxKind::FileOp2
-        | SyntaxKind::Each
         | SyntaxKind::EachPrior
         | SyntaxKind::EachRight
         | SyntaxKind::EachLeft => {
@@ -183,7 +204,7 @@ fn atom(p: &mut Parser) -> Option<CompletedMarker> {
             p.bump();
             // Don't consume operand if:
             // - followed by adverb (e.g. `+/x` — let postfix handle it)
-            // - followed by `[` (e.g. `'[f;g]` — let postfix indexing handle it)
+            // - followed by `[` (e.g. operator[args] — functional form handled by caller)
             // - at expression boundary (e.g. `1+;` — projection)
             if !is_adverb(p)
                 && !at_expr_boundary(p)
@@ -536,6 +557,23 @@ mod infix_projection_tests {
         let parse = crate::parse("a +/: b");
         let dump = format!("{:#?}", parse.syntax());
         assert!(dump.contains("InfixModExpr"), "got:\n{dump}");
+    }
+}
+
+#[cfg(test)]
+mod composition_signal_tests {
+    #[test]
+    fn parse_composition_bracket_form() {
+        let parse = crate::parse("'[f;g]");
+        let dump = format!("{:#?}", parse.syntax());
+        assert!(dump.contains("Composition"), "got:\n{dump}");
+    }
+
+    #[test]
+    fn parse_signal_expr() {
+        let parse = crate::parse("'`err");
+        let dump = format!("{:#?}", parse.syntax());
+        assert!(dump.contains("SignalExpr"), "got:\n{dump}");
     }
 }
 
