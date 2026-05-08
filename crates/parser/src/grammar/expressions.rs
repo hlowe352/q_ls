@@ -412,6 +412,13 @@ fn binary_op(p: &Parser) -> Option<SyntaxKind> {
     if p.nth(1) == Some(SyntaxKind::LBracket) {
         return None;
     }
+    // Builtin infix verbs: `x mmu y`, `a in b`, `t lj u`, etc.
+    if kind == SyntaxKind::Ident
+        && let Some(t) = p.current_text()
+        && super::keywords::is_builtin_infix(&t)
+    {
+        return Some(SyntaxKind::Ident);
+    }
     match kind {
         SyntaxKind::Plus
         | SyntaxKind::Minus
@@ -662,5 +669,26 @@ mod namespace_tests {
         let parse = parse("{:42}");
         let dump = format!("{:#?}", parse.syntax());
         assert!(dump.contains("ReturnExpr"), "got:\n{dump}");
+    }
+}
+
+#[cfg(test)]
+mod builtin_infix_tests {
+    use crate::parse;
+
+    #[test]
+    fn parse_keyword_as_binary() {
+        for src in ["x mmu y", "a in b", "1 within 2", "t lj u"] {
+            let parse = parse(src);
+            let dump = format!("{:#?}", parse.syntax());
+            assert!(dump.contains("BinExpr"), "{src} → no BinExpr:\n{dump}");
+        }
+    }
+
+    #[test]
+    fn parse_keyword_as_atom_when_alone() {
+        let parse = parse("mmu");
+        let dump = format!("{:#?}", parse.syntax());
+        assert!(dump.contains("IdentExpr"), "got:\n{dump}");
     }
 }
