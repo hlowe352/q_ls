@@ -83,9 +83,17 @@ fn atom(p: &mut Parser) -> Option<CompletedMarker> {
         | SyntaxKind::Boolean
         | SyntaxKind::String
         | SyntaxKind::Symbol
+        | SyntaxKind::FileSymbol
         | SyntaxKind::Date
+        | SyntaxKind::Month
+        | SyntaxKind::Guid
+        | SyntaxKind::Timespan
+        | SyntaxKind::Datetime
+        | SyntaxKind::Minute
+        | SyntaxKind::Second
         | SyntaxKind::Time
-        | SyntaxKind::Timestamp => {
+        | SyntaxKind::Timestamp
+        | SyntaxKind::ByteList => {
             let m = p.start();
             p.bump();
             Some(m.complete(p, SyntaxKind::LiteralExpr))
@@ -410,9 +418,17 @@ fn can_start_expr(p: &Parser) -> bool {
                 | SyntaxKind::Boolean
                 | SyntaxKind::String
                 | SyntaxKind::Symbol
+                | SyntaxKind::FileSymbol
                 | SyntaxKind::Date
+                | SyntaxKind::Month
+                | SyntaxKind::Guid
+                | SyntaxKind::Timespan
+                | SyntaxKind::Datetime
+                | SyntaxKind::Minute
+                | SyntaxKind::Second
                 | SyntaxKind::Time
                 | SyntaxKind::Timestamp
+                | SyntaxKind::ByteList
                 // Identifiers
                 | SyntaxKind::Ident
                 | SyntaxKind::DottedIdent

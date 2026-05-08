@@ -13,9 +13,17 @@ pub enum SyntaxKind {
     Float,
     Timestamp,
     Date,
+    Month,
+    Guid,
+    Timespan,
+    Datetime,
+    Minute,
+    Second,
     Time,
+    ByteList,
     String,
     Symbol,
+    FileSymbol,
     DottedIdent,
     Ident,
     Plus,
@@ -64,6 +72,8 @@ pub enum SyntaxKind {
     SystemCmd,
     Backslash,
     Slash,
+    CommentBlock,
+    DslLine,
     Error,
 
     // -----------------------------------------------------------------------
@@ -155,9 +165,17 @@ impl SyntaxKind {
             q_lexer::Token::Float       => SyntaxKind::Float,
             q_lexer::Token::Timestamp   => SyntaxKind::Timestamp,
             q_lexer::Token::Date        => SyntaxKind::Date,
+            q_lexer::Token::Month       => SyntaxKind::Month,
+            q_lexer::Token::Guid        => SyntaxKind::Guid,
+            q_lexer::Token::Timespan    => SyntaxKind::Timespan,
+            q_lexer::Token::Datetime    => SyntaxKind::Datetime,
+            q_lexer::Token::Minute      => SyntaxKind::Minute,
+            q_lexer::Token::Second      => SyntaxKind::Second,
             q_lexer::Token::Time        => SyntaxKind::Time,
+            q_lexer::Token::ByteList    => SyntaxKind::ByteList,
             q_lexer::Token::String      => SyntaxKind::String,
             q_lexer::Token::Symbol      => SyntaxKind::Symbol,
+            q_lexer::Token::FileSymbol  => SyntaxKind::FileSymbol,
             q_lexer::Token::DottedIdent => SyntaxKind::DottedIdent,
             q_lexer::Token::Ident       => SyntaxKind::Ident,
             q_lexer::Token::Plus        => SyntaxKind::Plus,
@@ -206,6 +224,8 @@ impl SyntaxKind {
             q_lexer::Token::SystemCmd   => SyntaxKind::SystemCmd,
             q_lexer::Token::Backslash   => SyntaxKind::Backslash,
             q_lexer::Token::Slash       => SyntaxKind::Slash,
+            q_lexer::Token::CommentBlock => SyntaxKind::CommentBlock,
+            q_lexer::Token::DslLine     => SyntaxKind::DslLine,
             q_lexer::Token::Error       => SyntaxKind::Error,
         }
     }
@@ -213,7 +233,7 @@ impl SyntaxKind {
     /// Returns `true` for trivia kinds that are typically skipped by the
     /// parser but preserved in the lossless CST.
     pub fn is_trivia(self) -> bool {
-        matches!(self, SyntaxKind::Whitespace | SyntaxKind::Newline | SyntaxKind::LineComment | SyntaxKind::Shebang)
+        matches!(self, SyntaxKind::Whitespace | SyntaxKind::Newline | SyntaxKind::LineComment | SyntaxKind::Shebang | SyntaxKind::CommentBlock)
     }
 }
 

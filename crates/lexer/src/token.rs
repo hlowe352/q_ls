@@ -90,11 +90,13 @@ pub enum Token {
     #[regex(r#""([^"\\]|\\.)*""#)]
     String,
 
+    /// File handle symbol: `` `:path/to/file ``, `` `:host:port ``
+    #[regex(r"`:[^\s;)\]},]*", priority = 4)]
+    FileSymbol,
+
     /// Symbol literal: `` `sym ``, `` `a.b ``, `` ` `` (null symbol)
-    /// File handles: `` `:q1a.txt ``, `` `:/path/to/file ``, `` `:host:5001 ``
-    #[regex(r"`:[^\s;)\]},]*", priority = 3)] // file handle / connection symbol
-    #[regex(r"`[a-zA-Z_.][a-zA-Z0-9_.]*")]   // named symbol
-    #[token("`")]                              // null symbol (lone backtick)
+    #[regex(r"`[a-zA-Z_.][a-zA-Z0-9_.]*", priority = 3)]
+    #[token("`")]
     Symbol,
 
     // -----------------------------------------------------------------------
@@ -681,9 +683,18 @@ mod tests {
     }
 
     #[test]
+    fn lex_file_symbol_split() {
+        assert_eq!(Token::lexer("`:data.csv").next(), Some(Ok(Token::FileSymbol)));
+        assert_eq!(Token::lexer("`:/abs/path").next(), Some(Ok(Token::FileSymbol)));
+        assert_eq!(Token::lexer("`:host:5001").next(), Some(Ok(Token::FileSymbol)));
+        assert_eq!(Token::lexer("`hello").next(), Some(Ok(Token::Symbol)));
+        assert_eq!(Token::lexer("`").next(), Some(Ok(Token::Symbol)));
+    }
+
+    #[test]
     fn lex_file_handle_symbol() {
         let mut lex = Token::lexer("`:data.csv");
-        assert_eq!(lex.next(), Some(Ok(Token::Symbol)));
+        assert_eq!(lex.next(), Some(Ok(Token::FileSymbol)));
         assert_eq!(lex.slice(), "`:data.csv");
     }
 
