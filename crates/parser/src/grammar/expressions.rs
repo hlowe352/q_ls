@@ -247,10 +247,13 @@ fn atom(p: &mut Parser) -> Option<CompletedMarker> {
         SyntaxKind::Colon => {
             let m = p.start();
             p.bump();
-            if !at_expr_boundary(p) && p.current() != Some(SyntaxKind::LBracket) {
+            let kind = if !at_expr_boundary(p) && p.current() != Some(SyntaxKind::LBracket) {
                 expr_bp(p, 100);
-            }
-            Some(m.complete(p, SyntaxKind::UnaryExpr))
+                SyntaxKind::ReturnExpr
+            } else {
+                SyntaxKind::UnaryExpr
+            };
+            Some(m.complete(p, kind))
         }
 
         _ => {
@@ -630,5 +633,12 @@ mod namespace_tests {
         let parse = parse(".q.func");
         let dump = format!("{:#?}", parse.syntax());
         assert!(!dump.contains("Namespace"), "should not be Namespace:\n{dump}");
+    }
+
+    #[test]
+    fn parse_return_expr() {
+        let parse = parse("{:42}");
+        let dump = format!("{:#?}", parse.syntax());
+        assert!(dump.contains("ReturnExpr"), "got:\n{dump}");
     }
 }
