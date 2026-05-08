@@ -46,6 +46,11 @@ fn expr_bp(p: &mut Parser, min_bp: u8) {
 
             let m = lhs.precede(p);
             p.bump(); // consume operator
+            let mut decorated = false;
+            if is_adverb(p) {
+                p.bump(); // adverb modifier
+                decorated = true;
+            }
             // Only parse RHS if next token can be part of an expression.
             // Otherwise this is a projection (e.g., `1+` or `2*`).
             let had_rhs = if !at_expr_boundary(p) {
@@ -55,7 +60,11 @@ fn expr_bp(p: &mut Parser, min_bp: u8) {
             } else {
                 false
             };
-            let kind = if had_rhs { SyntaxKind::BinExpr } else { SyntaxKind::InfixProjection };
+            let kind = match (decorated, had_rhs) {
+                (true, _)      => SyntaxKind::InfixModExpr,
+                (false, true)  => SyntaxKind::BinExpr,
+                (false, false) => SyntaxKind::InfixProjection,
+            };
             lhs = m.complete(p, kind);
             continue;
         }
@@ -513,6 +522,20 @@ mod infix_projection_tests {
         let dump = format!("{:#?}", parse.syntax());
         assert!(dump.contains("BinExpr"), "got:\n{dump}");
         assert!(!dump.contains("InfixProjection"), "got:\n{dump}");
+    }
+
+    #[test]
+    fn parse_infix_mod_each() {
+        let parse = crate::parse("a +' b");
+        let dump = format!("{:#?}", parse.syntax());
+        assert!(dump.contains("InfixModExpr"), "got:\n{dump}");
+    }
+
+    #[test]
+    fn parse_infix_mod_each_right() {
+        let parse = crate::parse("a +/: b");
+        let dump = format!("{:#?}", parse.syntax());
+        assert!(dump.contains("InfixModExpr"), "got:\n{dump}");
     }
 }
 
