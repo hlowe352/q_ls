@@ -204,10 +204,16 @@ pub enum Token {
     /// Line comment: `/ comment text` (slash followed by space or end-of-line)
     /// Also covers full-line comments that begin with `/` or `//`.
     /// The lexer emits the entire comment (including the leading `/`) as one token.
-    #[regex(r"//[^\r\n]*")]           // `//` style comment
-    #[regex(r"/[^\S\r\n][^\r\n]*")]   // `/ ` followed by rest of line
-    #[regex(r"/\r?\n")]               // bare `/` at end of line
+    #[regex(r"//[^\r\n]*", priority = 8)]           // `//` style comment
+    #[regex(r"/[^\S\r\n][^\r\n]*", priority = 8)]   // `/ ` followed by rest of line
+    #[regex(r"/\r?\n", priority = 8)]               // bare `/` at end of line
     LineComment,
+
+    /// Multi-line comment block. Opens with a line containing only `/` and
+    /// closes with a line containing only `\` (or EOF). Greedy match.
+    #[regex(r"/[ \t]*\r?\n([^\n]*\n)*\\[ \t]*(?:\r?\n)?", priority = 7)]
+    #[regex(r"/[ \t]*\r?\n(?:[^\n]*\n)*[^\n]*", priority = 6)]
+    CommentBlock,
 
     /// Shebang: `#!/usr/bin/env q`
     #[regex(r"#![^\r\n]*")]
@@ -832,5 +838,19 @@ mod tests {
     #[test]
     fn lex_single_byte_stays_integer() {
         assert_eq!(Token::lexer("0xAB").next(), Some(Ok(Token::Integer)));
+    }
+
+    #[test]
+    fn lex_comment_block_closed() {
+        let src = "/\nthis is\nblock comment\n\\\n";
+        let mut lex = Token::lexer(src);
+        assert_eq!(lex.next(), Some(Ok(Token::CommentBlock)));
+    }
+
+    #[test]
+    fn lex_comment_block_terminal() {
+        let src = "/\nuntil end of file";
+        let mut lex = Token::lexer(src);
+        assert_eq!(lex.next(), Some(Ok(Token::CommentBlock)));
     }
 }
