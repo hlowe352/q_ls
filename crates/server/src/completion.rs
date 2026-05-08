@@ -208,7 +208,7 @@ pub fn complete(doc: &Document, pos: Position) -> Vec<CompletionItem> {
     for element in doc.parse().syntax().descendants_with_tokens() {
         if let Some(token) = element.as_token() {
             let kind = token.kind();
-            if kind == SyntaxKind::Ident || kind == SyntaxKind::DottedIdent {
+            if kind == SyntaxKind::Ident || kind == SyntaxKind::DottedIdent || kind == SyntaxKind::Namespace {
                 let text = token.text().to_string();
                 if text.starts_with(prefix.as_str()) && !seen.contains(&text) {
                     seen.insert(text.clone());
