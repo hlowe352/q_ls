@@ -135,9 +135,15 @@ fn atom(p: &mut Parser) -> Option<CompletedMarker> {
                     return parse_control_word(p, sk);
                 }
             }
+            let bare_ns = kind == SyntaxKind::DottedIdent
+                && p.current_text()
+                    .map(|t| t.matches('.').count() == 1)
+                    .unwrap_or(false);
+
             let m = p.start();
             p.bump();
-            Some(m.complete(p, SyntaxKind::IdentExpr))
+            let node_kind = if bare_ns { SyntaxKind::Namespace } else { SyntaxKind::IdentExpr };
+            Some(m.complete(p, node_kind))
         }
 
         // Each (`'`) — special-cased before the generic unary block.
@@ -605,5 +611,24 @@ mod literal_tests {
         let dump = format!("{:#?}", parse.syntax());
         assert!(dump.contains("FileSymbolExpr"), "got:\n{dump}");
         assert!(!dump.contains("LiteralExpr"), "should not be LiteralExpr:\n{dump}");
+    }
+}
+
+#[cfg(test)]
+mod namespace_tests {
+    use crate::parse;
+
+    #[test]
+    fn parse_bare_namespace() {
+        let parse = parse(".q");
+        let dump = format!("{:#?}", parse.syntax());
+        assert!(dump.contains("Namespace"), "got:\n{dump}");
+    }
+
+    #[test]
+    fn parse_dotted_member_remains_dotted() {
+        let parse = parse(".q.func");
+        let dump = format!("{:#?}", parse.syntax());
+        assert!(!dump.contains("Namespace"), "should not be Namespace:\n{dump}");
     }
 }
