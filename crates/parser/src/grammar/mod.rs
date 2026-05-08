@@ -21,6 +21,14 @@ pub fn statement(p: &mut Parser) {
         return;
     }
 
+    // DSL statement (k) or p) lines)
+    if p.at(SyntaxKind::DslLine) {
+        let m = p.start();
+        p.bump();
+        m.complete(p, SyntaxKind::DslStmt);
+        return;
+    }
+
     // System command
     if p.at(SyntaxKind::SystemCmd) || p.at(SyntaxKind::Exit) {
         let m = p.start();
@@ -41,4 +49,23 @@ pub fn statement(p: &mut Parser) {
     let m = p.start();
     expressions::expr(p);
     m.complete(p, SyntaxKind::ExprStmt);
+}
+
+#[cfg(test)]
+mod dsl_tests {
+    use crate::parse;
+
+    #[test]
+    fn parse_dsl_k_stmt() {
+        let parse = parse("k)1+2");
+        let dump = format!("{:#?}", parse.syntax());
+        assert!(dump.contains("DslStmt"), "got:\n{dump}");
+    }
+
+    #[test]
+    fn parse_dsl_p_stmt() {
+        let parse = parse("p)select * from t");
+        let dump = format!("{:#?}", parse.syntax());
+        assert!(dump.contains("DslStmt"), "got:\n{dump}");
+    }
 }
