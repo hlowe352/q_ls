@@ -281,7 +281,9 @@ fn parse_paren(p: &mut Parser) -> Option<CompletedMarker> {
             p.bump(); // ]
         } else {
             // Keyed table: ([key:val;...] col:val; ...)
+            let km = p.start();
             parse_arg_list(p);
+            km.complete(p, SyntaxKind::TableKeys);
         }
         while !p.at(SyntaxKind::RParen) && !p.at_end() {
             parse_list_entry(p);
@@ -614,6 +616,25 @@ mod literal_tests {
         let dump = format!("{:#?}", parse.syntax());
         assert!(dump.contains("FileSymbolExpr"), "got:\n{dump}");
         assert!(!dump.contains("LiteralExpr"), "should not be LiteralExpr:\n{dump}");
+    }
+}
+
+#[cfg(test)]
+mod table_keys_tests {
+    #[test]
+    fn parse_keyed_table() {
+        let parse = crate::parse("([k:1 2] v:3 4)");
+        let dump = format!("{:#?}", parse.syntax());
+        assert!(dump.contains("TableExpr"), "got:\n{dump}");
+        assert!(dump.contains("TableKeys"), "got:\n{dump}");
+    }
+
+    #[test]
+    fn parse_unkeyed_table_no_table_keys() {
+        let parse = crate::parse("([] v:3 4)");
+        let dump = format!("{:#?}", parse.syntax());
+        assert!(dump.contains("TableExpr"), "got:\n{dump}");
+        assert!(!dump.contains("TableKeys"), "should not have TableKeys:\n{dump}");
     }
 }
 
