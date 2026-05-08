@@ -101,6 +101,10 @@ pub enum Token {
     // Identifiers
     // -----------------------------------------------------------------------
 
+    /// DSL escape line: `k)expr` or `p)expr`. Entire line is opaque.
+    #[regex(r"[kp]\)[^\r\n]*", priority = 5)]
+    DslLine,
+
     /// Dotted/namespaced identifier starting with dot: `.q.func`, `.Q.en`, `.z.ts`, `.d`
     #[regex(r"\.[a-zA-Z][a-zA-Z0-9]*(\.[a-zA-Z][a-zA-Z0-9]*)*")]
     DottedIdent,
@@ -852,5 +856,31 @@ mod tests {
         let src = "/\nuntil end of file";
         let mut lex = Token::lexer(src);
         assert_eq!(lex.next(), Some(Ok(Token::CommentBlock)));
+    }
+
+    #[test]
+    fn lex_dsl_k_line() {
+        let mut lex = Token::lexer("k)1+2");
+        assert_eq!(lex.next(), Some(Ok(Token::DslLine)));
+        assert_eq!(lex.slice(), "k)1+2");
+    }
+
+    #[test]
+    fn lex_dsl_p_line() {
+        let mut lex = Token::lexer("p)select * from t");
+        assert_eq!(lex.next(), Some(Ok(Token::DslLine)));
+    }
+
+    #[test]
+    fn lex_dsl_stops_at_newline() {
+        let mut lex = Token::lexer("k)foo\nbar");
+        assert_eq!(lex.next(), Some(Ok(Token::DslLine)));
+        assert_eq!(lex.slice(), "k)foo");
+        assert_eq!(lex.next(), Some(Ok(Token::Newline)));
+    }
+
+    #[test]
+    fn lex_bare_k_is_ident() {
+        assert_eq!(Token::lexer("k").next(), Some(Ok(Token::Ident)));
     }
 }
