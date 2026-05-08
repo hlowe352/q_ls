@@ -24,8 +24,8 @@ pub enum Token {
     /// Note: negative sign is NOT included here; the parser handles unary minus.
     /// Priority 3 keeps hex above the plain decimal regex (default priority 2).
     #[regex(r"0x[0-9A-Fa-f]+", priority = 4)]  // hex
-    #[regex(r"0N[ijhgnpuvz]", priority = 5)]    // typed nulls (remaining: guid/timespan/timestamp/minute/second/datetime)
-    #[regex(r"0W[ijhgnpuvz]", priority = 5)]    // typed infs
+    #[regex(r"0N[ijhpuv]", priority = 5)]      // typed nulls (guid/timespan/datetime handled separately; timestamp/minute/second for later)
+    #[regex(r"0W[ijhpuv]", priority = 5)]      // typed infs
     #[regex(r"[0-9]+[ijh]?")]                   // plain decimal, optional suffix
     Integer,
 
@@ -53,6 +53,19 @@ pub enum Token {
     #[regex(r"0[NW]m", priority = 6)]
     #[regex(r"[0-9]{4}\.(0[1-9]|1[0-2])m", priority = 6)]
     Month,
+
+    /// Guid literal: `0Ng`, `0Wg`
+    #[regex(r"0[NW]g", priority = 6)]
+    Guid,
+
+    /// Timespan literal: `0D00:00:00.000000000`, `0Nn`, `0Wn`
+    #[regex(r"0[NW]n", priority = 6)]
+    #[regex(r"[0-9]+D[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?", priority = 6)]
+    Timespan,
+
+    /// Datetime literal: `0Nz`, `0Wz`
+    #[regex(r"0[NW]z", priority = 6)]
+    Datetime,
 
     /// Time literal: `12:30:00.000`, `0Nt`
     #[regex(r"0Nt")]
@@ -695,14 +708,14 @@ mod tests {
     #[test]
     fn lex_guid_null() {
         let mut lex = Token::lexer("0Ng");
-        assert_eq!(lex.next(), Some(Ok(Token::Integer)));
+        assert_eq!(lex.next(), Some(Ok(Token::Guid)));
         assert_eq!(lex.slice(), "0Ng");
     }
 
     #[test]
     fn lex_timespan_null() {
         let mut lex = Token::lexer("0Nn");
-        assert_eq!(lex.next(), Some(Ok(Token::Integer)));
+        assert_eq!(lex.next(), Some(Ok(Token::Timespan)));
         assert_eq!(lex.slice(), "0Nn");
     }
 
@@ -715,10 +728,13 @@ mod tests {
 
     #[test]
     fn lex_temporal_infs() {
-        // 0Wm is now Month, not Integer
+        // 0Wm is Month, 0Wg/0Wn/0Wz are their respective types, the rest are Integer
         assert_eq!(Token::lexer("0Wm").next(), Some(Ok(Token::Month)));
-        // The rest are still Integer
-        for s in ["0Wg", "0Wn", "0Wp", "0Wu", "0Wv", "0Wz"] {
+        assert_eq!(Token::lexer("0Wg").next(), Some(Ok(Token::Guid)));
+        assert_eq!(Token::lexer("0Wn").next(), Some(Ok(Token::Timespan)));
+        assert_eq!(Token::lexer("0Wz").next(), Some(Ok(Token::Datetime)));
+        // 0Wp, 0Wu, 0Wv are still Integer (handled in future tasks)
+        for s in ["0Wp", "0Wu", "0Wv"] {
             let mut lex = Token::lexer(s);
             assert_eq!(lex.next(), Some(Ok(Token::Integer)), "failed for {}", s);
         }
@@ -753,5 +769,23 @@ mod tests {
     #[test]
     fn lex_month_inf_typed() {
         assert_eq!(Token::lexer("0Wm").next(), Some(Ok(Token::Month)));
+    }
+
+    #[test]
+    fn lex_guid_literal_typed() {
+        assert_eq!(Token::lexer("0Ng").next(), Some(Ok(Token::Guid)));
+    }
+
+    #[test]
+    fn lex_timespan_literal() {
+        assert_eq!(Token::lexer("0D00:00:00.000000000").next(), Some(Ok(Token::Timespan)));
+        assert_eq!(Token::lexer("0Nn").next(), Some(Ok(Token::Timespan)));
+        assert_eq!(Token::lexer("0Wn").next(), Some(Ok(Token::Timespan)));
+    }
+
+    #[test]
+    fn lex_datetime_literal_typed() {
+        assert_eq!(Token::lexer("0Nz").next(), Some(Ok(Token::Datetime)));
+        assert_eq!(Token::lexer("0Wz").next(), Some(Ok(Token::Datetime)));
     }
 }
