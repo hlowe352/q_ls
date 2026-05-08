@@ -148,6 +148,29 @@ pub enum SyntaxKind {
     DoExpr,
     /// `while[cond;expr;...]` — while control word.
     WhileExpr,
+    /// `1+` — binary operator with no RHS, treated as a projection.
+    InfixProjection,
+    /// `'[f;g]` — function composition (bracket form).
+    Composition,
+    /// `f' x`, `f/: y` — infix function with adverb modifier.
+    InfixModExpr,
+    /// `select[5]` / `select[5;>col]` — qSQL limit clause.
+    LimitClause,
+    /// `>col` / `<col` inside a limit clause.
+    OrderClause,
+    /// `[k:v;...]` — keyed-table key list, inside a `TableExpr`.
+    TableKeys,
+    /// `.q` / `.Q` / `.z` — bare namespace identifier (without trailing
+    /// member). Distinguished from `DottedIdent` (which is namespace + member).
+    Namespace,
+    /// `:expr` at expression position — function return.
+    ReturnExpr,
+    /// `'expr` at expression position — signal/throw.
+    SignalExpr,
+    /// `k)…` or `p)…` — DSL escape statement.
+    DslStmt,
+    /// `` `:path `` literal expression node (wraps the FileSymbol token).
+    FileSymbolExpr,
 
     // -----------------------------------------------------------------------
     // Sentinel — must remain last
@@ -289,5 +312,27 @@ mod tests {
     #[test]
     fn comment_block_is_trivia() {
         assert!(SyntaxKind::CommentBlock.is_trivia());
+    }
+
+    #[test]
+    fn composite_kinds_distinct() {
+        let kinds = [
+            SyntaxKind::InfixProjection,
+            SyntaxKind::Composition,
+            SyntaxKind::InfixModExpr,
+            SyntaxKind::LimitClause,
+            SyntaxKind::OrderClause,
+            SyntaxKind::TableKeys,
+            SyntaxKind::Namespace,
+            SyntaxKind::ReturnExpr,
+            SyntaxKind::SignalExpr,
+            SyntaxKind::DslStmt,
+            SyntaxKind::FileSymbolExpr,
+        ];
+        let set: std::collections::HashSet<_> = kinds.iter().collect();
+        assert_eq!(set.len(), kinds.len(), "duplicate composite kinds");
+        for k in kinds {
+            assert!((k as u16) < (SyntaxKind::__LAST as u16));
+        }
     }
 }
