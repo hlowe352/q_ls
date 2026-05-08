@@ -277,6 +277,54 @@ fn collapse_block_comments(tokens: &mut Vec<LexedToken>) {
     }
 }
 
+/// Split `DslLine` tokens that aren't actually at line start back into their
+/// constituent tokens. The lexer matches `[kp]\)[^\r\n]*` anywhere, but q only
+/// treats `k)...` / `p)...` as DSL escape lines when they begin a line.
+fn split_misplaced_dsl_lines(tokens: &mut Vec<LexedToken>) {
+    let mut i = 0;
+    while i < tokens.len() {
+        if tokens[i].kind == SyntaxKind::DslLine && !is_at_line_start(tokens, i) {
+            let text = tokens[i].text.clone();
+            // text is guaranteed to start with `k)` or `p)` (ASCII).
+            let mut new_toks: Vec<LexedToken> = Vec::with_capacity(4);
+            new_toks.push(LexedToken { kind: SyntaxKind::Ident,  text: text[0..1].to_string() });
+            new_toks.push(LexedToken { kind: SyntaxKind::RParen, text: text[1..2].to_string() });
+
+            let rest = &text[2..];
+            let mut lexer = q_lexer::Token::lexer(rest);
+            let mut last_end: usize = 0;
+            while let Some(result) = lexer.next() {
+                let span = lexer.span();
+                if span.start > last_end {
+                    new_toks.push(LexedToken {
+                        kind: SyntaxKind::Whitespace,
+                        text: rest[last_end..span.start].to_string(),
+                    });
+                }
+                let kind = match result {
+                    Ok(tok) => SyntaxKind::from_token(tok),
+                    Err(_) => SyntaxKind::Error,
+                };
+                new_toks.push(LexedToken { kind, text: rest[span.clone()].to_string() });
+                last_end = span.end;
+            }
+            if last_end < rest.len() {
+                new_toks.push(LexedToken {
+                    kind: SyntaxKind::Whitespace,
+                    text: rest[last_end..].to_string(),
+                });
+            }
+
+            tokens.splice(i..i + 1, new_toks);
+            // Advance past Ident + RParen so any nested `p)` in the re-lexed
+            // remainder gets re-checked on the next iteration.
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+}
+
 pub struct Parser {
     tokens: Vec<LexedToken>,
     pos: usize,
@@ -331,6 +379,13 @@ impl Parser {
         // In q, `/` alone at start of a line opens a block comment,
         // `\` alone at start of a line closes it.
         collapse_block_comments(&mut tokens);
+
+        // Post-process step 3: split misplaced DSL prefix tokens.
+        // The lexer regex for `k)...` / `p)...` matches anywhere; q only
+        // treats them as DSL escape lines when they appear at the start of
+        // a line. Mid-expression occurrences (e.g. `(3#p),fn` containing
+        // `p)`) must be split back into Ident + RParen + rest.
+        split_misplaced_dsl_lines(&mut tokens);
 
         Self {
             tokens,
@@ -405,17 +460,32 @@ impl Parser {
         self.current().is_none()
     }
 
-    /// Returns `true` if there's a newline between current position and next non-trivia token.
+    /// Returns `true` if a newline separates the current position from the
+    /// next non-trivia token AND the next line is *not* an indented continuation.
+    ///
+    /// q's line-continuation rule: a logical statement continues onto the next
+    /// physical line when that line begins with whitespace (space or tab).
+    /// A non-blank line starting in column 0 is a new statement.
     pub fn has_preceding_newline(&self) -> bool {
+        // Find the last Newline within the leading trivia block.
+        let mut last_newline = None;
         for i in self.pos..self.tokens.len() {
-            if self.tokens[i].kind == SyntaxKind::Newline {
-                return true;
+            match self.tokens[i].kind {
+                SyntaxKind::Newline => last_newline = Some(i),
+                k if k.is_trivia() => {}
+                _ => break,
             }
-            if !self.tokens[i].kind.is_trivia() {
+        }
+        let Some(nl_idx) = last_newline else { return false; };
+
+        // If the very next token after the newline is Whitespace, the next
+        // line is indented — treat as a continuation, not a boundary.
+        if let Some(next) = self.tokens.get(nl_idx + 1) {
+            if next.kind == SyntaxKind::Whitespace {
                 return false;
             }
         }
-        false
+        true
     }
 
     // -----------------------------------------------------------------------

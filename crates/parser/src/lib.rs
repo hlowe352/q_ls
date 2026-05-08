@@ -900,4 +900,49 @@ show q1b[];
         assert!(count >= 2, "expected ≥2 stmts, got:\n{dump}");
         assert!(parse.errors.is_empty(), "errors: {:?}", parse.errors);
     }
+
+    /// Regression: `p)` mid-expression must NOT be lexed as a DSL escape line.
+    /// The DSL prefix only applies when `k)` / `p)` begin a line.
+    #[test]
+    fn parse_p_paren_mid_expression_is_not_dsl() {
+        // (3#p),fn  — `p)` here closes the `(3#p)` group, not a DSL escape
+        let parse = parse("(3#p),fn");
+        assert!(parse.errors.is_empty(), "errors: {:?}", parse.errors);
+        let dump = format!("{:#?}", parse.syntax());
+        assert!(!dump.contains("DslLine"), "should not lex as DslLine:\n{dump}");
+        assert!(!dump.contains("DslStmt"), "should not parse as DslStmt:\n{dump}");
+    }
+
+    /// Regression: `k)` and `p)` at line start ARE the DSL escape.
+    #[test]
+    fn parse_dsl_at_line_start_still_works() {
+        let parse = parse("k)1+2");
+        assert!(parse.errors.is_empty(), "errors: {:?}", parse.errors);
+        let dump = format!("{:#?}", parse.syntax());
+        assert!(dump.contains("DslStmt"), "expected DslStmt:\n{dump}");
+    }
+
+    /// Regression: q allows line continuation when the next line starts with
+    /// whitespace. The newline alone is not a statement boundary.
+    #[test]
+    fn parse_indented_continuation() {
+        let src = "f x\n    +y";
+        let parse = parse(src);
+        assert!(parse.errors.is_empty(), "errors: {:?}", parse.errors);
+        let dump = format!("{:#?}", parse.syntax());
+        // The whole thing should be a single statement (one ExprStmt).
+        let count = dump.matches("ExprStmt").count();
+        assert_eq!(count, 1, "expected 1 stmt (continuation), got {count}:\n{dump}");
+    }
+
+    /// Regression: a non-indented next line IS a new statement boundary.
+    #[test]
+    fn parse_unindented_is_new_stmt() {
+        let src = "f x\ng y";
+        let parse = parse(src);
+        assert!(parse.errors.is_empty(), "errors: {:?}", parse.errors);
+        let dump = format!("{:#?}", parse.syntax());
+        let count = dump.matches("ExprStmt").count();
+        assert_eq!(count, 2, "expected 2 stmts, got {count}:\n{dump}");
+    }
 }

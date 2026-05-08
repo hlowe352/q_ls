@@ -1,21 +1,31 @@
-//! Corpus-driven smoke test: every example from tree-sitter-q's corpus
-//! must parse without producing `SyntaxKind::Error` tokens.
+//! Corpus-driven smoke tests: every example from tree-sitter-q's corpus
+//! AND every real-world q fixture must parse without producing
+//! `SyntaxKind::Error` tokens.
 
 use q_parser::{parse, SyntaxKind, SyntaxNode};
 
-fn first_error(node: &SyntaxNode) -> Option<String> {
+fn collect_errors(src: &str, node: &SyntaxNode) -> Vec<String> {
+    let mut out = Vec::new();
     for elem in node.descendants_with_tokens() {
         if elem.kind() == SyntaxKind::Error {
-            return Some(format!("{:?} at {:?}", elem, elem.text_range()));
+            let r = elem.text_range();
+            let off: usize = r.start().into();
+            let line = src[..off].matches('\n').count() + 1;
+            let col = off - src[..off].rfind('\n').map(|i| i + 1).unwrap_or(0);
+            // Avoid `{elem:?}` — the rowan Debug impl recurses into children
+            // and overflows the default test-thread stack on deeply nested trees.
+            let snippet: String = elem.as_token().map(|t| t.text().to_string())
+                .unwrap_or_default();
+            out.push(format!("line {line}:{col} Error {:?}", snippet));
         }
     }
-    None
+    out
 }
 
-#[test]
-fn parses_tree_sitter_q_corpus_clean() {
+fn run_corpus(dir_name: &str, label: &str) {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/data/corpus");
+        .join("tests/data")
+        .join(dir_name);
     let mut failures = Vec::new();
     let mut total = 0;
     for entry in std::fs::read_dir(&dir).expect("corpus dir") {
@@ -26,11 +36,30 @@ fn parses_tree_sitter_q_corpus_clean() {
         total += 1;
         let src = std::fs::read_to_string(&path).unwrap();
         let parsed = parse(&src);
-        if let Some(msg) = first_error(&parsed.syntax()) {
-            failures.push(format!("{}: {}", path.file_name().unwrap().to_string_lossy(), msg));
+        let errs = collect_errors(&src, &parsed.syntax());
+        if !errs.is_empty() {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            failures.push(format!("{name}: {}", errs.join("; ")));
         }
     }
     assert!(failures.is_empty(),
-        "{}/{} corpus files failed:\n{}",
+        "{label}: {}/{} files failed:\n{}",
         failures.len(), total, failures.join("\n"));
+}
+
+#[test]
+fn parses_tree_sitter_q_corpus_clean() {
+    run_corpus("corpus", "tree-sitter-q corpus");
+}
+
+#[test]
+fn parses_real_q_fixtures_clean() {
+    // Real-world q files (e.g. dbmaint.q) produce deeply-nested CSTs whose
+    // recursive `Drop` exceeds the default 2 MiB test-thread stack on
+    // some platforms. Run on an 8 MiB stack to avoid the overflow.
+    let handle = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| run_corpus("real_q", "real-world q fixtures"))
+        .unwrap();
+    handle.join().unwrap();
 }
