@@ -267,3 +267,27 @@ pub type SyntaxNode = rowan::SyntaxNode<QLang>;
 pub type SyntaxToken = rowan::SyntaxToken<QLang>;
 /// A lossless syntax element (either a node or a token) parameterised over the q language.
 pub type SyntaxElement = rowan::SyntaxElement<QLang>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_new_tokens() {
+        assert_eq!(SyntaxKind::from_token(q_lexer::Token::Month),        SyntaxKind::Month);
+        assert_eq!(SyntaxKind::from_token(q_lexer::Token::Guid),         SyntaxKind::Guid);
+        assert_eq!(SyntaxKind::from_token(q_lexer::Token::Timespan),     SyntaxKind::Timespan);
+        assert_eq!(SyntaxKind::from_token(q_lexer::Token::Minute),       SyntaxKind::Minute);
+        assert_eq!(SyntaxKind::from_token(q_lexer::Token::Second),       SyntaxKind::Second);
+        assert_eq!(SyntaxKind::from_token(q_lexer::Token::Datetime),     SyntaxKind::Datetime);
+        assert_eq!(SyntaxKind::from_token(q_lexer::Token::ByteList),     SyntaxKind::ByteList);
+        assert_eq!(SyntaxKind::from_token(q_lexer::Token::CommentBlock), SyntaxKind::CommentBlock);
+        assert_eq!(SyntaxKind::from_token(q_lexer::Token::DslLine),      SyntaxKind::DslLine);
+        assert_eq!(SyntaxKind::from_token(q_lexer::Token::FileSymbol),   SyntaxKind::FileSymbol);
+    }
+
+    #[test]
+    fn comment_block_is_trivia() {
+        assert!(SyntaxKind::CommentBlock.is_trivia());
+    }
+}
