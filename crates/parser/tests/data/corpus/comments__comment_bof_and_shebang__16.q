@@ -1,0 +1,5 @@
+#!/something/q
+/
+asdf
+\
+sweet
