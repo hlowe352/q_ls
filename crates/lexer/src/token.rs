@@ -24,8 +24,8 @@ pub enum Token {
     /// Note: negative sign is NOT included here; the parser handles unary minus.
     /// Priority 3 keeps hex above the plain decimal regex (default priority 2).
     #[regex(r"0x[0-9A-Fa-f]+", priority = 4)]  // hex
-    #[regex(r"0N[ijhgmnpuvz]", priority = 5)]    // typed nulls (int/long/short/guid/month/timespan/timestamp/minute/second/datetime)
-    #[regex(r"0W[ijhgmnpuvz]", priority = 5)]    // typed infs
+    #[regex(r"0N[ijhgnpuvz]", priority = 5)]    // typed nulls (remaining: guid/timespan/timestamp/minute/second/datetime)
+    #[regex(r"0W[ijhgnpuvz]", priority = 5)]    // typed infs
     #[regex(r"[0-9]+[ijh]?")]                   // plain decimal, optional suffix
     Integer,
 
@@ -48,6 +48,11 @@ pub enum Token {
     #[regex(r"0Nd")]
     #[regex(r"[0-9]{4}\.[0-9]{2}\.[0-9]{2}")]
     Date,
+
+    /// Month literal: `2024.01m`, `0Nm`, `0Wm`
+    #[regex(r"0[NW]m", priority = 6)]
+    #[regex(r"[0-9]{4}\.[0-9]{2}m", priority = 6)]
+    Month,
 
     /// Time literal: `12:30:00.000`, `0Nt`
     #[regex(r"0Nt")]
@@ -683,7 +688,7 @@ mod tests {
     #[test]
     fn lex_month_null() {
         let mut lex = Token::lexer("0Nm");
-        assert_eq!(lex.next(), Some(Ok(Token::Integer)));
+        assert_eq!(lex.next(), Some(Ok(Token::Month)));
         assert_eq!(lex.slice(), "0Nm");
     }
 
@@ -710,7 +715,10 @@ mod tests {
 
     #[test]
     fn lex_temporal_infs() {
-        for s in ["0Wg", "0Wm", "0Wn", "0Wp", "0Wu", "0Wv", "0Wz"] {
+        // 0Wm is now Month, not Integer
+        assert_eq!(Token::lexer("0Wm").next(), Some(Ok(Token::Month)));
+        // The rest are still Integer
+        for s in ["0Wg", "0Wn", "0Wp", "0Wu", "0Wv", "0Wz"] {
             let mut lex = Token::lexer(s);
             assert_eq!(lex.next(), Some(Ok(Token::Integer)), "failed for {}", s);
         }
@@ -728,5 +736,22 @@ mod tests {
         // Without `!` immediately after `#`, should be Hash then Bang
         let tokens: Vec<_> = Token::lexer("# !x").map(|r| r.unwrap()).collect();
         assert_eq!(tokens, vec![Token::Hash, Token::Bang, Token::Ident]);
+    }
+
+    #[test]
+    fn lex_month_literal() {
+        let mut lex = Token::lexer("2024.01m");
+        assert_eq!(lex.next(), Some(Ok(Token::Month)));
+        assert_eq!(lex.slice(), "2024.01m");
+    }
+
+    #[test]
+    fn lex_month_null_typed() {
+        assert_eq!(Token::lexer("0Nm").next(), Some(Ok(Token::Month)));
+    }
+
+    #[test]
+    fn lex_month_inf_typed() {
+        assert_eq!(Token::lexer("0Wm").next(), Some(Ok(Token::Month)));
     }
 }
