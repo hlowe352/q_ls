@@ -83,7 +83,6 @@ fn atom(p: &mut Parser) -> Option<CompletedMarker> {
         | SyntaxKind::Boolean
         | SyntaxKind::String
         | SyntaxKind::Symbol
-        | SyntaxKind::FileSymbol
         | SyntaxKind::Date
         | SyntaxKind::Month
         | SyntaxKind::Guid
@@ -97,6 +96,13 @@ fn atom(p: &mut Parser) -> Option<CompletedMarker> {
             let m = p.start();
             p.bump();
             Some(m.complete(p, SyntaxKind::LiteralExpr))
+        }
+
+        // FileSymbol is a distinct expression kind
+        SyntaxKind::FileSymbol => {
+            let m = p.start();
+            p.bump();
+            Some(m.complete(p, SyntaxKind::FileSymbolExpr))
         }
 
         // Identifiers (with control word detection)
@@ -485,4 +491,35 @@ fn is_adverb(p: &Parser) -> bool {
                 | SyntaxKind::EachLeft
         )
     )
+}
+
+#[cfg(test)]
+mod literal_tests {
+    use crate::parse;
+
+    #[test]
+    fn parse_temporal_literals_are_atoms() {
+        for (src, kind_name) in [
+            ("0Nm",       "Month"),
+            ("0Ng",       "Guid"),
+            ("0Nn",       "Timespan"),
+            ("12:30",     "Minute"),
+            ("12:30:45",  "Second"),
+            ("0Nz",       "Datetime"),
+            ("0xABCD",    "ByteList"),
+        ] {
+            let parse = parse(src);
+            let dump = format!("{:#?}", parse.syntax());
+            assert!(dump.contains(kind_name), "expected {kind_name} in:\n{dump}");
+            assert!(parse.errors.is_empty(), "errors for {src}: {:?}", parse.errors);
+        }
+    }
+
+    #[test]
+    fn parse_file_symbol_makes_file_symbol_expr() {
+        let parse = parse("`:foo.csv");
+        let dump = format!("{:#?}", parse.syntax());
+        assert!(dump.contains("FileSymbolExpr"), "got:\n{dump}");
+        assert!(!dump.contains("LiteralExpr"), "should not be LiteralExpr:\n{dump}");
+    }
 }
