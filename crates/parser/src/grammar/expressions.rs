@@ -206,7 +206,9 @@ fn atom(p: &mut Parser) -> Option<CompletedMarker> {
         | SyntaxKind::FileOp2
         | SyntaxKind::EachPrior
         | SyntaxKind::EachRight
-        | SyntaxKind::EachLeft => {
+        | SyntaxKind::EachLeft
+        | SyntaxKind::Slash
+        | SyntaxKind::Backslash => {
             let m = p.start();
             p.bump();
             // Don't consume operand if:
@@ -221,6 +223,9 @@ fn atom(p: &mut Parser) -> Option<CompletedMarker> {
             }
             Some(m.complete(p, SyntaxKind::UnaryExpr))
         }
+
+        // Standalone progn block: [stmt; stmt; ...] — returns last value
+        SyntaxKind::LBracket => parse_progn(p),
 
         // Parenthesised expression, list, or table
         SyntaxKind::LParen => parse_paren(p),
@@ -262,6 +267,25 @@ fn atom(p: &mut Parser) -> Option<CompletedMarker> {
             None
         }
     }
+}
+
+/// Parse a progn block: `[stmt; stmt; ...]` — a sequence of statements
+/// returning the value of the last one.  Used as an expression in q.
+fn parse_progn(p: &mut Parser) -> Option<CompletedMarker> {
+    let m = p.start();
+    p.expect(SyntaxKind::LBracket);
+    while !p.at(SyntaxKind::RBracket) && !p.at_end() {
+        if p.at(SyntaxKind::Semi) {
+            p.bump();
+            continue;
+        }
+        parse_stmt_or_expr(p);
+        if !p.eat(SyntaxKind::Semi) {
+            break;
+        }
+    }
+    p.expect(SyntaxKind::RBracket);
+    Some(m.complete(p, SyntaxKind::PrognExpr))
 }
 
 fn parse_paren(p: &mut Parser) -> Option<CompletedMarker> {
@@ -332,7 +356,17 @@ fn parse_lambda(p: &mut Parser) -> Option<CompletedMarker> {
         let pm = p.start();
         p.bump(); // [
         while !p.at(SyntaxKind::RBracket) && !p.at_end() {
-            p.expect(SyntaxKind::Ident);
+            // Parameter names are typically identifiers, but q (and tree-sitter-q)
+            // also allows integer literals as parameter "names" in some patterns.
+            let is_param_name = matches!(
+                p.current(),
+                Some(SyntaxKind::Ident | SyntaxKind::Integer | SyntaxKind::Float | SyntaxKind::Symbol)
+            );
+            if is_param_name {
+                p.bump();
+            } else {
+                p.expect(SyntaxKind::Ident);
+            }
             // Optional type annotation: name:type
             if p.at(SyntaxKind::Colon) {
                 p.bump(); // :
@@ -447,7 +481,9 @@ fn binary_op(p: &Parser) -> Option<SyntaxKind> {
         | SyntaxKind::FileOp1
         | SyntaxKind::FileOp2
         | SyntaxKind::Colon
-        | SyntaxKind::ColonColon => Some(kind),
+        | SyntaxKind::ColonColon
+        | SyntaxKind::Slash
+        | SyntaxKind::Backslash => Some(kind),
         _ => None,
     }
 }
@@ -495,6 +531,7 @@ fn can_start_expr(p: &Parser) -> bool {
                 // Delimiters
                 | SyntaxKind::LParen
                 | SyntaxKind::LBrace
+                | SyntaxKind::LBracket
                 // Operators (monadic/functional forms)
                 | SyntaxKind::Minus
                 | SyntaxKind::Plus
@@ -528,6 +565,8 @@ fn can_start_expr(p: &Parser) -> bool {
                 | SyntaxKind::EachPrior
                 | SyntaxKind::EachRight
                 | SyntaxKind::EachLeft
+                | SyntaxKind::Slash
+                | SyntaxKind::Backslash
         )
     )
 }

@@ -118,6 +118,72 @@ impl CompletedMarker {
 // Parser
 // ---------------------------------------------------------------------------
 
+/// Returns `true` if the token at index `i` in `tokens` is at "line start":
+/// i.e., it's at position 0 or all tokens before it (from position 0 or the
+/// most-recent Newline) are Whitespace tokens.
+fn is_at_line_start(tokens: &[LexedToken], i: usize) -> bool {
+    // Walk backwards to find the most recent Newline (or start of file)
+    let start = tokens[..i].iter().rposition(|t| t.kind == SyntaxKind::Newline);
+    let from = start.map(|p| p + 1).unwrap_or(0);
+    // Every token from `from` to `i` (exclusive) must be Whitespace
+    tokens[from..i].iter().all(|t| t.kind == SyntaxKind::Whitespace)
+}
+
+/// Normalize slash/backslash comment tokens in the raw token stream.
+///
+/// In q:
+/// 1. A bare `/word` (slash immediately followed by text, no space) at the
+///    start of a line is a line comment.  The lexer only recognises `/ text`
+///    (with space) as LineComment, so we fix up the remaining cases here.
+///
+/// 2. A bare `\` at the start of a line opens a "terminal comment block"
+///    that extends until the next `/` at line start (or EOF).  Everything
+///    including the opening `\`, body lines, and closing `/` is merged into
+///    a single CommentBlock token.
+fn normalize_slash_comments(tokens: &mut Vec<LexedToken>) {
+    let mut i = 0;
+    while i < tokens.len() {
+        // Case 1: Slash at line start — rest of the line is a comment.
+        if tokens[i].kind == SyntaxKind::Slash && is_at_line_start(tokens, i) {
+            // Collect text from this Slash up to (and including) the next Newline.
+            let mut text = tokens[i].text.clone();
+            let mut end = i + 1;
+            while end < tokens.len() && tokens[end].kind != SyntaxKind::Newline {
+                text.push_str(&tokens[end].text);
+                end += 1;
+            }
+            // Optionally include the trailing newline in the comment token.
+            // (Don't include it — let the parser see the Newline as trivia.)
+            let new_tok = LexedToken { kind: SyntaxKind::LineComment, text };
+            tokens.splice(i..end, [new_tok]);
+            // i stays at i; we continue scanning from the token after our new LineComment
+        }
+
+        // Case 2: Backslash at line start — terminal comment block.
+        else if tokens[i].kind == SyntaxKind::Backslash && is_at_line_start(tokens, i) {
+            // Find the closing `/` at line start, or EOF.
+            let mut end = i + 1;
+            let mut found_close = false;
+            while end < tokens.len() {
+                if tokens[end].kind == SyntaxKind::Slash && is_at_line_start(tokens, end) {
+                    // Include the closing slash in the comment block.
+                    end += 1;
+                    found_close = true;
+                    break;
+                }
+                end += 1;
+            }
+            let _ = found_close; // may be false at EOF, which is fine
+            let text: String = tokens[i..end].iter().map(|t| t.text.as_str()).collect();
+            let new_tok = LexedToken { kind: SyntaxKind::CommentBlock, text };
+            tokens.splice(i..end, [new_tok]);
+            // Do NOT advance i — the next iteration will move past this CommentBlock.
+        }
+
+        i += 1;
+    }
+}
+
 /// Collapse multi-line comment blocks into single LineComment tokens.
 /// In q, `/` alone at the start of a line opens a block comment,
 /// and `\` alone at the start of a line closes it.
@@ -255,7 +321,13 @@ impl Parser {
             tokens.push(LexedToken { kind: SyntaxKind::Whitespace, text: ws_text });
         }
 
-        // Post-process: collapse multi-line comment blocks.
+        // Post-process step 1: normalize slash/backslash comments.
+        // In q, `/word` (no space) at line start is a comment, and a bare `\`
+        // at line start opens a terminal comment block that runs to the next
+        // `/` at line start (or EOF).
+        normalize_slash_comments(&mut tokens);
+
+        // Post-process step 2: collapse multi-line comment blocks.
         // In q, `/` alone at start of a line opens a block comment,
         // `\` alone at start of a line closes it.
         collapse_block_comments(&mut tokens);

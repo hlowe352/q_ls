@@ -171,6 +171,8 @@ pub enum SyntaxKind {
     DslStmt,
     /// `` `:path `` literal expression node (wraps the FileSymbol token).
     FileSymbolExpr,
+    /// `[stmt; stmt; ...]` — progn (sequence of statements, returns last).
+    PrognExpr,
 
     // -----------------------------------------------------------------------
     // Sentinel — must remain last
