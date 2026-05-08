@@ -28,7 +28,22 @@ fn parse_select(p: &mut Parser) {
 
     // Optional limit: select[n] or select[n;>col]
     if p.at(SyntaxKind::LBracket) {
-        expressions::parse_arg_list(p);
+        let lm = p.start();
+        p.bump(); // [
+        if !p.at(SyntaxKind::RBracket) && !p.at(SyntaxKind::Semi) {
+            if p.at(SyntaxKind::Lt) || p.at(SyntaxKind::Gt) {
+                parse_order(p);
+            } else {
+                expressions::expr(p);
+            }
+        }
+        if p.eat(SyntaxKind::Semi) {
+            if p.at(SyntaxKind::Lt) || p.at(SyntaxKind::Gt) {
+                parse_order(p);
+            }
+        }
+        p.expect(SyntaxKind::RBracket);
+        lm.complete(p, SyntaxKind::LimitClause);
     }
 
     // Optional "distinct"
@@ -183,4 +198,38 @@ fn at_kw(p: &Parser, kw: &str) -> bool {
 /// Check if we are at a statement boundary (newline or semicolon).
 fn at_stmt_end(p: &Parser) -> bool {
     p.at(SyntaxKind::Semi) || p.at(SyntaxKind::Newline)
+}
+
+fn parse_order(p: &mut Parser) {
+    let om = p.start();
+    p.bump(); // > or <
+    expressions::expr(p);
+    om.complete(p, SyntaxKind::OrderClause);
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::parse;
+
+    #[test]
+    fn parse_select_limit() {
+        let parse = parse("select[5] col from t");
+        let dump = format!("{:#?}", parse.syntax());
+        assert!(dump.contains("LimitClause"), "got:\n{dump}");
+    }
+
+    #[test]
+    fn parse_select_limit_with_order() {
+        let parse = parse("select[5;>price] col from t");
+        let dump = format!("{:#?}", parse.syntax());
+        assert!(dump.contains("LimitClause"), "got:\n{dump}");
+        assert!(dump.contains("OrderClause"), "got:\n{dump}");
+    }
+
+    #[test]
+    fn parse_select_order_only() {
+        let parse = parse("select[>price] col from t");
+        let dump = format!("{:#?}", parse.syntax());
+        assert!(dump.contains("OrderClause"), "got:\n{dump}");
+    }
 }
