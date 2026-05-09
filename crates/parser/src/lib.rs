@@ -6,6 +6,7 @@ pub mod sink;
 
 pub use syntax_kind::{QLang, SyntaxKind, SyntaxNode, SyntaxToken, SyntaxElement};
 pub use parser::ParseError;
+pub use rowan::{TextRange, TextSize};
 
 use rowan::GreenNode;
 
