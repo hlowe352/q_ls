@@ -3,30 +3,15 @@ use crate::document::Document;
 
 pub fn goto_definition(doc: &Document, pos: Position, uri: &Uri) -> Option<GotoDefinitionResponse> {
     let offset = doc.offset_of(pos);
-    let target_name = get_identifier_at(doc.text(), offset)?;
+    let (name, _, _) = doc.ident_at(offset)?;
 
-    let def_offset = doc.sym_table().resolve(offset, &target_name)?;
+    let def_offset = doc.sym_table().resolve(offset, name)?;
     let def_pos = doc.position_of(def_offset);
 
     Some(GotoDefinitionResponse::Scalar(Location {
         uri: uri.clone(),
         range: Range::new(def_pos, def_pos),
     }))
-}
-
-fn get_identifier_at(text: &str, offset: usize) -> Option<String> {
-    if offset >= text.len() { return None; }
-    let bytes = text.as_bytes();
-    let mut start = offset;
-    let mut end = offset;
-    while start > 0 && is_ident_char(bytes[start - 1]) { start -= 1; }
-    while end < bytes.len() && is_ident_char(bytes[end]) { end += 1; }
-    if start == end { return None; }
-    Some(text[start..end].to_string())
-}
-
-fn is_ident_char(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_' || b == b'.'
 }
 
 #[cfg(test)]

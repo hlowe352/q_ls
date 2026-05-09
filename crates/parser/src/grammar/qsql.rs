@@ -37,10 +37,10 @@ fn parse_select(p: &mut Parser) {
                 expressions::expr(p);
             }
         }
-        if p.eat(SyntaxKind::Semi) {
-            if p.at(SyntaxKind::Lt) || p.at(SyntaxKind::Gt) {
-                parse_order(p);
-            }
+        if p.eat(SyntaxKind::Semi)
+            && (p.at(SyntaxKind::Lt) || p.at(SyntaxKind::Gt))
+        {
+            parse_order(p);
         }
         p.expect(SyntaxKind::RBracket);
         lm.complete(p, SyntaxKind::LimitClause);

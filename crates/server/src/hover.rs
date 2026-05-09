@@ -10,7 +10,7 @@ pub fn hover(doc: &Document, pos: Position) -> Option<Hover> {
         return Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
-                value: format!("**{}** - {}", word, detail),
+                value: format!("**{word}** - {detail}"),
             }),
             range: None,
         });

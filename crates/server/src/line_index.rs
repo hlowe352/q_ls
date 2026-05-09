@@ -40,8 +40,7 @@ impl LineIndex {
         let line_end = self
             .starts
             .get(line + 1)
-            .map(|&n| n as usize)
-            .unwrap_or(self.len as usize);
+            .map_or(self.len as usize, |&n| n as usize);
         // Trim trailing newline (and CR) from the slice we walk.
         let mut slice_end = line_end;
         if slice_end > line_start && text.as_bytes()[slice_end - 1] == b'\n' {

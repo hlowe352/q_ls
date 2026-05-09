@@ -162,14 +162,13 @@ fn classify_ident(tok: &SyntaxToken) -> (u32, u32) {
     let is_decl = parent
         .as_ref()
         .and_then(|p| p.parent())
-        .map(|gp| {
+        .is_some_and(|gp| {
             gp.kind() == SyntaxKind::BinExpr
                 && gp.first_child().as_ref() == parent.as_ref()
                 && gp.children_with_tokens()
                     .filter_map(|el| el.into_token())
                     .any(|t| matches!(t.kind(), SyntaxKind::Colon | SyntaxKind::ColonColon))
-        })
-        .unwrap_or(false);
+        });
 
     let mods = if is_decl { MOD_DECLARATION } else { 0 };
     (TYPE_VARIABLE, mods)

@@ -53,12 +53,12 @@ fn expr_bp(p: &mut Parser, min_bp: u8) {
             }
             // Only parse RHS if next token can be part of an expression.
             // Otherwise this is a projection (e.g., `1+` or `2*`).
-            let had_rhs = if !at_expr_boundary(p) {
+            let had_rhs = if at_expr_boundary(p) {
+                false
+            } else {
                 let before = p.events.len();
                 expr_bp(p, r_bp);
                 p.events.len() > before
-            } else {
-                false
             };
             let kind = match (decorated, had_rhs) {
                 (true, _)      => SyntaxKind::InfixModExpr,
@@ -138,8 +138,7 @@ fn atom(p: &mut Parser) -> Option<CompletedMarker> {
             }
             let bare_ns = kind == SyntaxKind::DottedIdent
                 && p.current_text()
-                    .map(|t| t.matches('.').count() == 1)
-                    .unwrap_or(false);
+                    .is_some_and(|t| t.matches('.').count() == 1);
 
             let m = p.start();
             p.bump();
@@ -263,7 +262,7 @@ fn atom(p: &mut Parser) -> Option<CompletedMarker> {
         }
 
         _ => {
-            p.error(format!("unexpected token: {:?}", kind));
+            p.error(format!("unexpected token: {kind:?}"));
             None
         }
     }

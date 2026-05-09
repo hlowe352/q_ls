@@ -15,8 +15,10 @@ pub fn find_references(
 ) -> Vec<Location> {
     let cursor = doc.offset_of(pos);
     let table = doc.sym_table();
-    let name = ident_at(doc.text(), cursor);
-    let Some(name) = name else { return Vec::new() };
+    let Some((name, _, _)) = doc.ident_at(cursor) else { return Vec::new() };
+    // Copy the borrowed name so we can call `doc.position_of` etc. without
+    // holding a reference into `doc.text` while also reading the syntax.
+    let name = name.to_string();
 
     // Anchor: where does the cursor's name resolve to?
     let Some(def_off) = table.resolve(cursor, &name) else {
@@ -45,16 +47,16 @@ pub fn find_references(
         // - this ident *resolves* to the same def as the cursor, or
         // - this ident *is* the def itself (ParamList entry, list-pattern
         //   element, assign LHS) — recognised by offset == def_off.
-        let resolves_to_def = (off as usize) == def_off
+        let resolves_to_def = off == def_off
             || (!in_param_list
                 && matches!(parent_kind, Some(SyntaxKind::IdentExpr | SyntaxKind::Namespace))
-                && table.resolve(off, &name).map(|d| d == def_off).unwrap_or(false));
+                && table.resolve(off, &name).is_some_and(|d| d == def_off));
 
         if !resolves_to_def {
             continue;
         }
 
-        let is_decl = (off as usize) == def_off;
+        let is_decl = off == def_off;
         if is_decl && !include_declaration {
             continue;
         }
@@ -68,29 +70,6 @@ pub fn find_references(
     }
 
     out
-}
-
-fn ident_at(text: &str, offset: usize) -> Option<String> {
-    if offset > text.len() {
-        return None;
-    }
-    let bytes = text.as_bytes();
-    let mut start = offset;
-    let mut end = offset;
-    while start > 0 && is_ident_byte(bytes[start - 1]) {
-        start -= 1;
-    }
-    while end < bytes.len() && is_ident_byte(bytes[end]) {
-        end += 1;
-    }
-    if start == end {
-        return None;
-    }
-    Some(text[start..end].to_string())
-}
-
-fn is_ident_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_' || b == b'.'
 }
 
 fn is_in_kind(token: &q_parser::SyntaxToken, kind: SyntaxKind) -> bool {

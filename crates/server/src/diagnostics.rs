@@ -46,10 +46,7 @@ fn unindented_close_warnings(doc: &Document) -> Vec<Diagnostic> {
         }
 
         // Single-line scope: skip — only flag closes that span multiple lines.
-        let parent = match tok.parent() {
-            Some(p) => p,
-            None => continue,
-        };
+        let Some(parent) = tok.parent() else { continue };
         let open_off: usize = parent.text_range().start().into();
         if !src[open_off..off].contains('\n') {
             continue;
@@ -297,9 +294,8 @@ mod tests {
                         eprintln!("  {w}");
                     }
                 }
-                assert_eq!(warnings.len(), 0,
-                    "regression: dbmaint.q now reports unresolved refs: {:#?}",
-                    warnings);
+                assert!(warnings.is_empty(),
+                    "regression: dbmaint.q now reports unresolved refs: {warnings:#?}");
             })
             .unwrap()
             .join()

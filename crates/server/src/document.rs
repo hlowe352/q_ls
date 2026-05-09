@@ -69,4 +69,30 @@ impl Document {
     pub fn position_of(&self, offset: usize) -> Position {
         self.line_index.position(&self.text, offset)
     }
+
+    /// Identifier text spanning byte `offset`, plus its `[start, end)` byte
+    /// range. q identifiers are runs of `[A-Za-z0-9_.]`. Returns `None` if
+    /// `offset` falls outside any such run.
+    pub fn ident_at(&self, offset: usize) -> Option<(&str, usize, usize)> {
+        if offset > self.text.len() {
+            return None;
+        }
+        let bytes = self.text.as_bytes();
+        let mut start = offset;
+        let mut end = offset;
+        while start > 0 && is_ident_byte(bytes[start - 1]) {
+            start -= 1;
+        }
+        while end < bytes.len() && is_ident_byte(bytes[end]) {
+            end += 1;
+        }
+        if start == end {
+            return None;
+        }
+        Some((&self.text[start..end], start, end))
+    }
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'.'
 }

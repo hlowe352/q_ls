@@ -190,11 +190,11 @@ impl SymTable {
             if s <= off && off < e {
                 // Strictly more nested = larger start (since later-started
                 // lambdas inside the parent come after it in DFS).
-                if best.map(|b| {
+                let deeper = best.is_none_or(|b| {
                     let bs: u32 = self.lambdas[b].range.start().into();
                     s >= bs
-                }).unwrap_or(true)
-                {
+                });
+                if deeper {
                     best = Some(idx);
                 }
             }

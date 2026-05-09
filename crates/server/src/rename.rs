@@ -18,14 +18,13 @@ use crate::references::find_references;
 /// identifiers.
 pub fn prepare_rename(doc: &Document, pos: Position) -> Option<PrepareRenameResponse> {
     let cursor = doc.offset_of(pos);
-    let (name, start, end) = ident_span_at(doc.text(), cursor)?;
-    if is_builtin(&name) {
+    let (name, start, end) = doc.ident_at(cursor)?;
+    if is_builtin(name) {
         return None;
     }
-    let placeholder = name;
     Some(PrepareRenameResponse::RangeWithPlaceholder {
         range: Range::new(doc.position_of(start), doc.position_of(end)),
-        placeholder,
+        placeholder: name.to_string(),
     })
 }
 
@@ -39,8 +38,8 @@ pub fn rename(
     uri: &Uri,
 ) -> Option<WorkspaceEdit> {
     let cursor = doc.offset_of(pos);
-    let (old_name, _, _) = ident_span_at(doc.text(), cursor)?;
-    if is_builtin(&old_name) {
+    let (old_name, _, _) = doc.ident_at(cursor)?;
+    if is_builtin(old_name) {
         return None;
     }
     if !is_valid_identifier(&new_name) {
@@ -61,29 +60,6 @@ pub fn rename(
     let mut changes = HashMap::new();
     changes.insert(uri.clone(), edits);
     Some(WorkspaceEdit { changes: Some(changes), document_changes: None, change_annotations: None })
-}
-
-fn ident_span_at(text: &str, offset: usize) -> Option<(String, usize, usize)> {
-    if offset > text.len() {
-        return None;
-    }
-    let bytes = text.as_bytes();
-    let mut start = offset;
-    let mut end = offset;
-    while start > 0 && is_ident_byte(bytes[start - 1]) {
-        start -= 1;
-    }
-    while end < bytes.len() && is_ident_byte(bytes[end]) {
-        end += 1;
-    }
-    if start == end {
-        return None;
-    }
-    Some((text[start..end].to_string(), start, end))
-}
-
-fn is_ident_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_' || b == b'.'
 }
 
 /// Match q's identifier shape: starts with a letter (or `.` for namespaced
@@ -167,7 +143,7 @@ mod tests {
         let pos = doc.position_of(0);
         assert!(rename(&doc, pos, "1bad".to_string(), &uri()).is_none());
         assert!(rename(&doc, pos, "with space".to_string(), &uri()).is_none());
-        assert!(rename(&doc, pos, "".to_string(), &uri()).is_none());
+        assert!(rename(&doc, pos, String::new(), &uri()).is_none());
     }
 
     #[test]

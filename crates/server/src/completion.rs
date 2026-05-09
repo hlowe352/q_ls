@@ -6,8 +6,7 @@ fn get_prefix(text: &str, offset: usize) -> String {
     let before = &text[..offset.min(text.len())];
     let start = before
         .rfind(|c: char| !c.is_alphanumeric() && c != '_' && c != '.')
-        .map(|i| i + 1)
-        .unwrap_or(0);
+        .map_or(0, |i| i + 1);
     before[start..].to_string()
 }
 

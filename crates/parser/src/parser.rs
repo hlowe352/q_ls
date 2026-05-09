@@ -125,7 +125,7 @@ impl CompletedMarker {
 fn is_at_line_start(tokens: &[LexedToken], i: usize) -> bool {
     // Walk backwards to find the most recent Newline (or start of file)
     let start = tokens[..i].iter().rposition(|t| t.kind == SyntaxKind::Newline);
-    let from = start.map(|p| p + 1).unwrap_or(0);
+    let from = start.map_or(0, |p| p + 1);
     // Every token from `from` to `i` (exclusive) must be Whitespace
     tokens[from..i].iter().all(|t| t.kind == SyntaxKind::Whitespace)
 }
@@ -249,7 +249,7 @@ fn collapse_block_comments(tokens: &mut Vec<LexedToken>) {
 
                             let kind = match result {
                                 Ok(tok) => SyntaxKind::from_token(tok),
-                                Err(_) => SyntaxKind::Error,
+                                Err(()) => SyntaxKind::Error,
                             };
                             let text = SmolStr::new(&remaining_part[span.clone()]);
                             remaining_tokens.push(LexedToken { kind, text });
@@ -304,7 +304,7 @@ fn split_misplaced_dsl_lines(tokens: &mut Vec<LexedToken>) {
                 }
                 let kind = match result {
                     Ok(tok) => SyntaxKind::from_token(tok),
-                    Err(_) => SyntaxKind::Error,
+                    Err(()) => SyntaxKind::Error,
                 };
                 new_toks.push(LexedToken { kind, text: SmolStr::new(&rest[span.clone()]) });
                 last_end = span.end;
@@ -316,7 +316,7 @@ fn split_misplaced_dsl_lines(tokens: &mut Vec<LexedToken>) {
                 });
             }
 
-            tokens.splice(i..i + 1, new_toks);
+            tokens.splice(i..=i, new_toks);
             // Advance past Ident + RParen so any nested `p)` in the re-lexed
             // remainder gets re-checked on the next iteration.
             i += 2;
@@ -365,7 +365,7 @@ impl Parser {
 
             let kind = match result {
                 Ok(tok) => SyntaxKind::from_token(tok),
-                Err(_) => SyntaxKind::Error,
+                Err(()) => SyntaxKind::Error,
             };
             let text = SmolStr::new(&source[span.clone()]);
             tokens.push(LexedToken { kind, text });
@@ -488,10 +488,10 @@ impl Parser {
 
         // If the very next token after the newline is Whitespace, the next
         // line is indented — treat as a continuation, not a boundary.
-        if let Some(next) = self.tokens.get(nl_idx + 1) {
-            if next.kind == SyntaxKind::Whitespace {
-                return false;
-            }
+        if let Some(next) = self.tokens.get(nl_idx + 1)
+            && next.kind == SyntaxKind::Whitespace
+        {
+            return false;
         }
         true
     }
@@ -535,7 +535,7 @@ impl Parser {
     /// Consume `kind` or emit a parse error.
     pub fn expect(&mut self, kind: SyntaxKind) {
         if !self.eat(kind) {
-            let msg = format!("expected {:?}", kind);
+            let msg = format!("expected {kind:?}");
             self.error(msg);
         }
     }
@@ -545,15 +545,12 @@ impl Parser {
     pub fn error(&mut self, msg: String) {
         // Determine offset and length from the current non-trivia token (if
         // any) so that the diagnostic spans the right source range.
-        let (offset, len) = self
-            .non_trivia_idx(0)
-            .map(|i| {
-                // Compute byte offset by summing lengths of all preceding tokens.
-                let off: usize = self.tokens[..i].iter().map(|t| t.text.len()).sum();
-                let l = self.tokens[i].text.len();
-                (off, l)
-            })
-            .unwrap_or((0, 0));
+        let (offset, len) = self.non_trivia_idx(0).map_or((0, 0), |i| {
+            // Compute byte offset by summing lengths of all preceding tokens.
+            let off: usize = self.tokens[..i].iter().map(|t| t.text.len()).sum();
+            let l = self.tokens[i].text.len();
+            (off, l)
+        });
 
         self.errors.push(ParseError { message: msg, offset, len });
 

@@ -104,10 +104,7 @@ impl LanguageServer for QLanguageServer {
         let uri = &params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
         let docs = self.documents.read().await;
-        let doc = match docs.get(uri) {
-            Some(d) => d,
-            None => return Ok(None),
-        };
+        let Some(doc) = docs.get(uri) else { return Ok(None) };
         let items = crate::completion::complete(doc, pos);
         Ok(Some(CompletionResponse::Array(items)))
     }
@@ -116,10 +113,7 @@ impl LanguageServer for QLanguageServer {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
         let docs = self.documents.read().await;
-        let doc = match docs.get(uri) {
-            Some(d) => d,
-            None => return Ok(None),
-        };
+        let Some(doc) = docs.get(uri) else { return Ok(None) };
         Ok(crate::hover::hover(doc, pos))
     }
 
@@ -127,10 +121,7 @@ impl LanguageServer for QLanguageServer {
         let uri = params.text_document_position_params.text_document.uri.clone();
         let pos = params.text_document_position_params.position;
         let docs = self.documents.read().await;
-        let doc = match docs.get(&uri) {
-            Some(d) => d,
-            None => return Ok(None),
-        };
+        let Some(doc) = docs.get(&uri) else { return Ok(None) };
         Ok(crate::goto_def::goto_definition(doc, pos, &uri))
     }
 
@@ -139,10 +130,7 @@ impl LanguageServer for QLanguageServer {
         let pos = params.text_document_position.position;
         let include_declaration = params.context.include_declaration;
         let docs = self.documents.read().await;
-        let doc = match docs.get(&uri) {
-            Some(d) => d,
-            None => return Ok(None),
-        };
+        let Some(doc) = docs.get(&uri) else { return Ok(None) };
         let locs = crate::references::find_references(doc, pos, include_declaration, &uri);
         Ok(Some(locs))
     }
@@ -154,10 +142,7 @@ impl LanguageServer for QLanguageServer {
         let uri = &params.text_document.uri;
         let pos = params.position;
         let docs = self.documents.read().await;
-        let doc = match docs.get(uri) {
-            Some(d) => d,
-            None => return Ok(None),
-        };
+        let Some(doc) = docs.get(uri) else { return Ok(None) };
         Ok(crate::rename::prepare_rename(doc, pos))
     }
 
@@ -165,10 +150,7 @@ impl LanguageServer for QLanguageServer {
         let uri = params.text_document_position.text_document.uri.clone();
         let pos = params.text_document_position.position;
         let docs = self.documents.read().await;
-        let doc = match docs.get(&uri) {
-            Some(d) => d,
-            None => return Ok(None),
-        };
+        let Some(doc) = docs.get(&uri) else { return Ok(None) };
         Ok(crate::rename::rename(doc, pos, params.new_name, &uri))
     }
 
@@ -178,10 +160,7 @@ impl LanguageServer for QLanguageServer {
     ) -> Result<Option<SemanticTokensResult>> {
         let uri = &params.text_document.uri;
         let docs = self.documents.read().await;
-        let doc = match docs.get(uri) {
-            Some(d) => d,
-            None => return Ok(None),
-        };
+        let Some(doc) = docs.get(uri) else { return Ok(None) };
         let data = crate::semantic::semantic_tokens(doc);
         Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
             result_id: None,
@@ -192,10 +171,7 @@ impl LanguageServer for QLanguageServer {
     async fn document_symbol(&self, params: DocumentSymbolParams) -> Result<Option<DocumentSymbolResponse>> {
         let uri = &params.text_document.uri;
         let docs = self.documents.read().await;
-        let doc = match docs.get(uri) {
-            Some(d) => d,
-            None => return Ok(None),
-        };
+        let Some(doc) = docs.get(uri) else { return Ok(None) };
         let symbols = crate::symbols::document_symbols(doc);
         Ok(Some(DocumentSymbolResponse::Nested(symbols)))
     }

@@ -11,12 +11,14 @@ fn collect_errors(src: &str, node: &SyntaxNode) -> Vec<String> {
             let r = elem.text_range();
             let off: usize = r.start().into();
             let line = src[..off].matches('\n').count() + 1;
-            let col = off - src[..off].rfind('\n').map(|i| i + 1).unwrap_or(0);
+            let col = off - src[..off].rfind('\n').map_or(0, |i| i + 1);
             // Avoid `{elem:?}` — the rowan Debug impl recurses into children
             // and overflows the default test-thread stack on deeply nested trees.
-            let snippet: String = elem.as_token().map(|t| t.text().to_string())
-                .unwrap_or_default();
-            out.push(format!("line {line}:{col} Error {:?}", snippet));
+            let snippet: String = elem.as_token().map_or_else(
+                String::new,
+                |t| t.text().to_string(),
+            );
+            out.push(format!("line {line}:{col} Error {snippet:?}"));
         }
     }
     out
