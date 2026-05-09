@@ -329,6 +329,14 @@ fn split_misplaced_dsl_lines(tokens: &mut Vec<LexedToken>) {
 pub struct Parser {
     tokens: Vec<LexedToken>,
     pos: usize,
+    /// Indices into `tokens` of every non-trivia token, in order. Built
+    /// once after lex/post-processing so `non_trivia_idx` is O(1) instead
+    /// of a linear scan from `self.pos`.
+    nt: Vec<usize>,
+    /// Rank of the next non-trivia token at or after `self.pos`. Maintained
+    /// by `bump`/`error` (each consumes exactly one non-trivia token after
+    /// any leading trivia).
+    nt_cursor: usize,
     pub(crate) events: Vec<Event>,
     errors: Vec<ParseError>,
 }
@@ -388,9 +396,18 @@ impl Parser {
         // `p)`) must be split back into Ident + RParen + rest.
         split_misplaced_dsl_lines(&mut tokens);
 
+        let nt: Vec<usize> = tokens
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| !t.kind.is_trivia())
+            .map(|(i, _)| i)
+            .collect();
+
         Self {
             tokens,
             pos: 0,
+            nt,
+            nt_cursor: 0,
             events: Vec::new(),
             errors: Vec::new(),
         }
@@ -414,21 +431,11 @@ impl Parser {
 
     /// The index of the `n`-th non-trivia token from the current position,
     /// or `None` if there are fewer than `n+1` such tokens remaining.
+    ///
+    /// O(1): the non-trivia indices are precomputed in `Parser::new`, and
+    /// `nt_cursor` is kept in sync by `bump` / `error`.
     fn non_trivia_idx(&self, n: usize) -> Option<usize> {
-        let mut count = 0;
-        let mut idx = self.pos;
-        loop {
-            if idx >= self.tokens.len() {
-                return None;
-            }
-            if !self.tokens[idx].kind.is_trivia() {
-                if count == n {
-                    return Some(idx);
-                }
-                count += 1;
-            }
-            idx += 1;
-        }
+        self.nt.get(self.nt_cursor + n).copied()
     }
 
     /// Peek at the current (non-trivia) token kind.
@@ -510,6 +517,7 @@ impl Parser {
             let tok = &self.tokens[self.pos];
             self.events.push(Event::Token { kind: tok.kind, text: tok.text.clone() });
             self.pos += 1;
+            self.nt_cursor += 1;
         }
     }
 
@@ -556,6 +564,7 @@ impl Parser {
             let tok = &self.tokens[self.pos];
             self.events.push(Event::Token { kind: SyntaxKind::Error, text: tok.text.clone() });
             self.pos += 1;
+            self.nt_cursor += 1;
         }
     }
 
