@@ -2,7 +2,6 @@ use tower_lsp::lsp_types::*;
 use q_parser::{SyntaxKind, SyntaxNode};
 use crate::document::Document;
 use crate::builtins::is_builtin;
-use crate::goto_def::resolve_definition;
 
 pub fn compute_diagnostics(doc: &Document) -> Vec<Diagnostic> {
     let mut out: Vec<Diagnostic> = doc.parse().errors.iter().map(|err| {
@@ -89,6 +88,7 @@ fn unindented_close_warnings(doc: &Document) -> Vec<Diagnostic> {
 /// position. If it returns `None`, emit a warning.
 fn unresolved_reference_warnings(doc: &Document) -> Vec<Diagnostic> {
     let root = doc.parse().syntax();
+    let table = doc.sym_table();
     let mut diagnostics = Vec::new();
 
     for node in root.descendants() {
@@ -110,7 +110,7 @@ fn unresolved_reference_warnings(doc: &Document) -> Vec<Diagnostic> {
             continue;
         }
         let off: usize = token.text_range().start().into();
-        if resolve_definition(&root, off, name).is_some() {
+        if table.resolve(off, name).is_some() {
             continue;
         }
 

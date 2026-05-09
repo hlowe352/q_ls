@@ -1,25 +1,21 @@
 use tower_lsp::lsp_types::*;
-use crate::completion::Q_BUILTINS;
+use crate::builtins::lookup_doc;
 use crate::document::Document;
 
 pub fn hover(doc: &Document, pos: Position) -> Option<Hover> {
     let offset = doc.offset_of(pos);
     let word = get_word_at(doc.text(), offset)?;
 
-    // Check builtins
-    for &(name, detail) in Q_BUILTINS {
-        if name == word {
-            return Some(Hover {
-                contents: HoverContents::Markup(MarkupContent {
-                    kind: MarkupKind::Markdown,
-                    value: format!("**{}** - {}", name, detail),
-                }),
-                range: None,
-            });
-        }
+    if let Some(detail) = lookup_doc(&word) {
+        return Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: format!("**{}** - {}", word, detail),
+            }),
+            range: None,
+        });
     }
 
-    // Check operators
     if let Some(doc_str) = operator_doc(&word) {
         return Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
