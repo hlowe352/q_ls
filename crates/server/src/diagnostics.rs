@@ -1,6 +1,8 @@
 use tower_lsp::lsp_types::*;
-use q_parser::SyntaxKind;
+use q_parser::{SyntaxKind, SyntaxNode};
 use crate::document::Document;
+use crate::builtins::is_builtin;
+use crate::goto_def::resolve_definition;
 
 pub fn compute_diagnostics(doc: &Document) -> Vec<Diagnostic> {
     let mut out: Vec<Diagnostic> = doc.parse().errors.iter().map(|err| {
@@ -16,6 +18,7 @@ pub fn compute_diagnostics(doc: &Document) -> Vec<Diagnostic> {
     }).collect();
 
     out.extend(unindented_close_warnings(doc));
+    out.extend(unresolved_reference_warnings(doc));
     out
 }
 
@@ -71,6 +74,90 @@ fn unindented_close_warnings(doc: &Document) -> Vec<Diagnostic> {
     diagnostics
 }
 
+/// Warn on identifier references that don't resolve to any visible
+/// definition.
+///
+/// Walks every `IdentExpr` / `Namespace` node, skips:
+/// - assignment LHS (the definition site itself),
+/// - parameter list entries (declarations, not refs),
+/// - tokens inside qSQL clauses (`SelectExpr`/`UpdateExpr`/`ExecExpr`/
+///   `DeleteExpr`) — column names there come from row context and aren't
+///   bound by visible code,
+/// - q built-ins (see [`crate::builtins`]).
+///
+/// For everything else, calls [`resolve_definition`] at the token's
+/// position. If it returns `None`, emit a warning.
+fn unresolved_reference_warnings(doc: &Document) -> Vec<Diagnostic> {
+    let root = doc.parse().syntax();
+    let mut diagnostics = Vec::new();
+
+    for node in root.descendants() {
+        if !matches!(node.kind(), SyntaxKind::IdentExpr | SyntaxKind::Namespace) {
+            continue;
+        }
+        if is_in_qsql(&node) || is_assignment_lhs(&node) || is_in_param_list(&node) {
+            continue;
+        }
+        let Some(token) = node
+            .descendants_with_tokens()
+            .filter_map(|el| el.into_token())
+            .find(|t| !t.kind().is_trivia())
+        else {
+            continue;
+        };
+        let name = token.text();
+        if is_builtin(name) {
+            continue;
+        }
+        let off: usize = token.text_range().start().into();
+        if resolve_definition(&root, off, name).is_some() {
+            continue;
+        }
+
+        let pos = doc.position_of(off);
+        let end = doc.position_of(off + name.len());
+        diagnostics.push(Diagnostic {
+            range: Range::new(pos, end),
+            severity: Some(DiagnosticSeverity::WARNING),
+            source: Some("q-ls".into()),
+            message: format!("unresolved reference `{name}`"),
+            ..Default::default()
+        });
+    }
+
+    diagnostics
+}
+
+fn is_in_qsql(node: &SyntaxNode) -> bool {
+    node.ancestors().any(|n| matches!(
+        n.kind(),
+        SyntaxKind::SelectExpr
+            | SyntaxKind::UpdateExpr
+            | SyntaxKind::ExecExpr
+            | SyntaxKind::DeleteExpr
+    ))
+}
+
+fn is_in_param_list(node: &SyntaxNode) -> bool {
+    node.ancestors().any(|n| n.kind() == SyntaxKind::ParamList)
+}
+
+/// True if this `IdentExpr` is the LHS of a `BinExpr` whose operator is
+/// `:` or `::` — i.e. this node *is* a definition, not a reference.
+fn is_assignment_lhs(node: &SyntaxNode) -> bool {
+    let Some(parent) = node.parent() else { return false; };
+    if parent.kind() != SyntaxKind::BinExpr {
+        return false;
+    }
+    if parent.first_child().as_ref() != Some(node) {
+        return false;
+    }
+    parent
+        .children_with_tokens()
+        .filter_map(|el| el.into_token())
+        .any(|t| t.kind() == SyntaxKind::Colon || t.kind() == SyntaxKind::ColonColon)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,6 +165,11 @@ mod tests {
     fn warns_for(src: &str) -> Vec<String> {
         let doc = Document::new(src.to_string(), 0);
         unindented_close_warnings(&doc).into_iter().map(|d| d.message).collect()
+    }
+
+    fn unresolved_for(src: &str) -> Vec<String> {
+        let doc = Document::new(src.to_string(), 0);
+        unresolved_reference_warnings(&doc).into_iter().map(|d| d.message).collect()
     }
 
     #[test]
@@ -114,5 +206,103 @@ mod tests {
         let src = "{x+1}\n";
         let warnings = warns_for(src);
         assert!(warnings.is_empty(), "expected no warnings, got: {warnings:?}");
+    }
+
+    #[test]
+    fn unresolved_flags_truly_undefined_name() {
+        let src = "f:{[x] x+y}";
+        let warnings = unresolved_for(src);
+        assert!(warnings.iter().any(|w| w.contains("`y`")), "got: {warnings:?}");
+    }
+
+    #[test]
+    fn unresolved_skips_builtins() {
+        let src = "f:{[x] count x}";
+        let warnings = unresolved_for(src);
+        assert!(warnings.is_empty(), "got: {warnings:?}");
+    }
+
+    #[test]
+    fn unresolved_skips_param() {
+        let src = "f:{[x] x+1}";
+        let warnings = unresolved_for(src);
+        assert!(warnings.is_empty(), "got: {warnings:?}");
+    }
+
+    #[test]
+    fn unresolved_skips_top_level_def() {
+        let src = "f:1; f";
+        let warnings = unresolved_for(src);
+        assert!(warnings.is_empty(), "got: {warnings:?}");
+    }
+
+    #[test]
+    fn unresolved_skips_qsql_columns() {
+        let src = "select sym, px from t";
+        let warnings = unresolved_for(src);
+        // `t` would normally be flagged as undefined, but it's the table arg
+        // to `from` which is part of qSQL — currently we suppress all qSQL
+        // refs. Adjust if/when qSQL gets tighter handling.
+        assert!(warnings.iter().all(|w| !w.contains("`sym`") && !w.contains("`px`")),
+            "qSQL columns must not be flagged: {warnings:?}");
+    }
+
+    #[test]
+    fn unresolved_skips_assignment_lhs() {
+        let src = "newName: 42";
+        let warnings = unresolved_for(src);
+        assert!(warnings.is_empty(), "assignment LHS is a def, got: {warnings:?}");
+    }
+
+    #[test]
+    fn unresolved_skips_q_namespaces() {
+        let src = ".q.id .Q.dd .z.s";
+        let warnings = unresolved_for(src);
+        assert!(warnings.is_empty(), "got: {warnings:?}");
+    }
+
+    #[test]
+    fn unresolved_flags_user_namespace_member_when_undefined() {
+        let src = "use:.app.cfg";
+        let warnings = unresolved_for(src);
+        assert!(warnings.iter().any(|w| w.contains("`.app.cfg`")), "got: {warnings:?}");
+    }
+
+    #[test]
+    fn unresolved_resolves_user_namespace_when_defined() {
+        let src = ".app.cfg:1; use:.app.cfg";
+        let warnings = unresolved_for(src);
+        assert!(warnings.is_empty(), "got: {warnings:?}");
+    }
+
+    /// Sanity: dbmaint.q is real q. Surface any unresolved-name false
+    /// positives so we can tune the builtin allow-list.
+    #[test]
+    fn unresolved_dbmaint_noise_floor() {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let src = std::fs::read_to_string(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../parser/tests/data/real_q/dbmaint.q",
+                )).expect("dbmaint.q fixture");
+                let warnings = unresolved_for(&src);
+                if !warnings.is_empty() {
+                    eprintln!("dbmaint.q produced {} unresolved-ref warnings:", warnings.len());
+                    for w in &warnings {
+                        eprintln!("  {w}");
+                    }
+                }
+                // dbmaint.q is self-contained: every reference resolves to a
+                // top-level def, lambda param, list-pattern element, implicit
+                // x/y/z, or a q built-in. Any future regression that drops
+                // this to >0 should be investigated, not silently accepted.
+                assert_eq!(warnings.len(), 0,
+                    "regression: dbmaint.q now reports unresolved refs: {:#?}",
+                    warnings);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

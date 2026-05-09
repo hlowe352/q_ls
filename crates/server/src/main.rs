@@ -1,4 +1,5 @@
 mod backend;
+mod builtins;
 mod document;
 mod diagnostics;
 mod completion;

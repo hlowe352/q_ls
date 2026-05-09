@@ -30,21 +30,40 @@ pub fn goto_definition(doc: &Document, pos: Position, uri: &Url) -> Option<GotoD
 ///    - any plain `name:` assignment that is **not** nested inside a
 ///      `Lambda` (top-level).
 ///   Takes the last such hit before `cursor_off`.
-fn resolve_definition(root: &SyntaxNode, cursor_off: usize, name: &str) -> Option<usize> {
+pub(crate) fn resolve_definition(root: &SyntaxNode, cursor_off: usize, name: &str) -> Option<usize> {
     if let Some(token) = leaf_token_at(root, cursor_off) {
         for lambda in token
             .parent_ancestors()
             .filter(|n| n.kind() == SyntaxKind::Lambda)
         {
+            // Explicit params take precedence over body-local assignments
+            // and implicit params.
             if let Some(off) = param_offset(&lambda, name) {
                 return Some(off);
             }
+            // Body-local `name:` shadows implicit `x`/`y`/`z` if both apply.
             if let Some(off) = last_local_assignment_before(&lambda, name, cursor_off) {
+                return Some(off);
+            }
+            if let Some(off) = implicit_param_offset(&lambda, name) {
                 return Some(off);
             }
         }
     }
     last_global_assignment_before(root, name, cursor_off)
+}
+
+/// q lambdas without an explicit `[…]` param list have implicit parameters
+/// `x`, `y`, `z`. If `lambda` has no `ParamList` and `name` is one of those,
+/// treat the lambda's opening brace as the definition site.
+fn implicit_param_offset(lambda: &SyntaxNode, name: &str) -> Option<usize> {
+    if !matches!(name, "x" | "y" | "z") {
+        return None;
+    }
+    if lambda.children().any(|c| c.kind() == SyntaxKind::ParamList) {
+        return None;
+    }
+    Some(lambda.text_range().start().into())
 }
 
 fn leaf_token_at(root: &SyntaxNode, offset: usize) -> Option<SyntaxToken> {
@@ -63,8 +82,11 @@ fn param_offset(lambda: &SyntaxNode, name: &str) -> Option<usize> {
         .map(|t| t.text_range().start().into())
 }
 
-/// Last plain `name:` assignment in `lambda`'s body, skipping nested
-/// lambdas, occurring strictly before `cursor_off`.
+/// Resolve a plain `name:` binding inside `lambda`'s body, skipping nested
+/// lambdas. Prefers the *last occurrence before* the cursor; if no such
+/// occurrence exists, falls back to the last occurrence after the cursor
+/// (handles q's right-to-left evaluation, where `(c:key db) like …` binds
+/// `c` after textually appearing later in `last c where (c:…)`).
 ///
 /// "Plain" excludes `name::` (global) and dotted `.foo.bar:` (global) —
 /// those bindings are visible to outer scopes too and are handled by the
@@ -74,52 +96,112 @@ fn last_local_assignment_before(
     name: &str,
     cursor_off: usize,
 ) -> Option<usize> {
-    fn visit(node: &SyntaxNode, name: &str, cursor_off: usize, best: &mut Option<usize>) {
+    fn record(
+        info_off: usize,
+        cursor_off: usize,
+        before: &mut Option<usize>,
+        after: &mut Option<usize>,
+    ) {
+        if info_off < cursor_off {
+            *before = Some(info_off);
+        } else if after.is_none() {
+            *after = Some(info_off);
+        }
+    }
+    fn visit(
+        node: &SyntaxNode,
+        name: &str,
+        cursor_off: usize,
+        before: &mut Option<usize>,
+        after: &mut Option<usize>,
+    ) {
         for child in node.children() {
             if child.kind() == SyntaxKind::Lambda {
                 continue;
             }
-            if child.kind() == SyntaxKind::BinExpr
-                && let Some(info) = assignment_info(&child)
-                && info.is_plain_local()
-                && info.name == name
-                && info.lhs_off < cursor_off
-            {
-                *best = Some(info.lhs_off);
+            if child.kind() == SyntaxKind::BinExpr {
+                if let Some(info) = assignment_info(&child)
+                    && info.is_plain_local()
+                    && info.name == name
+                {
+                    record(info.lhs_off, cursor_off, before, after);
+                } else if let Some(off) = list_pattern_offset(&child, name) {
+                    record(off, cursor_off, before, after);
+                }
             }
-            visit(&child, name, cursor_off, best);
+            visit(&child, name, cursor_off, before, after);
         }
     }
-    let mut best = None;
-    visit(lambda, name, cursor_off, &mut best);
-    best
+    let (mut before, mut after) = (None, None);
+    visit(lambda, name, cursor_off, &mut before, &mut after);
+    before.or(after)
 }
 
-/// Last globally-visible binding before `cursor_off`. Globals are:
+/// Match `(a; b:type; c):rhs` list-pattern assignments. If `bin`'s LHS is a
+/// `ListExpr` / `ParenExpr` and one of its element-names is `name`, return
+/// that element's identifier offset.
+fn list_pattern_offset(bin: &SyntaxNode, name: &str) -> Option<usize> {
+    let has_colon = bin
+        .children_with_tokens()
+        .filter_map(|el| el.into_token())
+        .any(|t| t.kind() == SyntaxKind::Colon || t.kind() == SyntaxKind::ColonColon);
+    if !has_colon {
+        return None;
+    }
+    let lhs = bin.first_child()?;
+    if !matches!(lhs.kind(), SyntaxKind::ListExpr | SyntaxKind::ParenExpr) {
+        return None;
+    }
+    for entry in lhs.children() {
+        // Each entry is either an IdentExpr (`data`) or a BinExpr with `:`
+        // (`db:getFSym`, `tname:\`s`). The bound name is the first
+        // non-trivia Ident token in the entry.
+        let token = entry
+            .descendants_with_tokens()
+            .filter_map(|el| el.into_token())
+            .find(|t| t.kind() == SyntaxKind::Ident || t.kind() == SyntaxKind::DottedIdent)?;
+        if token.text() == name {
+            return Some(token.text_range().start().into());
+        }
+    }
+    None
+}
+
+/// Last globally-visible binding visible to the cursor. Globals are:
 /// `::` assignments anywhere, dotted-name assignments anywhere, and plain
 /// `name:` assignments that are not inside any `Lambda`.
+///
+/// Top-level globals are hoisted in q (a function defined at line 300 is
+/// callable from line 30), so we don't require the def to precede the
+/// cursor textually. We still prefer the *last* occurrence before the
+/// cursor when several globals share a name; otherwise we take the last
+/// occurrence overall.
 fn last_global_assignment_before(
     root: &SyntaxNode,
     name: &str,
     cursor_off: usize,
 ) -> Option<usize> {
-    let mut best = None;
+    let (mut before, mut last_overall) = (None, None);
     for node in root.descendants() {
         if node.kind() != SyntaxKind::BinExpr {
             continue;
         }
         let Some(info) = assignment_info(&node) else { continue };
-        if info.name != name || info.lhs_off >= cursor_off {
+        if info.name != name {
             continue;
         }
         let is_global = info.is_double_colon
             || info.is_dotted
             || !is_inside_lambda(&node);
-        if is_global {
-            best = Some(info.lhs_off);
+        if !is_global {
+            continue;
+        }
+        last_overall = Some(info.lhs_off);
+        if info.lhs_off < cursor_off {
+            before = Some(info.lhs_off);
         }
     }
-    best
+    before.or(last_overall)
 }
 
 fn is_inside_lambda(node: &SyntaxNode) -> bool {
@@ -247,13 +329,24 @@ mod tests {
         assert_eq!(off, expected);
     }
 
-    /// Forward references don't resolve — definition must precede use.
+    /// Top-level forward references resolve — q hoists globals so a top-level
+    /// def at the bottom of the file is visible to references at the top.
     #[test]
-    fn forward_reference_unresolved() {
+    fn forward_reference_to_top_level_resolves() {
         let src = "a;\na:1";
         let cursor = src.find('a').unwrap();
-        let off = def_offset(src, cursor, "a");
-        assert!(off.is_none(), "forward ref should be unresolved, got {off:?}");
+        let off = def_offset(src, cursor, "a").expect("found");
+        let expected = src.find("a:1").unwrap();
+        assert_eq!(off, expected);
+    }
+
+    /// A reference to a name that is never defined anywhere returns None.
+    #[test]
+    fn truly_undefined_returns_none() {
+        let src = "f:{[x] x+y}";
+        let cursor = src.find("y}").unwrap();
+        let off = def_offset(src, cursor, "y");
+        assert!(off.is_none(), "y is not defined anywhere, got {off:?}");
     }
 
     /// `.ns.var:` inside a lambda is a global — visible from outside.
@@ -274,6 +367,33 @@ mod tests {
         let off = def_offset(src, cursor, "counter").expect("found");
         let expected = src.find("counter::5").unwrap();
         assert_eq!(off, expected);
+    }
+
+    #[test]
+    fn implicit_x_resolves_inside_paramless_lambda() {
+        let src = "{0=count x}";
+        let cursor = src.find("count x").unwrap() + "count ".len();
+        let off = def_offset(src, cursor, "x").expect("found");
+        let lambda_open = src.find('{').unwrap();
+        assert_eq!(off, lambda_open);
+    }
+
+    #[test]
+    fn local_let_shadows_implicit_x() {
+        let src = "{x:42; x+1}";
+        let cursor = src.find("x+1").unwrap();
+        let off = def_offset(src, cursor, "x").expect("found");
+        let expected = src.find("x:42").unwrap();
+        assert_eq!(off, expected, "local let must shadow implicit x");
+    }
+
+    #[test]
+    fn list_pattern_assignment_binds_each_name() {
+        let src = "{[p] (a;b;c):p; a+b+c}";
+        let cursor = src.find("a+b").unwrap();
+        let off = def_offset(src, cursor, "a").expect("found a");
+        let expected = src.find("(a").unwrap() + 1;
+        assert_eq!(off, expected, "expected `a` from `(a;b;c):p`");
     }
 
     /// Regression: in dbmaint.q line 482, `fn` referenced inside `fn1Col`'s
