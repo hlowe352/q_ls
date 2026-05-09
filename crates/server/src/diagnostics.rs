@@ -277,6 +277,10 @@ mod tests {
 
     /// Sanity: dbmaint.q is real q. Surface any unresolved-name false
     /// positives so we can tune the builtin allow-list.
+    ///
+    /// Runs on a wide-stack thread because rowan's `GreenNode` drops
+    /// recursively, and dbmaint.q nests deep enough to overflow the
+    /// default 2 MB test thread stack on teardown — not a logic issue.
     #[test]
     fn unresolved_dbmaint_noise_floor() {
         std::thread::Builder::new()
@@ -293,10 +297,6 @@ mod tests {
                         eprintln!("  {w}");
                     }
                 }
-                // dbmaint.q is self-contained: every reference resolves to a
-                // top-level def, lambda param, list-pattern element, implicit
-                // x/y/z, or a q built-in. Any future regression that drops
-                // this to >0 should be investigated, not silently accepted.
                 assert_eq!(warnings.len(), 0,
                     "regression: dbmaint.q now reports unresolved refs: {:#?}",
                     warnings);

@@ -43,65 +43,78 @@ struct LambdaScope {
 
 impl SymTable {
     pub fn build(root: &SyntaxNode) -> Self {
+        // Iterative DFS — recursion blows the stack on deeply nested files
+        // (real q files like dbmaint.q exceed the default 2 MB thread stack).
+        enum Step {
+            Visit(SyntaxNode),
+            PopScope,
+        }
+
         let mut t = SymTable::default();
-        let mut stack: Vec<usize> = Vec::new();
-        t.visit(root, &mut stack);
-        // Globals were inserted in walk order which is left-to-right, so
-        // each name's offset list is already ascending.
-        t
-    }
+        let mut scope_stack: Vec<usize> = Vec::new();
+        let mut work: Vec<Step> = vec![Step::Visit(root.clone())];
 
-    fn visit(&mut self, node: &SyntaxNode, stack: &mut Vec<usize>) {
-        let kind = node.kind();
-
-        // Harvest identifiers for completion.
-        if matches!(kind, SyntaxKind::IdentExpr | SyntaxKind::Namespace) {
-            if let Some(tok) = node
-                .descendants_with_tokens()
-                .filter_map(|el| el.into_token())
-                .find(|t| !t.kind().is_trivia())
-            {
-                self.idents.insert(SmolStr::new(tok.text()));
-            }
-        }
-
-        if kind == SyntaxKind::Lambda {
-            let scope_idx = self.lambdas.len();
-            let parent = stack.last().copied();
-            let has_param_list = node.children().any(|c| c.kind() == SyntaxKind::ParamList);
-            let mut params = Vec::new();
-            if let Some(plist) = node.children().find(|c| c.kind() == SyntaxKind::ParamList) {
-                for tok in plist
-                    .children_with_tokens()
-                    .filter_map(|el| el.into_token())
-                    .filter(|t| t.kind() == SyntaxKind::Ident)
-                {
-                    let off: u32 = tok.text_range().start().into();
-                    params.push((SmolStr::new(tok.text()), off));
+        while let Some(step) = work.pop() {
+            let node = match step {
+                Step::PopScope => {
+                    scope_stack.pop();
+                    continue;
                 }
+                Step::Visit(n) => n,
+            };
+
+            let kind = node.kind();
+
+            // Harvest identifiers for completion.
+            if matches!(kind, SyntaxKind::IdentExpr | SyntaxKind::Namespace)
+                && let Some(tok) = node
+                    .descendants_with_tokens()
+                    .filter_map(|el| el.into_token())
+                    .find(|t| !t.kind().is_trivia())
+            {
+                t.idents.insert(SmolStr::new(tok.text()));
             }
-            self.lambdas.push(LambdaScope {
-                range: node.text_range(),
-                parent,
-                has_param_list,
-                params,
-                locals: Vec::new(),
-            });
-            stack.push(scope_idx);
-            for child in node.children() {
-                self.visit(&child, stack);
+
+            if kind == SyntaxKind::Lambda {
+                let scope_idx = t.lambdas.len();
+                let parent = scope_stack.last().copied();
+                let has_param_list =
+                    node.children().any(|c| c.kind() == SyntaxKind::ParamList);
+                let mut params = Vec::new();
+                if let Some(plist) =
+                    node.children().find(|c| c.kind() == SyntaxKind::ParamList)
+                {
+                    for tok in plist
+                        .children_with_tokens()
+                        .filter_map(|el| el.into_token())
+                        .filter(|tok| tok.kind() == SyntaxKind::Ident)
+                    {
+                        let off: u32 = tok.text_range().start().into();
+                        params.push((SmolStr::new(tok.text()), off));
+                    }
+                }
+                t.lambdas.push(LambdaScope {
+                    range: node.text_range(),
+                    parent,
+                    has_param_list,
+                    params,
+                    locals: Vec::new(),
+                });
+                scope_stack.push(scope_idx);
+                // PopScope runs after all children have been processed.
+                work.push(Step::PopScope);
+            } else if kind == SyntaxKind::BinExpr {
+                t.record_bin_expr(&node, &scope_stack);
             }
-            stack.pop();
-            return;
+
+            // Push children in reverse so leftmost is visited first.
+            let children: Vec<SyntaxNode> = node.children().collect();
+            for child in children.into_iter().rev() {
+                work.push(Step::Visit(child));
+            }
         }
 
-        if kind == SyntaxKind::BinExpr {
-            self.record_bin_expr(node, stack);
-        }
-
-        for child in node.children() {
-            self.visit(&child, stack);
-        }
+        t
     }
 
     fn record_bin_expr(&mut self, bin: &SyntaxNode, stack: &[usize]) {

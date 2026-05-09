@@ -153,6 +153,9 @@ mod tests {
         assert_eq!(off, expected, "expected `a` from `(a;b;c):p`");
     }
 
+    /// Wide-stack thread: rowan's `GreenNode` drops recursively and
+    /// dbmaint.q nests deep enough to overflow the default 2 MB test
+    /// thread stack on teardown — not a logic issue.
     #[test]
     fn dbmaint_fn_resolves_to_lambda_param() {
         std::thread::Builder::new()
