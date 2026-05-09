@@ -126,7 +126,7 @@ fn atom(p: &mut Parser) -> Option<CompletedMarker> {
             if kind == SyntaxKind::Ident && p.nth(1) == Some(SyntaxKind::LBracket)
                 && let Some(text) = p.current_text()
             {
-                let ctrl_kind = match text.as_str() {
+                let ctrl_kind = match text {
                     "if" => Some(SyntaxKind::IfExpr),
                     "do" => Some(SyntaxKind::DoExpr),
                     "while" => Some(SyntaxKind::WhileExpr),
@@ -449,7 +449,7 @@ fn binary_op(p: &Parser) -> Option<SyntaxKind> {
     // Builtin infix verbs: `x mmu y`, `a in b`, `t lj u`, etc.
     if kind == SyntaxKind::Ident
         && let Some(t) = p.current_text()
-        && super::keywords::is_builtin_infix(&t)
+        && super::keywords::is_builtin_infix(t)
     {
         return Some(SyntaxKind::Ident);
     }

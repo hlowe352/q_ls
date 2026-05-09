@@ -5,7 +5,7 @@ use super::expressions;
 /// Check if current token is a qSQL keyword.
 pub fn at_qsql_keyword(p: &Parser) -> bool {
     p.at(SyntaxKind::Ident) && matches!(
-        p.current_text().as_deref(),
+        p.current_text(),
         Some("select" | "exec" | "update" | "delete")
     )
 }
@@ -13,7 +13,7 @@ pub fn at_qsql_keyword(p: &Parser) -> bool {
 /// Parse a qSQL expression. Called when at_qsql_keyword() is true.
 pub fn parse_qsql(p: &mut Parser) {
     let text = p.current_text().unwrap();
-    match text.as_str() {
+    match text {
         "select" => parse_select(p),
         "exec" => parse_exec(p),
         "update" => parse_update(p),
@@ -192,7 +192,7 @@ fn parse_where_list(p: &mut Parser) {
 
 /// Check if current token is a specific contextual keyword.
 fn at_kw(p: &Parser, kw: &str) -> bool {
-    p.at(SyntaxKind::Ident) && p.current_text().as_deref() == Some(kw)
+    p.at(SyntaxKind::Ident) && p.current_text() == Some(kw)
 }
 
 /// Check if we are at a statement boundary (newline or semicolon).
