@@ -7,6 +7,7 @@ mod hover;
 mod goto_def;
 mod line_index;
 mod references;
+mod semantic;
 mod sym_table;
 mod symbols;
 

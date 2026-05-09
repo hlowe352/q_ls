@@ -47,6 +47,17 @@ impl LanguageServer for QLanguageServer {
                 definition_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
+                        work_done_progress_options: Default::default(),
+                        legend: {
+                            let (token_types, token_modifiers) = crate::semantic::legend();
+                            SemanticTokensLegend { token_types, token_modifiers }
+                        },
+                        range: Some(false),
+                        full: Some(SemanticTokensFullOptions::Bool(true)),
+                    }),
+                ),
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
@@ -130,6 +141,23 @@ impl LanguageServer for QLanguageServer {
         };
         let locs = crate::references::find_references(doc, pos, include_declaration, &uri);
         Ok(Some(locs))
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
+        let uri = &params.text_document.uri;
+        let docs = self.documents.read().await;
+        let doc = match docs.get(uri) {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+        let data = crate::semantic::semantic_tokens(doc);
+        Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
+            result_id: None,
+            data,
+        })))
     }
 
     async fn document_symbol(&self, params: DocumentSymbolParams) -> Result<Option<DocumentSymbolResponse>> {
