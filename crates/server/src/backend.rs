@@ -47,6 +47,10 @@ impl LanguageServer for QLanguageServer {
                 definition_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
+                rename_provider: Some(OneOf::Right(RenameOptions {
+                    prepare_provider: Some(true),
+                    work_done_progress_options: Default::default(),
+                })),
                 semantic_tokens_provider: Some(
                     SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
                         work_done_progress_options: Default::default(),
@@ -141,6 +145,31 @@ impl LanguageServer for QLanguageServer {
         };
         let locs = crate::references::find_references(doc, pos, include_declaration, &uri);
         Ok(Some(locs))
+    }
+
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> Result<Option<PrepareRenameResponse>> {
+        let uri = &params.text_document.uri;
+        let pos = params.position;
+        let docs = self.documents.read().await;
+        let doc = match docs.get(uri) {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+        Ok(crate::rename::prepare_rename(doc, pos))
+    }
+
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        let uri = params.text_document_position.text_document.uri.clone();
+        let pos = params.text_document_position.position;
+        let docs = self.documents.read().await;
+        let doc = match docs.get(&uri) {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+        Ok(crate::rename::rename(doc, pos, params.new_name, &uri))
     }
 
     async fn semantic_tokens_full(
