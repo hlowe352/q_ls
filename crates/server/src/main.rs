@@ -5,6 +5,8 @@ mod diagnostics;
 mod completion;
 mod hover;
 mod goto_def;
+mod line_index;
+mod sym_table;
 mod symbols;
 
 use backend::QLanguageServer;
