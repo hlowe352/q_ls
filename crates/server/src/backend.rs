@@ -46,6 +46,7 @@ impl LanguageServer for QLanguageServer {
                 }),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                references_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
@@ -116,6 +117,19 @@ impl LanguageServer for QLanguageServer {
             None => return Ok(None),
         };
         Ok(crate::goto_def::goto_definition(doc, pos, &uri))
+    }
+
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let uri = params.text_document_position.text_document.uri.clone();
+        let pos = params.text_document_position.position;
+        let include_declaration = params.context.include_declaration;
+        let docs = self.documents.read().await;
+        let doc = match docs.get(&uri) {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+        let locs = crate::references::find_references(doc, pos, include_declaration, &uri);
+        Ok(Some(locs))
     }
 
     async fn document_symbol(&self, params: DocumentSymbolParams) -> Result<Option<DocumentSymbolResponse>> {
