@@ -3,7 +3,7 @@
 //! cached symbol table where each one resolves.
 
 use tower_lsp::lsp_types::*;
-use q_parser::{SyntaxKind, SyntaxNode};
+use q_parser::SyntaxKind;
 
 use crate::document::Document;
 
