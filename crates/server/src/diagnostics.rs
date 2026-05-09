@@ -81,7 +81,7 @@ fn unindented_close_warnings(doc: &Document) -> Vec<Diagnostic> {
 ///   bound by visible code,
 /// - q built-ins (see [`crate::builtins`]).
 ///
-/// For everything else, calls [`resolve_definition`] at the token's
+/// For everything else, calls `SymTable::resolve` at the token's
 /// position. If it returns `None`, emit a warning.
 fn unresolved_reference_warnings(doc: &Document) -> Vec<Diagnostic> {
     let root = doc.parse().syntax();
