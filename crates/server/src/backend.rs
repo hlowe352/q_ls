@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tower_lsp::jsonrpc::Result;
-use tower_lsp::lsp_types::*;
-use tower_lsp::{Client, LanguageServer};
+use tower_lsp_server::jsonrpc::Result;
+use tower_lsp_server::ls_types::*;
+use tower_lsp_server::{Client, LanguageServer};
 
 use crate::document::Document;
 
 pub struct QLanguageServer {
     client: Client,
-    documents: Arc<RwLock<HashMap<Url, Document>>>,
+    documents: Arc<RwLock<HashMap<Uri, Document>>>,
 }
 
 impl QLanguageServer {
@@ -20,7 +20,7 @@ impl QLanguageServer {
         }
     }
 
-    async fn on_change(&self, uri: Url, doc: &Document) {
+    async fn on_change(&self, uri: Uri, doc: &Document) {
         let diagnostics = crate::diagnostics::compute_diagnostics(doc);
         self.client
             .publish_diagnostics(uri, diagnostics, Some(doc.version()))
@@ -28,7 +28,6 @@ impl QLanguageServer {
     }
 }
 
-#[tower_lsp::async_trait]
 impl LanguageServer for QLanguageServer {
     async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
         Ok(InitializeResult {
@@ -54,6 +53,7 @@ impl LanguageServer for QLanguageServer {
                 name: "q-ls".into(),
                 version: Some(env!("CARGO_PKG_VERSION").into()),
             }),
+            offset_encoding: None,
         })
     }
 

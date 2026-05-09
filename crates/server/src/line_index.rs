@@ -7,7 +7,7 @@
 //! belongs to the previous line for column counting; only the `\n` advances
 //! the line index.
 
-use tower_lsp::lsp_types::Position;
+use tower_lsp_server::ls_types::Position;
 
 /// Line-start byte offsets, plus the total length. `starts[i]` is the byte
 /// offset of the first character on line `i`. `starts.last()` equals

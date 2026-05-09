@@ -1,7 +1,7 @@
-use tower_lsp::lsp_types::*;
+use tower_lsp_server::ls_types::*;
 use crate::document::Document;
 
-pub fn goto_definition(doc: &Document, pos: Position, uri: &Url) -> Option<GotoDefinitionResponse> {
+pub fn goto_definition(doc: &Document, pos: Position, uri: &Uri) -> Option<GotoDefinitionResponse> {
     let offset = doc.offset_of(pos);
     let target_name = get_identifier_at(doc.text(), offset)?;
 

@@ -2,7 +2,7 @@
 //! the cursor by scanning every ident in the document and asking the
 //! cached symbol table where each one resolves.
 
-use tower_lsp::lsp_types::*;
+use tower_lsp_server::ls_types::*;
 use q_parser::SyntaxKind;
 
 use crate::document::Document;
@@ -11,7 +11,7 @@ pub fn find_references(
     doc: &Document,
     pos: Position,
     include_declaration: bool,
-    uri: &Url,
+    uri: &Uri,
 ) -> Vec<Location> {
     let cursor = doc.offset_of(pos);
     let table = doc.sym_table();
@@ -110,7 +110,7 @@ mod tests {
 
     fn refs(src: &str, cursor: usize, include_decl: bool) -> Vec<usize> {
         let doc = Document::new(src.to_string(), 0);
-        let uri: Url = "file:///x.q".parse().unwrap();
+        let uri: Uri = "file:///x.q".parse().unwrap();
         let pos = doc.position_of(cursor);
         find_references(&doc, pos, include_decl, &uri)
             .into_iter()

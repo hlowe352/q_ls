@@ -11,7 +11,7 @@ mod sym_table;
 mod symbols;
 
 use backend::QLanguageServer;
-use tower_lsp::{LspService, Server};
+use tower_lsp_server::{LspService, Server};
 
 #[tokio::main]
 async fn main() {

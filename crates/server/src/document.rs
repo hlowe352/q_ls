@@ -1,5 +1,5 @@
 use q_parser::Parse;
-use tower_lsp::lsp_types::*;
+use tower_lsp_server::ls_types::*;
 
 use crate::line_index::LineIndex;
 use crate::sym_table::SymTable;
