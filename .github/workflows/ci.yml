@@ -59,7 +59,9 @@ jobs:
             crates/parser/fuzz
 
       - name: install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
 
       - name: fuzz parse target (60s)
         working-directory: crates/parser
