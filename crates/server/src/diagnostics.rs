@@ -1,8 +1,7 @@
-use tower_lsp::lsp_types::*;
+use tower_lsp_server::ls_types::*;
 use q_parser::{SyntaxKind, SyntaxNode};
 use crate::document::Document;
 use crate::builtins::is_builtin;
-use crate::goto_def::resolve_definition;
 
 pub fn compute_diagnostics(doc: &Document) -> Vec<Diagnostic> {
     let mut out: Vec<Diagnostic> = doc.parse().errors.iter().map(|err| {
@@ -47,10 +46,7 @@ fn unindented_close_warnings(doc: &Document) -> Vec<Diagnostic> {
         }
 
         // Single-line scope: skip — only flag closes that span multiple lines.
-        let parent = match tok.parent() {
-            Some(p) => p,
-            None => continue,
-        };
+        let Some(parent) = tok.parent() else { continue };
         let open_off: usize = parent.text_range().start().into();
         if !src[open_off..off].contains('\n') {
             continue;
@@ -85,10 +81,11 @@ fn unindented_close_warnings(doc: &Document) -> Vec<Diagnostic> {
 ///   bound by visible code,
 /// - q built-ins (see [`crate::builtins`]).
 ///
-/// For everything else, calls [`resolve_definition`] at the token's
+/// For everything else, calls `SymTable::resolve` at the token's
 /// position. If it returns `None`, emit a warning.
 fn unresolved_reference_warnings(doc: &Document) -> Vec<Diagnostic> {
     let root = doc.parse().syntax();
+    let table = doc.sym_table();
     let mut diagnostics = Vec::new();
 
     for node in root.descendants() {
@@ -110,7 +107,7 @@ fn unresolved_reference_warnings(doc: &Document) -> Vec<Diagnostic> {
             continue;
         }
         let off: usize = token.text_range().start().into();
-        if resolve_definition(&root, off, name).is_some() {
+        if table.resolve(off, name).is_some() {
             continue;
         }
 
@@ -277,6 +274,10 @@ mod tests {
 
     /// Sanity: dbmaint.q is real q. Surface any unresolved-name false
     /// positives so we can tune the builtin allow-list.
+    ///
+    /// Runs on a wide-stack thread because rowan's `GreenNode` drops
+    /// recursively, and dbmaint.q nests deep enough to overflow the
+    /// default 2 MB test thread stack on teardown — not a logic issue.
     #[test]
     fn unresolved_dbmaint_noise_floor() {
         std::thread::Builder::new()
@@ -293,13 +294,8 @@ mod tests {
                         eprintln!("  {w}");
                     }
                 }
-                // dbmaint.q is self-contained: every reference resolves to a
-                // top-level def, lambda param, list-pattern element, implicit
-                // x/y/z, or a q built-in. Any future regression that drops
-                // this to >0 should be investigated, not silently accepted.
-                assert_eq!(warnings.len(), 0,
-                    "regression: dbmaint.q now reports unresolved refs: {:#?}",
-                    warnings);
+                assert!(warnings.is_empty(),
+                    "regression: dbmaint.q now reports unresolved refs: {warnings:#?}");
             })
             .unwrap()
             .join()

@@ -1,16 +1,27 @@
 use q_parser::Parse;
-use tower_lsp::lsp_types::*;
+use tower_lsp_server::ls_types::*;
+
+use crate::line_index::LineIndex;
+use crate::sym_table::SymTable;
 
 pub struct Document {
     text: String,
     version: i32,
     parse: Parse,
+    line_index: LineIndex,
+    sym_table: SymTable,
 }
 
 impl Document {
     pub fn new(text: String, version: i32) -> Self {
         let parse = q_parser::parse(&text);
-        Self { text, version, parse }
+        let line_index = LineIndex::new(&text);
+        let sym_table = SymTable::build(&parse.syntax());
+        Self { text, version, parse, line_index, sym_table }
+    }
+
+    pub fn sym_table(&self) -> &SymTable {
+        &self.sym_table
     }
 
     pub fn version(&self) -> i32 {
@@ -26,44 +37,62 @@ impl Document {
     }
 
     pub fn apply_changes(&mut self, changes: Vec<TextDocumentContentChangeEvent>, version: i32) {
+        // Per LSP spec, edits in a single notification apply in order against
+        // the original document. Walk the list once: for ranged edits, resolve
+        // against the *current* text & line index, then mutate (refreshing
+        // the line index after each edit so subsequent ranges stay correct).
+        // A full-document replace (no `range`) discards prior text.
         for change in changes {
-            if let Some(range) = change.range {
-                let start = self.offset_of(range.start);
-                let end = self.offset_of(range.end);
-                self.text.replace_range(start..end, &change.text);
-            } else {
-                self.text = change.text;
+            match change.range {
+                Some(range) => {
+                    let s = self.line_index.offset(&self.text, range.start);
+                    let e = self.line_index.offset(&self.text, range.end);
+                    self.text.replace_range(s..e, &change.text);
+                    self.line_index = LineIndex::new(&self.text);
+                }
+                None => {
+                    self.text = change.text;
+                    self.line_index = LineIndex::new(&self.text);
+                }
             }
         }
+
         self.version = version;
         self.parse = q_parser::parse(&self.text);
+        self.sym_table = SymTable::build(&self.parse.syntax());
     }
 
     pub fn offset_of(&self, pos: Position) -> usize {
-        let mut offset = 0;
-        for (i, line) in self.text.split('\n').enumerate() {
-            if i == pos.line as usize {
-                return offset + pos.character as usize;
-            }
-            offset += line.len() + 1;
-        }
-        self.text.len()
+        self.line_index.offset(&self.text, pos)
     }
 
     pub fn position_of(&self, offset: usize) -> Position {
-        let mut line = 0u32;
-        let mut col = 0u32;
-        for (i, ch) in self.text.char_indices() {
-            if i == offset {
-                break;
-            }
-            if ch == '\n' {
-                line += 1;
-                col = 0;
-            } else {
-                col += 1;
-            }
-        }
-        Position::new(line, col)
+        self.line_index.position(&self.text, offset)
     }
+
+    /// Identifier text spanning byte `offset`, plus its `[start, end)` byte
+    /// range. q identifiers are runs of `[A-Za-z0-9_.]`. Returns `None` if
+    /// `offset` falls outside any such run.
+    pub fn ident_at(&self, offset: usize) -> Option<(&str, usize, usize)> {
+        if offset > self.text.len() {
+            return None;
+        }
+        let bytes = self.text.as_bytes();
+        let mut start = offset;
+        let mut end = offset;
+        while start > 0 && is_ident_byte(bytes[start - 1]) {
+            start -= 1;
+        }
+        while end < bytes.len() && is_ident_byte(bytes[end]) {
+            end += 1;
+        }
+        if start == end {
+            return None;
+        }
+        Some((&self.text[start..end], start, end))
+    }
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'.'
 }

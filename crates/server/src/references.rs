@@ -1,0 +1,180 @@
+//! `textDocument/references` — find all references to the symbol under
+//! the cursor.
+//!
+//! "Same symbol" here means: same name, same scope. Multiple rebindings of
+//! a name within one scope (`a:1; a:2; a`) are treated as one symbol with
+//! several def sites — they all get returned, and rename rewrites all of
+//! them. A name with the same spelling but a different scope (an outer
+//! global vs. a lambda parameter) is a *different* symbol and is excluded.
+
+use std::collections::HashSet;
+
+use tower_lsp_server::ls_types::*;
+use q_parser::SyntaxKind;
+
+use crate::document::Document;
+
+pub fn find_references(
+    doc: &Document,
+    pos: Position,
+    include_declaration: bool,
+    uri: &Uri,
+) -> Vec<Location> {
+    let cursor = doc.offset_of(pos);
+    let table = doc.sym_table();
+    let Some((name, _, _)) = doc.ident_at(cursor) else { return Vec::new() };
+    // Copy the borrowed name so we can read the syntax tree without
+    // holding a reference into `doc.text`.
+    let name = name.to_string();
+
+    // All def sites of `name` in the scope the cursor lives in. If `name`
+    // isn't bound anywhere visible, bail.
+    let def_offsets: HashSet<usize> =
+        table.def_offsets_for(cursor, &name).into_iter().collect();
+    if def_offsets.is_empty() {
+        return Vec::new();
+    }
+
+    let root = doc.parse().syntax();
+    let mut out = Vec::new();
+    for token in root
+        .descendants_with_tokens()
+        .filter_map(|el| el.into_token())
+    {
+        let tk = token.kind();
+        if !matches!(tk, SyntaxKind::Ident | SyntaxKind::DottedIdent) {
+            continue;
+        }
+        if token.text() != name {
+            continue;
+        }
+        let off: usize = token.text_range().start().into();
+
+        let parent_kind = token.parent().map(|p| p.kind());
+        let in_param_list = is_in_kind(&token, SyntaxKind::ParamList);
+
+        // Inclusion rule:
+        //   - the token IS one of the def sites (param token, list-pattern
+        //     element, assignment LHS), or
+        //   - the token is a reference that resolves to one of those defs.
+        let is_decl = def_offsets.contains(&off);
+        let resolves_to_def = is_decl
+            || (!in_param_list
+                && matches!(parent_kind, Some(SyntaxKind::IdentExpr | SyntaxKind::Namespace))
+                && table
+                    .resolve(off, &name)
+                    .is_some_and(|d| def_offsets.contains(&d)));
+
+        if !resolves_to_def {
+            continue;
+        }
+
+        if is_decl && !include_declaration {
+            continue;
+        }
+
+        let start = doc.position_of(off);
+        let end = doc.position_of(off + name.len());
+        out.push(Location {
+            uri: uri.clone(),
+            range: Range::new(start, end),
+        });
+    }
+
+    out
+}
+
+fn is_in_kind(token: &q_parser::SyntaxToken, kind: SyntaxKind) -> bool {
+    let mut cur = token.parent();
+    while let Some(node) = cur {
+        if node.kind() == kind {
+            return true;
+        }
+        cur = node.parent();
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn refs(src: &str, cursor: usize, include_decl: bool) -> Vec<usize> {
+        let doc = Document::new(src.to_string(), 0);
+        let uri: Uri = "file:///x.q".parse().unwrap();
+        let pos = doc.position_of(cursor);
+        find_references(&doc, pos, include_decl, &uri)
+            .into_iter()
+            .map(|loc| {
+                doc.offset_of(loc.range.start)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn finds_global_uses() {
+        let src = "x:1; y:x+x; z:x";
+        let cursor = src.find("x:1").unwrap();
+        let r = refs(src, cursor, true);
+        assert_eq!(
+            r,
+            vec![
+                src.find("x:1").unwrap(),
+                src.find("x+x").unwrap(),
+                src.find("x+x").unwrap() + 2,
+                src.rfind('x').unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn excludes_declaration_when_asked() {
+        let src = "x:1; y:x+x";
+        let cursor = src.find("x:1").unwrap();
+        let r = refs(src, cursor, false);
+        // Only the two uses, not the def.
+        assert_eq!(r.len(), 2);
+        assert!(r.iter().all(|&o| o != src.find("x:1").unwrap()));
+    }
+
+    #[test]
+    fn lambda_param_scope() {
+        let src = "x:99; f:{[x] x+1}; y:x";
+        // Cursor on the parameter `[x]`.
+        let cursor = src.find("[x]").unwrap() + 1;
+        let r = refs(src, cursor, true);
+        // Param def + the `x+1` reference. The outer `x:99` and `y:x`
+        // refer to a *different* x.
+        assert_eq!(r.len(), 2);
+        assert!(r.contains(&(src.find("[x]").unwrap() + 1)));
+        assert!(r.contains(&src.find("x+1").unwrap()));
+    }
+
+    #[test]
+    fn rebindings_in_same_scope_are_one_symbol() {
+        // Two local rebindings + one use — find_refs must return all 3.
+        let src = "f:{a:1; a:2; a}";
+        let cursor = src.rfind('a').unwrap();
+        let r = refs(src, cursor, true);
+        assert_eq!(r.len(), 3, "want all 3 a sites, got {r:?}");
+        assert!(r.contains(&src.find("a:1").unwrap()));
+        assert!(r.contains(&src.find("a:2").unwrap()));
+    }
+
+    #[test]
+    fn global_rebindings_are_one_symbol() {
+        let src = "a:1; a:2; a";
+        let cursor = src.find("a:2").unwrap();
+        let r = refs(src, cursor, true);
+        assert_eq!(r.len(), 3, "want 3 a sites, got {r:?}");
+    }
+
+    #[test]
+    fn cursor_off_ident_returns_empty() {
+        let src = "a:1; b:2;";
+        // Cursor on the leading semicolon — no ident here.
+        let cursor = src.find(';').unwrap();
+        let r = refs(src, cursor, true);
+        assert!(r.is_empty(), "got {r:?}");
+    }
+}

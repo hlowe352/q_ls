@@ -609,8 +609,8 @@ mod tests {
         let tokens: Vec<_> = Token::lexer("assert.true").collect();
         for (i, t) in tokens.iter().enumerate() {
             match t {
-                Ok(tok) => println!("  {}: {:?}", i, tok),
-                Err(()) => println!("  {}: ERROR", i),
+                Ok(tok) => println!("  {i}: {tok:?}"),
+                Err(()) => println!("  {i}: ERROR"),
             }
         }
         assert_eq!(tokens.len(), 1); // single namespaced ident
@@ -714,7 +714,7 @@ mod tests {
     fn lex_compound_assign_all() {
         for op in ["+:", "-:", "*:", "%:", ">:", "<:", "~:", "=:", "_:", "#:", "$:", "!:", "|:", "&:", "?:", "^:", ",:", "@:"] {
             let mut lex = Token::lexer(op);
-            assert_eq!(lex.next(), Some(Ok(Token::CompoundAssign)), "failed for {}", op);
+            assert_eq!(lex.next(), Some(Ok(Token::CompoundAssign)), "failed for {op}");
         }
     }
 

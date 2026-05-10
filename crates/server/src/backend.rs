@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tower_lsp::jsonrpc::Result;
-use tower_lsp::lsp_types::*;
-use tower_lsp::{Client, LanguageServer};
+use tower_lsp_server::jsonrpc::Result;
+use tower_lsp_server::ls_types::*;
+use tower_lsp_server::{Client, LanguageServer};
 
 use crate::document::Document;
 
 pub struct QLanguageServer {
     client: Client,
-    documents: Arc<RwLock<HashMap<Url, Document>>>,
+    documents: Arc<RwLock<HashMap<Uri, Document>>>,
 }
 
 impl QLanguageServer {
@@ -20,7 +20,7 @@ impl QLanguageServer {
         }
     }
 
-    async fn on_change(&self, uri: Url, doc: &Document) {
+    async fn on_change(&self, uri: Uri, doc: &Document) {
         let diagnostics = crate::diagnostics::compute_diagnostics(doc);
         self.client
             .publish_diagnostics(uri, diagnostics, Some(doc.version()))
@@ -28,7 +28,6 @@ impl QLanguageServer {
     }
 }
 
-#[tower_lsp::async_trait]
 impl LanguageServer for QLanguageServer {
     async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
         Ok(InitializeResult {
@@ -46,13 +45,34 @@ impl LanguageServer for QLanguageServer {
                 }),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                references_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
+                rename_provider: Some(OneOf::Right(RenameOptions {
+                    prepare_provider: Some(true),
+                    work_done_progress_options: Default::default(),
+                })),
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
+                        work_done_progress_options: Default::default(),
+                        legend: {
+                            let (token_types, token_modifiers) = crate::semantic::legend();
+                            SemanticTokensLegend { token_types, token_modifiers }
+                        },
+                        range: Some(false),
+                        full: Some(SemanticTokensFullOptions::Bool(true)),
+                    }),
+                ),
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
                 name: "q-ls".into(),
                 version: Some(env!("CARGO_PKG_VERSION").into()),
             }),
+            // tower-lsp-server defaults to UTF-16, which is what LSP spec
+            // mandates and what our `LineIndex` is built for. `None` ==
+            // "do not negotiate, use spec default" — explicit so the field
+            // doesn't read as forgotten.
+            offset_encoding: None,
         })
     }
 
@@ -88,10 +108,7 @@ impl LanguageServer for QLanguageServer {
         let uri = &params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
         let docs = self.documents.read().await;
-        let doc = match docs.get(uri) {
-            Some(d) => d,
-            None => return Ok(None),
-        };
+        let Some(doc) = docs.get(uri) else { return Ok(None) };
         let items = crate::completion::complete(doc, pos);
         Ok(Some(CompletionResponse::Array(items)))
     }
@@ -100,10 +117,7 @@ impl LanguageServer for QLanguageServer {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
         let docs = self.documents.read().await;
-        let doc = match docs.get(uri) {
-            Some(d) => d,
-            None => return Ok(None),
-        };
+        let Some(doc) = docs.get(uri) else { return Ok(None) };
         Ok(crate::hover::hover(doc, pos))
     }
 
@@ -111,20 +125,57 @@ impl LanguageServer for QLanguageServer {
         let uri = params.text_document_position_params.text_document.uri.clone();
         let pos = params.text_document_position_params.position;
         let docs = self.documents.read().await;
-        let doc = match docs.get(&uri) {
-            Some(d) => d,
-            None => return Ok(None),
-        };
+        let Some(doc) = docs.get(&uri) else { return Ok(None) };
         Ok(crate::goto_def::goto_definition(doc, pos, &uri))
+    }
+
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let uri = params.text_document_position.text_document.uri.clone();
+        let pos = params.text_document_position.position;
+        let include_declaration = params.context.include_declaration;
+        let docs = self.documents.read().await;
+        let Some(doc) = docs.get(&uri) else { return Ok(None) };
+        let locs = crate::references::find_references(doc, pos, include_declaration, &uri);
+        Ok(Some(locs))
+    }
+
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> Result<Option<PrepareRenameResponse>> {
+        let uri = &params.text_document.uri;
+        let pos = params.position;
+        let docs = self.documents.read().await;
+        let Some(doc) = docs.get(uri) else { return Ok(None) };
+        Ok(crate::rename::prepare_rename(doc, pos))
+    }
+
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        let uri = params.text_document_position.text_document.uri.clone();
+        let pos = params.text_document_position.position;
+        let docs = self.documents.read().await;
+        let Some(doc) = docs.get(&uri) else { return Ok(None) };
+        Ok(crate::rename::rename(doc, pos, params.new_name, &uri))
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
+        let uri = &params.text_document.uri;
+        let docs = self.documents.read().await;
+        let Some(doc) = docs.get(uri) else { return Ok(None) };
+        let data = crate::semantic::semantic_tokens(doc);
+        Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
+            result_id: None,
+            data,
+        })))
     }
 
     async fn document_symbol(&self, params: DocumentSymbolParams) -> Result<Option<DocumentSymbolResponse>> {
         let uri = &params.text_document.uri;
         let docs = self.documents.read().await;
-        let doc = match docs.get(uri) {
-            Some(d) => d,
-            None => return Ok(None),
-        };
+        let Some(doc) = docs.get(uri) else { return Ok(None) };
         let symbols = crate::symbols::document_symbols(doc);
         Ok(Some(DocumentSymbolResponse::Nested(symbols)))
     }

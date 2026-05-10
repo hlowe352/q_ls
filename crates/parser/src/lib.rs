@@ -589,11 +589,11 @@ show q1b[];
 
     #[test]
     fn parse_dbmaint_check_existence() {
-        let source = r#"checkTabExistence:{[db:getFSym;tname:`s]
+        let source = r"checkTabExistence:{[db:getFSym;tname:`s]
     if[tname in key db; :1b];
     checkTablePathsExist buildTablePaths[db;tname];
     1b
- }"#;
+ }";
         let parse = parse(source);
         assert!(parse.errors.is_empty(), "errors: {:?}", parse.errors);
     }
@@ -660,13 +660,13 @@ show q1b[];
 
     #[test]
     fn parse_dbmaint_del_tab() {
-        let source = r#"delTab:{[db:getFSym;tname:`s]
+        let source = r"delTab:{[db:getFSym;tname:`s]
     t:getTableType[db;tname];
     if[t ~ `flat; hdel .Q.dd[db;tname]; :()];
     del1Tab peach $[`splayed ~ t;
         enlist .Q.dd[db;tname];
         checkTablePathsExist buildTablePaths[db;tname]]
-  }"#;
+  }";
         let parse = parse(source);
         assert!(parse.errors.is_empty(), "errors: {:?}", parse.errors);
     }
@@ -768,9 +768,9 @@ show q1b[];
     #[test]
     fn parse_compound_assign_various() {
         for op in ["*:", "%:", ">:", "<:", "~:", "=:", "_:", "#:", "$:", "!:", "|:", "&:", "?:", "^:", "@:"] {
-            let source = format!("x{}1", op);
+            let source = format!("x{op}1");
             let parse = parse(&source);
-            assert!(parse.errors.is_empty(), "errors for {}: {:?}", op, parse.errors);
+            assert!(parse.errors.is_empty(), "errors for {op}: {:?}", parse.errors);
         }
     }
 
@@ -830,9 +830,9 @@ show q1b[];
     #[test]
     fn parse_temporal_infs() {
         for suffix in ["g", "m", "n", "p", "u", "v", "z"] {
-            let source = format!("0W{}", suffix);
+            let source = format!("0W{suffix}");
             let parse = parse(&source);
-            assert!(parse.errors.is_empty(), "errors for 0W{}: {:?}", suffix, parse.errors);
+            assert!(parse.errors.is_empty(), "errors for 0W{suffix}: {:?}", parse.errors);
         }
     }
 
@@ -947,3 +947,4 @@ show q1b[];
         assert_eq!(count, 2, "expected 2 stmts, got {count}:\n{dump}");
     }
 }
+

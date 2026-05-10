@@ -5,10 +5,15 @@ mod diagnostics;
 mod completion;
 mod hover;
 mod goto_def;
+mod line_index;
+mod references;
+mod rename;
+mod semantic;
+mod sym_table;
 mod symbols;
 
 use backend::QLanguageServer;
-use tower_lsp::{LspService, Server};
+use tower_lsp_server::{LspService, Server};
 
 #[tokio::main]
 async fn main() {
