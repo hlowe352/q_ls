@@ -947,3 +947,4 @@ show q1b[];
         assert_eq!(count, 2, "expected 2 stmts, got {count}:\n{dump}");
     }
 }
+

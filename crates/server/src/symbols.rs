@@ -75,10 +75,10 @@ fn first_lhs_name(bin: &SyntaxNode) -> Option<SyntaxToken> {
 /// transparent shapes), return that lambda.
 ///
 /// "Transparent" wrappers are nodes where the lambda is the value of the
-/// expression: parentheses around it, composition with each (`'[{…};…]`),
-/// adverb application (`{…}/`). Crucially, `ApplyExpr` / `ArgList` / `IndexExpr`
-/// are *not* transparent — passing a lambda as an argument (`f:g[{x+1}]`)
-/// does not make `f` a function.
+/// expression: an `ExprStmt` wrapper inside a `ParenExpr`, the `ParenExpr`
+/// itself, or an `AdverbExpr` (`{…}/`). Crucially, `ApplyExpr` / `ArgList` /
+/// `IndexExpr` are *not* transparent — passing a lambda as an argument
+/// (`f:g[{x+1}]`) does not make `f` a function.
 fn find_rhs_lambda(bin: &SyntaxNode) -> Option<SyntaxNode> {
     // Skip LHS; the RHS is the next child node.
     let mut iter = bin.children();
@@ -92,10 +92,11 @@ fn peel_to_lambda(node: SyntaxNode) -> Option<SyntaxNode> {
     loop {
         match cur.kind() {
             SyntaxKind::Lambda => return Some(cur),
+            // ParenExpr wraps its inner expression in an ExprStmt — peel
+            // both. AdverbExpr is a thin wrapper around its operand.
             SyntaxKind::ParenExpr
-            | SyntaxKind::Composition
+            | SyntaxKind::ExprStmt
             | SyntaxKind::AdverbExpr => {
-                // Descend through the wrapper to its first non-trivia child.
                 let next = cur.children().next()?;
                 cur = next;
             }
@@ -156,6 +157,15 @@ mod tests {
         assert_eq!(names(&syms), vec!["f"]);
         let kids = syms[0].children.as_ref().expect("f has children");
         assert_eq!(names(kids), vec!["x", "y"]);
+    }
+
+    #[test]
+    fn parenthesised_lambda_rhs_is_a_function() {
+        let doc = Document::new("f:({x+1})".to_string(), 0);
+        let syms = document_symbols(&doc);
+        let f = syms.iter().find(|s| s.name == "f").expect("f present");
+        assert!(matches!(f.kind, SymbolKind::FUNCTION),
+            "paren-wrapped lambda RHS should still be FUNCTION, got {:?}", f.kind);
     }
 
     #[test]

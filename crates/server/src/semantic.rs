@@ -219,26 +219,32 @@ mod tests {
         let src = "/\nblock\nstuff\n\\\na:1";
         let doc = Document::new(src.to_string(), 0);
         let toks = semantic_tokens(&doc);
-        // Each line of the comment block becomes its own token. Count tokens
-        // typed COMMENT.
-        let comment_tokens: Vec<_> = toks
-            .iter()
-            .filter(|t| t.token_type == TYPE_COMMENT)
-            .collect();
+
+        // Reconstruct absolute (line, start_col, length) for each comment
+        // token from the delta encoding so we can spec-check each one.
+        let mut line: u32 = 0;
+        let mut col: u32 = 0;
+        let mut comment_spans: Vec<(u32, u32, u32)> = Vec::new();
+        for t in &toks {
+            line += t.delta_line;
+            col = if t.delta_line == 0 { col + t.delta_start } else { t.delta_start };
+            if t.token_type == TYPE_COMMENT {
+                comment_spans.push((line, col, t.length));
+            }
+        }
         // 4 visible lines: "/", "block", "stuff", "\\".
-        assert!(
-            comment_tokens.len() >= 4,
-            "expected ≥4 per-line comment tokens, got {}",
-            comment_tokens.len()
-        );
-        // None of the tokens should claim a length that runs past its line.
-        // Each token starting on a new line must have delta_line ≥ 1.
-        let lines_advanced: u32 = comment_tokens
-            .iter()
-            .skip(1)
-            .map(|t| t.delta_line)
-            .sum();
-        assert!(lines_advanced >= 3, "tokens didn't advance lines: {comment_tokens:?}");
+        assert_eq!(comment_spans.len(), 4, "got: {comment_spans:?}");
+        // LSP forbids tokens that cross a newline — every token's end-col
+        // (start + length, in UTF-16 units) must fit in its own source line.
+        let lines: Vec<&str> = src.split('\n').collect();
+        for &(ln, start, length) in &comment_spans {
+            let line_text = lines[ln as usize];
+            let line_utf16: u32 = line_text.chars().map(|c| c.len_utf16() as u32).sum();
+            assert!(
+                start + length <= line_utf16,
+                "token at line {ln} col {start} len {length} runs past line end ({line_utf16})"
+            );
+        }
     }
 
     #[test]
