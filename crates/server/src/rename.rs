@@ -138,6 +138,21 @@ mod tests {
     }
 
     #[test]
+    fn rename_rewrites_local_rebindings() {
+        // q rebinds the same lambda-local — rename should touch all sites.
+        let doc = Document::new("f:{a:1; a:2; a}".to_string(), 0);
+        let src = doc.text().to_string();
+        let pos = doc.position_of(src.find("a:2").unwrap());
+        let edit = rename(&doc, pos, "b".to_string(), &uri()).expect("rename ok");
+        let edits = edit
+            .changes
+            .as_ref()
+            .and_then(|c| c.get(&uri()))
+            .expect("has edits");
+        assert_eq!(edits.len(), 3, "expected all 3 a sites, got {edits:#?}");
+    }
+
+    #[test]
     fn rename_rejects_invalid_new_name() {
         let doc = Document::new("foo:1".to_string(), 0);
         let pos = doc.position_of(0);

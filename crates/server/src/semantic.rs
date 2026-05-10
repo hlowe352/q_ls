@@ -50,12 +50,7 @@ pub fn legend() -> (Vec<SemanticTokenType>, Vec<SemanticTokenModifier>) {
 
 pub fn semantic_tokens(doc: &Document) -> Vec<SemanticToken> {
     let root = doc.parse().syntax();
-    let text = doc.text();
 
-    // Pre-classify every Ident/DottedIdent/Namespace into the right token
-    // kind. We walk all tokens (including trivia like comments) for
-    // emission, but identifier classification needs node context, so cache
-    // it once during a CST walk.
     let mut out: Vec<SemanticToken> = Vec::new();
     let mut prev_line: u32 = 0;
     let mut prev_start: u32 = 0;
@@ -68,32 +63,46 @@ pub fn semantic_tokens(doc: &Document) -> Vec<SemanticToken> {
             continue;
         };
 
+        // LSP forbids tokens spanning multiple lines. Split block comments,
+        // multi-line strings, etc. into one token per line.
         let off: usize = tok.text_range().start().into();
-        let pos = doc.position_of(off);
-        // Length in UTF-16 code units of the token text.
-        let length: u32 = tok.text().chars().map(|c| c.len_utf16() as u32).sum();
-        if length == 0 {
-            continue;
-        }
+        let text = tok.text();
+        let mut line_off = off;
+        for line in text.split_inclusive('\n') {
+            // Trim the trailing `\n` (and `\r`) so we don't include them in
+            // the token length — they belong between lines.
+            let mut visible_len = line.len();
+            if visible_len > 0 && line.as_bytes()[visible_len - 1] == b'\n' {
+                visible_len -= 1;
+            }
+            if visible_len > 0 && line.as_bytes()[visible_len - 1] == b'\r' {
+                visible_len -= 1;
+            }
+            let visible = &line[..visible_len];
 
-        let delta_line = pos.line - prev_line;
-        let delta_start = if delta_line == 0 {
-            pos.character - prev_start
-        } else {
-            pos.character
-        };
-        out.push(SemanticToken {
-            delta_line,
-            delta_start,
-            length,
-            token_type: ty,
-            token_modifiers_bitset: modifiers,
-        });
-        prev_line = pos.line;
-        prev_start = pos.character;
+            let length: u32 = visible.chars().map(|c| c.len_utf16() as u32).sum();
+            if length > 0 {
+                let pos = doc.position_of(line_off);
+                let delta_line = pos.line - prev_line;
+                let delta_start = if delta_line == 0 {
+                    pos.character - prev_start
+                } else {
+                    pos.character
+                };
+                out.push(SemanticToken {
+                    delta_line,
+                    delta_start,
+                    length,
+                    token_type: ty,
+                    token_modifiers_bitset: modifiers,
+                });
+                prev_line = pos.line;
+                prev_start = pos.character;
+            }
+            line_off += line.len();
+        }
     }
 
-    let _ = text;
     out
 }
 
@@ -205,6 +214,34 @@ mod tests {
     }
 
     #[test]
+    fn multi_line_comment_block_split_per_line() {
+        // q block comment: `/` opens, `\` closes, body lines in between.
+        let src = "/\nblock\nstuff\n\\\na:1";
+        let doc = Document::new(src.to_string(), 0);
+        let toks = semantic_tokens(&doc);
+        // Each line of the comment block becomes its own token. Count tokens
+        // typed COMMENT.
+        let comment_tokens: Vec<_> = toks
+            .iter()
+            .filter(|t| t.token_type == TYPE_COMMENT)
+            .collect();
+        // 4 visible lines: "/", "block", "stuff", "\\".
+        assert!(
+            comment_tokens.len() >= 4,
+            "expected ≥4 per-line comment tokens, got {}",
+            comment_tokens.len()
+        );
+        // None of the tokens should claim a length that runs past its line.
+        // Each token starting on a new line must have delta_line ≥ 1.
+        let lines_advanced: u32 = comment_tokens
+            .iter()
+            .skip(1)
+            .map(|t| t.delta_line)
+            .sum();
+        assert!(lines_advanced >= 3, "tokens didn't advance lines: {comment_tokens:?}");
+    }
+
+    #[test]
     fn delta_encoding_resets_per_line() {
         let doc = Document::new("a:1\nb:2".to_string(), 0);
         let toks = semantic_tokens(&doc);
@@ -220,7 +257,7 @@ mod tests {
     }
 
     #[test]
-    fn _legend_is_used_in_index_order() {
+    fn legend_indices_match_consts() {
         // Sanity: the Function variant maps to index 0 etc. If anyone
         // reorders TYPES this test catches it.
         assert_eq!(TYPES[TYPE_FUNCTION as usize], SemanticTokenType::FUNCTION);

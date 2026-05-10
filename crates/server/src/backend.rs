@@ -68,6 +68,10 @@ impl LanguageServer for QLanguageServer {
                 name: "q-ls".into(),
                 version: Some(env!("CARGO_PKG_VERSION").into()),
             }),
+            // tower-lsp-server defaults to UTF-16, which is what LSP spec
+            // mandates and what our `LineIndex` is built for. `None` ==
+            // "do not negotiate, use spec default" — explicit so the field
+            // doesn't read as forgotten.
             offset_encoding: None,
         })
     }

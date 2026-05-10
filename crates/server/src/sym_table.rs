@@ -177,29 +177,29 @@ impl SymTable {
         }
     }
 
-    /// Find the innermost lambda whose range contains `cursor`. Returns the
-    /// scope index, or `None` if `cursor` is at top level.
+    /// Find the innermost lambda whose range contains `cursor`, or `None`
+    /// if `cursor` is at top level.
+    ///
+    /// `self.lambdas` is built in DFS preorder, which (because the CST's
+    /// `range.start()` is monotonic in preorder) leaves it sorted by start
+    /// offset. We binary-search for the rightmost lambda starting at or
+    /// before `cursor` and walk back through siblings whose range ended
+    /// before `cursor` until we find one whose range still contains it.
+    /// The walk-back is bounded by sibling count, not total lambda count.
     fn innermost_lambda(&self, cursor: usize) -> Option<usize> {
         let off = cursor as u32;
-        // Iterate in reverse: later lambdas in DFS order are deeper or come
-        // after; the innermost containing one is the last hit.
-        let mut best: Option<usize> = None;
-        for (idx, scope) in self.lambdas.iter().enumerate() {
-            let s: u32 = scope.range.start().into();
-            let e: u32 = scope.range.end().into();
-            if s <= off && off < e {
-                // Strictly more nested = larger start (since later-started
-                // lambdas inside the parent come after it in DFS).
-                let deeper = best.is_none_or(|b| {
-                    let bs: u32 = self.lambdas[b].range.start().into();
-                    s >= bs
-                });
-                if deeper {
-                    best = Some(idx);
-                }
+        let mut hi = self.lambdas.partition_point(|l| {
+            let s: u32 = l.range.start().into();
+            s <= off
+        });
+        while hi > 0 {
+            hi -= 1;
+            let e: u32 = self.lambdas[hi].range.end().into();
+            if off < e {
+                return Some(hi);
             }
         }
-        best
+        None
     }
 
     /// Resolve `name` against the lexical scope at byte `cursor`.
@@ -251,6 +251,50 @@ impl SymTable {
             }
         }
         before.or(last_overall).map(|o| o as usize)
+    }
+
+    /// All offsets that bind `name` in the same scope as the def the cursor
+    /// resolves to. Used by find-references / rename so that multiple
+    /// rebindings of the same name (`a:1; a:2; a`) are treated as one
+    /// symbol, not several. Returns an empty vec if `name` has no visible
+    /// def at `cursor`.
+    pub fn def_offsets_for(&self, cursor: usize, name: &str) -> Vec<usize> {
+        // Walk the lambda chain looking for the scope that owns `name`.
+        let mut current = self.innermost_lambda(cursor);
+        while let Some(idx) = current {
+            let scope = &self.lambdas[idx];
+
+            let params: Vec<usize> = scope
+                .params
+                .iter()
+                .filter(|(n, _)| n == name)
+                .map(|(_, o)| *o as usize)
+                .collect();
+            if !params.is_empty() {
+                return params;
+            }
+
+            let locals: Vec<usize> = scope
+                .locals
+                .iter()
+                .filter(|(n, _)| n == name)
+                .map(|(_, o)| *o as usize)
+                .collect();
+            if !locals.is_empty() {
+                return locals;
+            }
+
+            if !scope.has_param_list && matches!(name, "x" | "y" | "z") {
+                return vec![scope.range.start().into()];
+            }
+
+            current = scope.parent;
+        }
+
+        self.globals
+            .get(name)
+            .map(|v| v.iter().map(|&o| o as usize).collect())
+            .unwrap_or_default()
     }
 
     /// All identifier texts seen in the document (for completion).

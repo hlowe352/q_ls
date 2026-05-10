@@ -71,21 +71,37 @@ fn first_lhs_name(bin: &SyntaxNode) -> Option<SyntaxToken> {
         .find(|t| matches!(t.kind(), SyntaxKind::Ident | SyntaxKind::DottedIdent))
 }
 
-/// True if the BinExpr's RHS is (or contains a top-level) lambda.
+/// If the BinExpr's RHS *is* a lambda (possibly wrapped in trivially
+/// transparent shapes), return that lambda.
+///
+/// "Transparent" wrappers are nodes where the lambda is the value of the
+/// expression: parentheses around it, composition with each (`'[{…};…]`),
+/// adverb application (`{…}/`). Crucially, `ApplyExpr` / `ArgList` / `IndexExpr`
+/// are *not* transparent — passing a lambda as an argument (`f:g[{x+1}]`)
+/// does not make `f` a function.
 fn find_rhs_lambda(bin: &SyntaxNode) -> Option<SyntaxNode> {
-    // Skip the LHS, find the next sibling node that is or contains a lambda.
+    // Skip LHS; the RHS is the next child node.
     let mut iter = bin.children();
     let _lhs = iter.next();
-    for rhs in iter {
-        if rhs.kind() == SyntaxKind::Lambda {
-            return Some(rhs);
-        }
-        // Lambda may be wrapped (e.g. compose with each: `'[{...}; enlist]`).
-        if let Some(found) = rhs.descendants().find(|n| n.kind() == SyntaxKind::Lambda) {
-            return Some(found);
+    let rhs = iter.next()?;
+    peel_to_lambda(rhs)
+}
+
+fn peel_to_lambda(node: SyntaxNode) -> Option<SyntaxNode> {
+    let mut cur = node;
+    loop {
+        match cur.kind() {
+            SyntaxKind::Lambda => return Some(cur),
+            SyntaxKind::ParenExpr
+            | SyntaxKind::Composition
+            | SyntaxKind::AdverbExpr => {
+                // Descend through the wrapper to its first non-trivia child.
+                let next = cur.children().next()?;
+                cur = next;
+            }
+            _ => return None,
         }
     }
-    None
 }
 
 /// Walk a lambda body and emit a child DocumentSymbol for each plain
@@ -140,6 +156,20 @@ mod tests {
         assert_eq!(names(&syms), vec!["f"]);
         let kids = syms[0].children.as_ref().expect("f has children");
         assert_eq!(names(kids), vec!["x", "y"]);
+    }
+
+    #[test]
+    fn lambda_passed_as_arg_does_not_make_lhs_a_function() {
+        // `f:g[{x+1}]` — the lambda is g's argument, f isn't a function.
+        let doc = Document::new("g:{x}; f:g[{x+1}]".to_string(), 0);
+        let syms = document_symbols(&doc);
+        let f = syms.iter().find(|s| s.name == "f").expect("f present");
+        assert!(
+            matches!(f.kind, SymbolKind::VARIABLE),
+            "f should be VARIABLE (lambda is just an arg), got {:?}",
+            f.kind
+        );
+        assert!(f.children.is_none(), "f shouldn't carry the arg-lambda's locals");
     }
 
     #[test]
