@@ -65,7 +65,11 @@ jobs:
 
       - name: fuzz parse target (60s)
         working-directory: crates/parser
-        run: cargo fuzz run parse -- -max_total_time=60 -timeout=10
+        # taiki-e/install-action ships a musl-linked cargo-fuzz binary that
+        # defaults its build to x86_64-unknown-linux-musl. ASan is
+        # incompatible with statically linked libc, so force the gnu target
+        # so the fuzzer links against glibc.
+        run: cargo fuzz run --target x86_64-unknown-linux-gnu parse -- -max_total_time=60 -timeout=10
 
       - name: upload crashes
         if: failure()

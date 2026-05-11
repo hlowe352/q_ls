@@ -31,7 +31,8 @@ jobs:
 
       - name: fuzz parse target
         working-directory: crates/parser
-        run: cargo fuzz run parse -- -max_total_time=600 -timeout=10
+        # See ci.yml: force the gnu target so ASan can link against glibc.
+        run: cargo fuzz run --target x86_64-unknown-linux-gnu parse -- -max_total_time=600 -timeout=10
 
       - name: upload crashes
         if: failure()
