@@ -5,37 +5,10 @@ on:
     - cron: "17 3 * * *"
   workflow_dispatch:
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
   fuzz:
     name: parse target (10 min)
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@nightly
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            .
-            crates/parser/fuzz
-
-      - name: install cargo-fuzz
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-fuzz
-
-      - name: fuzz parse target
-        working-directory: crates/parser
-        run: cargo fuzz run parse -- -max_total_time=600 -timeout=10
-
-      - name: upload crashes
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: fuzz-artifacts
-          path: crates/parser/fuzz/artifacts/
+    uses: ./.github/workflows/_fuzz.yml
+    with:
+      max_total_time: 600
+      artifact_name: fuzz-artifacts-nightly
