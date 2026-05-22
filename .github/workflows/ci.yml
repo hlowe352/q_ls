@@ -44,8 +44,9 @@ jobs:
 
   fuzz-smoke:
     name: fuzz smoke (60s)
-    if: github.event_name == 'push' || github.event_name == 'schedule'
     uses: ./.github/workflows/_fuzz.yml
+    if: github.event_name == 'push' || github.event_name == 'schedule'
     with:
       max_total_time: 60
       artifact_name: fuzz-artifacts-smoke
+      timeout_minutes: 5
