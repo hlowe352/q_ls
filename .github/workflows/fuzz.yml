@@ -12,3 +12,4 @@ jobs:
     with:
       max_total_time: 600
       artifact_name: fuzz-artifacts-nightly
+      timeout_minutes: 15

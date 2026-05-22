@@ -49,3 +49,4 @@ jobs:
     with:
       max_total_time: 60
       artifact_name: fuzz-artifacts-smoke
+      timeout_minutes: 5
