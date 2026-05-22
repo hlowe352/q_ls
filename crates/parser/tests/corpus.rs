@@ -38,7 +38,13 @@ fn run_corpus(dir_name: &str, label: &str) {
         total += 1;
         let src = std::fs::read_to_string(&path).unwrap();
         let parsed = parse(&src);
-        let errs = collect_errors(&src, &parsed.syntax());
+        let mut errs = collect_errors(&src, &parsed.syntax());
+        for e in &parsed.errors {
+            let off = e.offset;
+            let line = src[..off].matches('\n').count() + 1;
+            let col = off - src[..off].rfind('\n').map_or(0, |i| i + 1);
+            errs.push(format!("line {line}:{col} ParseError {:?}", e.message));
+        }
         if !errs.is_empty() {
             let name = path.file_name().unwrap().to_string_lossy().into_owned();
             failures.push(format!("{name}: {}", errs.join("; ")));
