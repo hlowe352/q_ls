@@ -1,4 +1,4 @@
-name: fuzz (reusable)
+name: _fuzz
 
 on:
   workflow_call:
@@ -10,7 +10,7 @@ on:
       artifact_name:
         description: "Name to give the uploaded crash artifacts on failure"
         type: string
-        default: fuzz-artifacts
+        required: true
 
 env:
   CARGO_TERM_COLOR: always
