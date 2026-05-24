@@ -253,10 +253,10 @@ fn is_qsql_from_table_ident(token: &q_parser::SyntaxToken) -> bool {
 /// These are column definitions, not references to globals.
 fn is_col_def_in_table(token: &q_parser::SyntaxToken) -> bool {
     let Some(ident_expr) = token.parent() else { return false };
-    if ident_expr.kind() != SyntaxKind::IdentExpr { return false }
+    if ident_expr.kind() != SyntaxKind::IdentExpr { return false; }
     let Some(bin) = ident_expr.parent() else { return false };
-    if bin.kind() != SyntaxKind::BinExpr { return false }
-    if bin.first_child().as_ref() != Some(&ident_expr) { return false }
+    if bin.kind() != SyntaxKind::BinExpr { return false; }
+    if bin.first_child().as_ref() != Some(&ident_expr) { return false; }
     let has_colon = bin.children_with_tokens()
         .filter_map(q_parser::SyntaxElement::into_token)
         .any(|t| matches!(t.kind(), SyntaxKind::Colon | SyntaxKind::ColonColon));
