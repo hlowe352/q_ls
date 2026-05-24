@@ -88,20 +88,17 @@ impl SymTable {
                     .descendants_with_tokens()
                     .filter_map(|el| el.into_token())
                     .find(|t| t.kind() == SyntaxKind::SystemCmd)
-                {
-                    if let Some(ns) = parse_d_directive(cmd_tok.text()) {
+                    && let Some(ns) = parse_d_directive(cmd_tok.text()) {
                         let off: u32 = cmd_tok.text_range().start().into();
                         active_ns = ns.clone();
                         t.ns_changes.push((off, ns));
                     }
-                }
-            } else if kind == SyntaxKind::ApplyExpr {
-                if let Some(ns) = parse_system_d_call(&node) {
+            } else if kind == SyntaxKind::ApplyExpr
+                && let Some(ns) = parse_system_d_call(&node) {
                     let off: u32 = node.text_range().start().into();
                     active_ns = ns.clone();
                     t.ns_changes.push((off, ns));
                 }
-            }
 
             if kind == SyntaxKind::Lambda {
                 let scope_idx = t.lambdas.len();

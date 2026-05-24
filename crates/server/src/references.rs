@@ -132,8 +132,8 @@ fn is_in_qsql(token: &q_parser::SyntaxToken) -> bool {
             // as the function position of an apply — these identifiers are only
             // valid as qSQL verbs, never as ordinary function names.
             SyntaxKind::ApplyExpr => {
-                if let Some(func) = node.first_child() {
-                    if func.kind() == SyntaxKind::IdentExpr {
+                if let Some(func) = node.first_child()
+                    && func.kind() == SyntaxKind::IdentExpr {
                         let text = func
                             .children_with_tokens()
                             .filter_map(|el| el.into_token())
@@ -147,7 +147,6 @@ fn is_in_qsql(token: &q_parser::SyntaxToken) -> bool {
                             return true;
                         }
                     }
-                }
             }
             _ => {}
         }
