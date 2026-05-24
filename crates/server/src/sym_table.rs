@@ -284,17 +284,18 @@ impl SymTable {
             current = scope.parent;
         }
 
-        // Globals: try the name as given, then try namespace-qualified fallback.
+        // Globals: when inside a namespace, prefer the qualified form over a
+        // root-level name with the same spelling.  Fall back to the bare name
+        // for names that are not in the active namespace (e.g. dotted idents
+        // from other namespaces, or names that genuinely live at root).
+        let ns = self.active_ns_at(cursor);
+        if !ns.is_empty() && !name.starts_with('.') {
+            let qualified = format!("{ns}.{name}");
+            if let Some(off) = self.resolve_global(cursor, &qualified) {
+                return Some(off);
+            }
+        }
         self.resolve_global(cursor, name)
-            .or_else(|| {
-                let ns = self.active_ns_at(cursor);
-                if !ns.is_empty() && !name.starts_with('.') {
-                    let qualified = format!("{ns}.{name}");
-                    self.resolve_global(cursor, &qualified)
-                } else {
-                    None
-                }
-            })
     }
 
     fn resolve_global(&self, cursor: usize, name: &str) -> Option<usize> {
@@ -348,24 +349,23 @@ impl SymTable {
             current = scope.parent;
         }
 
-        // Try bare name, then namespace-qualified fallback.
-        let direct = self.globals
-            .get(name)
-            .map(|v| v.iter().map(|&o| o as usize).collect::<Vec<_>>())
-            .unwrap_or_default();
-        if !direct.is_empty() {
-            return direct;
-        }
+        // Prefer namespace-qualified form when inside a namespace (same
+        // priority logic as resolve()).  Fall back to bare name.
         let ns = self.active_ns_at(cursor);
         if !ns.is_empty() && !name.starts_with('.') {
             let qualified = format!("{ns}.{name}");
-            self.globals
+            let namespaced: Vec<usize> = self.globals
                 .get(qualified.as_str())
                 .map(|v| v.iter().map(|&o| o as usize).collect())
-                .unwrap_or_default()
-        } else {
-            Vec::new()
+                .unwrap_or_default();
+            if !namespaced.is_empty() {
+                return namespaced;
+            }
         }
+        self.globals
+            .get(name)
+            .map(|v| v.iter().map(|&o| o as usize).collect())
+            .unwrap_or_default()
     }
 
     /// If `name` at `cursor` resolves via namespace fallback AND that resolution
