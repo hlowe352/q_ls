@@ -35,6 +35,12 @@ pub fn find_references(
         return Vec::new();
     }
 
+    // Qualified form of `name` (e.g. `.cache.cache` when name is `cache`
+    // inside `\d .cache`).  Used to match backtick symbol tokens.
+    let qualified_name = table.qualified_for(cursor, &name)
+        .map(|q| q.to_string())
+        .unwrap_or_else(|| name.clone());
+
     let root = doc.parse().syntax();
     let mut out = Vec::new();
     for token in root
@@ -42,43 +48,52 @@ pub fn find_references(
         .filter_map(|el| el.into_token())
     {
         let tk = token.kind();
-        if !matches!(tk, SyntaxKind::Ident | SyntaxKind::DottedIdent) {
-            continue;
-        }
-        if token.text() != name {
-            continue;
-        }
         let off: usize = token.text_range().start().into();
 
-        let parent_kind = token.parent().map(|p| p.kind());
-        let in_param_list = is_in_kind(&token, SyntaxKind::ParamList);
+        if matches!(tk, SyntaxKind::Ident | SyntaxKind::DottedIdent) {
+            if token.text() != name {
+                continue;
+            }
 
-        // Inclusion rule:
-        //   - the token IS one of the def sites (param token, list-pattern
-        //     element, assignment LHS), or
-        //   - the token is a reference that resolves to one of those defs.
-        let is_decl = def_offsets.contains(&off);
-        let resolves_to_def = is_decl
-            || (!in_param_list
-                && matches!(parent_kind, Some(SyntaxKind::IdentExpr | SyntaxKind::Namespace))
-                && table
-                    .resolve(off, &name)
-                    .is_some_and(|d| def_offsets.contains(&d)));
+            let parent_kind = token.parent().map(|p| p.kind());
+            let in_param_list = is_in_kind(&token, SyntaxKind::ParamList);
 
-        if !resolves_to_def {
-            continue;
+            // Inclusion rule:
+            //   - the token IS one of the def sites (param token, list-pattern
+            //     element, assignment LHS), or
+            //   - the token is a reference that resolves to one of those defs.
+            let is_decl = def_offsets.contains(&off);
+            let resolves_to_def = is_decl
+                || (!in_param_list
+                    && matches!(parent_kind, Some(SyntaxKind::IdentExpr | SyntaxKind::Namespace))
+                    && table
+                        .resolve(off, &name)
+                        .is_some_and(|d| def_offsets.contains(&d)));
+
+            if !resolves_to_def {
+                continue;
+            }
+            if is_decl && !include_declaration {
+                continue;
+            }
+
+            let start = doc.position_of(off);
+            let end = doc.position_of(off + name.len());
+            out.push(Location { uri: uri.clone(), range: Range::new(start, end) });
+
+        } else if tk == SyntaxKind::Symbol {
+            // `` `.cache.cache `` — backtick-prefixed symbol used as table ref
+            // (e.g. in upsert / insert / in-place qSQL).
+            // Match against bare name OR its fully qualified form.
+            let sym_name = token.text().strip_prefix('`').unwrap_or("");
+            if sym_name != name && sym_name != qualified_name {
+                continue;
+            }
+            // Symbol usage is always a reference, never a declaration.
+            let start = doc.position_of(off);
+            let end = doc.position_of(off + token.text().len());
+            out.push(Location { uri: uri.clone(), range: Range::new(start, end) });
         }
-
-        if is_decl && !include_declaration {
-            continue;
-        }
-
-        let start = doc.position_of(off);
-        let end = doc.position_of(off + name.len());
-        out.push(Location {
-            uri: uri.clone(),
-            range: Range::new(start, end),
-        });
     }
 
     out
@@ -167,6 +182,27 @@ mod tests {
         let cursor = src.find("a:2").unwrap();
         let r = refs(src, cursor, true);
         assert_eq!(r.len(), 3, "want 3 a sites, got {r:?}");
+    }
+
+    #[test]
+    fn symbol_token_included_in_refs_from_bare_name() {
+        // Cursor on `cache` (def inside \d .cache); `` `.cache.cache `` upsert
+        // site must appear in references.
+        let src = "\\d .cache\ncache:1\n\\d .\n`.cache.cache upsert 2";
+        let cursor = src.find("cache:1").unwrap();
+        let r = refs(src, cursor, true);
+        let sym_off = src.find("`.cache.cache").unwrap();
+        assert!(r.contains(&sym_off), "symbol ref missing; got offsets {r:?}");
+    }
+
+    #[test]
+    fn symbol_token_included_in_refs_from_dotted_name() {
+        // Cursor on `.cache.cache` (dotted ident ref); same symbol must appear.
+        let src = "\\d .cache\ncache:1\n\\d .\nuse:.cache.cache\n`.cache.cache upsert 2";
+        let cursor = src.find("use:.cache.cache").unwrap() + "use:".len();
+        let r = refs(src, cursor, true);
+        let sym_off = src.find("`.cache.cache").unwrap();
+        assert!(r.contains(&sym_off), "symbol ref missing from dotted cursor; got {r:?}");
     }
 
     #[test]

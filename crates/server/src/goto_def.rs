@@ -138,6 +138,26 @@ mod tests {
         assert_eq!(off, expected, "expected `a` from `(a;b;c):p`");
     }
 
+    #[test]
+    fn d_directive_bare_ref_resolves_inside_block() {
+        // Inside \d .cache, `trackperf` refers to .cache.trackperf
+        let src = "\\d .cache\ntrackperf:{[id] id}\nadd:{trackperf[1]}\n\\d .";
+        let cursor = src.find("trackperf[1]").unwrap();
+        let expected = src.find("trackperf:{").unwrap();
+        let off = def_offset(src, cursor, "trackperf").expect("found");
+        assert_eq!(off, expected);
+    }
+
+    #[test]
+    fn d_directive_dotted_ref_resolves_from_outside() {
+        // Outside \d .cache, .cache.trackperf resolves to its definition
+        let src = "\\d .cache\ntrackperf:{[id] id}\n\\d .\nuse:.cache.trackperf";
+        let cursor = src.rfind(".cache.trackperf").unwrap();
+        let expected = src.find("trackperf:{").unwrap();
+        let off = def_offset(src, cursor, ".cache.trackperf").expect("found");
+        assert_eq!(off, expected);
+    }
+
     /// Wide-stack thread: rowan's `GreenNode` drops recursively and
     /// dbmaint.q nests deep enough to overflow the default 2 MB test
     /// thread stack on teardown — not a logic issue.
