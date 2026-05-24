@@ -51,27 +51,31 @@ pub fn find_references(
         let off: usize = token.text_range().start().into();
 
         if matches!(tk, SyntaxKind::Ident | SyntaxKind::DottedIdent) {
-            if token.text() != name {
+            let tok_text = token.text();
+            // Match bare name OR the qualified form (e.g. `.cache.cache` when
+            // searching for `cache` inside `\d .cache`).
+            let lookup_name: &str = if tok_text == name.as_str() {
+                &name
+            } else if tok_text == qualified_name.as_str() {
+                &qualified_name
+            } else {
                 continue;
-            }
-            // Column names inside qSQL are not global references.
-            if is_in_qsql(&token) {
+            };
+            // Column names inside qSQL are not global refs, but the table
+            // argument of a `from` clause IS (it names the global table).
+            if is_in_qsql(&token) && !is_qsql_from_table_ident(&token) {
                 continue;
             }
 
             let parent_kind = token.parent().map(|p| p.kind());
             let in_param_list = is_in_kind(&token, SyntaxKind::ParamList);
 
-            // Inclusion rule:
-            //   - the token IS one of the def sites (param token, list-pattern
-            //     element, assignment LHS), or
-            //   - the token is a reference that resolves to one of those defs.
             let is_decl = def_offsets.contains(&off);
             let resolves_to_def = is_decl
                 || (!in_param_list
                     && matches!(parent_kind, Some(SyntaxKind::IdentExpr | SyntaxKind::Namespace))
                     && table
-                        .resolve(off, &name)
+                        .resolve(off, lookup_name)
                         .is_some_and(|d| def_offsets.contains(&d)));
 
             if !resolves_to_def {
@@ -82,7 +86,7 @@ pub fn find_references(
             }
 
             let start = doc.position_of(off);
-            let end = doc.position_of(off + name.len());
+            let end = doc.position_of(off + tok_text.len());
             out.push(Location { uri: uri.clone(), range: Range::new(start, end) });
 
         } else if tk == SyntaxKind::Symbol {
@@ -155,18 +159,19 @@ fn is_in_qsql(token: &q_parser::SyntaxToken) -> bool {
     false
 }
 
-/// True only when a Symbol token is used as a global table reference in an
-/// in-place modification context:
+/// True only when a Symbol token is used as a global table reference:
 ///
 /// - LHS of a `upsert` / `insert` binary expression:
 ///   `` `.t upsert row `` → BinExpr { LiteralExpr(Symbol), "upsert", … }
-/// - Table argument inside a `delete`/`update` qSQL expression:
-///   `` delete from `.t where … `` → DeleteExpr { … ApplyExpr { LiteralExpr(Symbol) … } }
+/// - Table argument of a `from` clause in any context (statement or lambda):
+///   `` delete from `.t where … `` / `` update … from `.t where … ``
+///   Even inside lambdas the parser emits an ApplyExpr chain; we detect the
+///   `from`-apply pattern: LiteralExpr is first child of ApplyExpr whose
+///   parent is an ApplyExpr with `IdentExpr("from")` as its first child.
 ///
 /// Excluded: dict/list indexing (`r`id`), assignment RHS (`x:`sym`),
 /// symbol lists, function arguments, etc.
 fn is_inplace_table_symbol(token: &q_parser::SyntaxToken) -> bool {
-    // Parent must be LiteralExpr wrapping the symbol.
     let Some(lit) = token.parent() else { return false };
     if lit.kind() != SyntaxKind::LiteralExpr {
         return false;
@@ -175,29 +180,80 @@ fn is_inplace_table_symbol(token: &q_parser::SyntaxToken) -> bool {
     let Some(parent) = lit.parent() else { return false };
 
     match parent.kind() {
-        // `` `.t upsert rows `` or `` `.t insert rows ``
+        // `` `.t upsert rows `` / `` `.t insert rows ``
         // CST: BinExpr { LiteralExpr(sym), Ident("upsert"|"insert"), … }
-        // The LiteralExpr must be the *first* child (LHS).
         SyntaxKind::BinExpr => {
-            let is_lhs = parent.first_child().as_ref() == Some(&lit);
-            if !is_lhs {
+            parent.first_child().as_ref() == Some(&lit)
+                && parent
+                    .children_with_tokens()
+                    .filter_map(|el| el.into_token())
+                    .any(|t| t.kind() == SyntaxKind::Ident
+                        && matches!(t.text(), "upsert" | "insert"))
+        }
+
+        SyntaxKind::ApplyExpr => {
+            if parent.first_child().as_ref() != Some(&lit) {
                 return false;
             }
-            parent
-                .children_with_tokens()
-                .filter_map(|el| el.into_token())
-                .any(|t| t.kind() == SyntaxKind::Ident
-                    && matches!(t.text(), "upsert" | "insert"))
-        }
-        // `` delete from `.t where … `` / `` update … from `.t where … ``
-        // The LiteralExpr is the table slot of the ApplyExpr inside Delete/UpdateExpr.
-        SyntaxKind::ApplyExpr => {
             let Some(grandparent) = parent.parent() else { return false };
-            matches!(grandparent.kind(), SyntaxKind::DeleteExpr | SyntaxKind::UpdateExpr)
-                && parent.first_child().as_ref() == Some(&lit)
+
+            // Pattern A: LiteralExpr → ApplyExpr → DeleteExpr|UpdateExpr|SelectExpr
+            // (statement-level `delete from `.t` with no column list)
+            if matches!(grandparent.kind(),
+                SyntaxKind::DeleteExpr | SyntaxKind::UpdateExpr
+                | SyntaxKind::SelectExpr | SyntaxKind::ExecExpr)
+            {
+                return true;
+            }
+
+            // Pattern B: `from`-apply chain — covers lambdas and update with
+            // column assignments where the parser folds `from` into an apply.
+            // LiteralExpr → ApplyExpr → ApplyExpr { IdentExpr("from"), … }
+            is_from_apply(&grandparent)
         }
         _ => false,
     }
+}
+
+/// True when a token is an `IdentExpr`/`DottedIdent` used as the table
+/// argument of a qSQL `from` clause.  Lets us skip the `is_in_qsql` guard
+/// for the table name while still filtering out column names.
+fn is_qsql_from_table_ident(token: &q_parser::SyntaxToken) -> bool {
+    let Some(ident_expr) = token.parent() else { return false };
+    if ident_expr.kind() != SyntaxKind::IdentExpr { return false; }
+    let Some(parent) = ident_expr.parent() else { return false };
+
+    // Case 1: IdentExpr is a direct child of a qSQL statement node.
+    // Occurs in `select from .t` (no column list, so parser places .t directly).
+    if matches!(parent.kind(),
+        SyntaxKind::SelectExpr | SyntaxKind::UpdateExpr
+        | SyntaxKind::DeleteExpr | SyntaxKind::ExecExpr)
+    {
+        return true;
+    }
+
+    // Case 2: `from`-apply chain (the common case — see is_inplace_table_symbol).
+    // IdentExpr is first child of ApplyExpr whose parent is ApplyExpr { from, … }.
+    if parent.kind() == SyntaxKind::ApplyExpr
+        && parent.first_child().as_ref() == Some(&ident_expr)
+    {
+        if let Some(grandparent) = parent.parent() {
+            return is_from_apply(&grandparent);
+        }
+    }
+
+    false
+}
+
+/// True when `node` is an `ApplyExpr` whose first child is `IdentExpr("from")`.
+fn is_from_apply(node: &q_parser::SyntaxNode) -> bool {
+    if node.kind() != SyntaxKind::ApplyExpr { return false; }
+    node.first_child()
+        .filter(|fc| fc.kind() == SyntaxKind::IdentExpr)
+        .map(|fc| fc.children_with_tokens()
+            .filter_map(|el| el.into_token())
+            .any(|t| t.kind() == SyntaxKind::Ident && t.text() == "from"))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -290,6 +346,36 @@ mod tests {
         let r = refs(src, cursor, true);
         let sym_off = src.find("`.cache.cache").unwrap();
         assert!(r.contains(&sym_off), "delete symbol ref missing; got {r:?}");
+    }
+
+    #[test]
+    fn symbol_update_from_included() {
+        // update with column assignment: `update col:val from `.t where …`
+        let src = "\\d .cache\ncache:1\n\\d .\nupdate x:now from `.cache.cache where 1b";
+        let cursor = src.find("cache:1").unwrap();
+        let r = refs(src, cursor, true);
+        let sym_off = src.find("`.cache.cache").unwrap();
+        assert!(r.contains(&sym_off), "update-from symbol ref missing; got {r:?}");
+    }
+
+    #[test]
+    fn symbol_delete_in_lambda_included() {
+        // Inside a lambda the parser emits ApplyExpr chains, not DeleteExpr.
+        let src = "\\d .cache\ncache:1\n\\d .\ndrop:{delete from `.cache.cache where id in x}";
+        let cursor = src.find("cache:1").unwrap();
+        let r = refs(src, cursor, true);
+        let sym_off = src.find("`.cache.cache").unwrap();
+        assert!(r.contains(&sym_off), "lambda delete symbol ref missing; got {r:?}");
+    }
+
+    #[test]
+    fn ident_from_table_in_select_included() {
+        // `.cache.cache` (dotted ident) as the FROM table in a select.
+        let src = "\\d .cache\ncache:1\n\\d .\nr:select id from .cache.cache where 1b";
+        let cursor = src.find("cache:1").unwrap();
+        let r = refs(src, cursor, true);
+        let tbl_off = src.rfind(".cache.cache").unwrap();
+        assert!(r.contains(&tbl_off), "select from table ref missing; got {r:?}");
     }
 
     #[test]
