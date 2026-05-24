@@ -151,22 +151,70 @@ impl LanguageServer for QLanguageServer {
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri.clone();
-        let doc = Document::new(params.text_document.text, params.text_document.version);
+        let text = params.text_document.text;
+        let version = params.text_document.version;
+
+        {
+            let mut idx = self.workspace_index.write().await;
+            idx.index_file(uri.clone(), Document::new(text.clone(), version));
+        }
+
+        let doc = Document::new(text, version);
         self.on_change(uri.clone(), &doc).await;
         self.documents.write().await.insert(uri, doc);
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri.clone();
-        let mut docs = self.documents.write().await;
-        if let Some(doc) = docs.get_mut(&uri) {
+
+        let (text, version) = {
+            let mut docs = self.documents.write().await;
+            let Some(doc) = docs.get_mut(&uri) else { return };
             doc.apply_changes(params.content_changes, params.text_document.version);
+            (doc.text().to_string(), doc.version())
+        };
+
+        {
+            let mut idx = self.workspace_index.write().await;
+            idx.index_file(uri.clone(), Document::new(text.clone(), version));
+        }
+
+        let docs = self.documents.read().await;
+        if let Some(doc) = docs.get(&uri) {
             self.on_change(uri, doc).await;
         }
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         self.documents.write().await.remove(&params.text_document.uri);
+    }
+
+    async fn did_save(&self, params: DidSaveTextDocumentParams) {
+        let uri = params.text_document.uri.clone();
+        let docs = self.documents.read().await;
+        if let Some(doc) = docs.get(&uri) {
+            let mut idx = self.workspace_index.write().await;
+            idx.index_file(uri, Document::new(doc.text().to_string(), doc.version()));
+        }
+    }
+
+    async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        for change in params.changes {
+            let uri = change.uri;
+            match change.typ {
+                FileChangeType::CREATED | FileChangeType::CHANGED => {
+                    let Some(path) = uri.to_file_path() else { continue };
+                    let Ok(text) = std::fs::read_to_string(&path) else { continue };
+                    let mut idx = self.workspace_index.write().await;
+                    idx.index_file(uri, Document::new(text, 0));
+                }
+                FileChangeType::DELETED => {
+                    let mut idx = self.workspace_index.write().await;
+                    idx.remove_file(&uri);
+                }
+                _ => {}
+            }
+        }
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
