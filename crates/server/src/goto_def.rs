@@ -36,8 +36,7 @@ pub fn goto_definition_with_workspace(
             let def_pos = workspace
                 .files()
                 .get(def_uri)
-                .map(|d| d.position_of(*off as usize))
-                .unwrap_or(Position::new(0, 0));
+                .map_or(Position::new(0, 0), |d| d.position_of(*off as usize));
             Location {
                 uri: def_uri.clone(),
                 range: Range::new(def_pos, def_pos),

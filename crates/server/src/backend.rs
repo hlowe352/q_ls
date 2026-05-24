@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -28,7 +29,8 @@ impl QLanguageServer {
     }
 
     async fn on_change(&self, uri: Uri, doc: &Document) {
-        let diagnostics = crate::diagnostics::compute_diagnostics(doc);
+        let idx = self.workspace_index.read().await;
+        let diagnostics = crate::diagnostics::compute_diagnostics_with_workspace(doc, &idx);
         self.client
             .publish_diagnostics(uri, diagnostics, Some(doc.version()))
             .await;
@@ -42,12 +44,12 @@ impl LanguageServer for QLanguageServer {
             .workspace_folders
             .as_ref()
             .and_then(|folders| folders.first())
-            .and_then(|f| f.uri.to_file_path().map(|p| p.into_owned()))
+            .and_then(|f| f.uri.to_file_path().map(Cow::into_owned))
             .or_else(|| {
                 params
                     .root_uri
                     .as_ref()
-                    .and_then(|u| u.to_file_path().map(|p| p.into_owned()))
+                    .and_then(|u| u.to_file_path().map(Cow::into_owned))
             });
         *self.workspace_root.write().await = root;
 
