@@ -241,11 +241,9 @@ fn is_qsql_from_table_ident(token: &q_parser::SyntaxToken) -> bool {
     // IdentExpr is first child of ApplyExpr whose parent is ApplyExpr { from, … }.
     if parent.kind() == SyntaxKind::ApplyExpr
         && parent.first_child().as_ref() == Some(&ident_expr)
-    {
-        if let Some(grandparent) = parent.parent() {
+        && let Some(grandparent) = parent.parent() {
             return is_from_apply(&grandparent);
         }
-    }
 
     false
 }
