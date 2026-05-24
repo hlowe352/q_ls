@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_lsp_server::jsonrpc::Result;
@@ -7,10 +8,13 @@ use tower_lsp_server::ls_types::*;
 use tower_lsp_server::{Client, LanguageServer};
 
 use crate::document::Document;
+use crate::workspace_index::WorkspaceIndex;
 
 pub struct QLanguageServer {
     client: Client,
     documents: Arc<RwLock<HashMap<Uri, Document>>>,
+    workspace_index: Arc<RwLock<WorkspaceIndex>>,
+    workspace_root: Arc<RwLock<Option<PathBuf>>>,
 }
 
 impl QLanguageServer {
@@ -18,6 +22,8 @@ impl QLanguageServer {
         Self {
             client,
             documents: Arc::new(RwLock::new(HashMap::new())),
+            workspace_index: Arc::new(RwLock::new(WorkspaceIndex::default())),
+            workspace_root: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -30,13 +36,30 @@ impl QLanguageServer {
 }
 
 impl LanguageServer for QLanguageServer {
-    async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
+    async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        #[allow(deprecated)]
+        let root: Option<PathBuf> = params
+            .workspace_folders
+            .as_ref()
+            .and_then(|folders| folders.first())
+            .and_then(|f| f.uri.to_file_path().map(|p| p.into_owned()))
+            .or_else(|| {
+                params
+                    .root_uri
+                    .as_ref()
+                    .and_then(|u| u.to_file_path().map(|p| p.into_owned()))
+            });
+        *self.workspace_root.write().await = root;
+
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Options(
                     TextDocumentSyncOptions {
                         open_close: Some(true),
                         change: Some(TextDocumentSyncKind::INCREMENTAL),
+                        save: Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions {
+                            include_text: Some(false),
+                        })),
                         ..Default::default()
                     },
                 )),
@@ -63,6 +86,13 @@ impl LanguageServer for QLanguageServer {
                         full: Some(SemanticTokensFullOptions::Bool(true)),
                     }),
                 ),
+                workspace: Some(WorkspaceServerCapabilities {
+                    workspace_folders: Some(WorkspaceFoldersServerCapabilities {
+                        supported: Some(true),
+                        change_notifications: Some(OneOf::Left(true)),
+                    }),
+                    file_operations: None,
+                }),
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
@@ -79,6 +109,40 @@ impl LanguageServer for QLanguageServer {
 
     async fn initialized(&self, _: InitializedParams) {
         self.client.log_message(MessageType::INFO, "q-ls initialized").await;
+
+        let registration = Registration {
+            id: "watch-q-files".to_string(),
+            method: "workspace/didChangeWatchedFiles".to_string(),
+            register_options: Some(
+                serde_json::to_value(DidChangeWatchedFilesRegistrationOptions {
+                    watchers: vec![FileSystemWatcher {
+                        glob_pattern: GlobPattern::String("**/*.q".to_string()),
+                        kind: None,
+                    }],
+                })
+                .unwrap(),
+            ),
+        };
+        let _ = self.client.register_capability(vec![registration]).await;
+
+        let root = self.workspace_root.read().await.clone();
+        if let Some(root) = root {
+            let idx = Arc::clone(&self.workspace_index);
+            let client = self.client.clone();
+            tokio::spawn(async move {
+                match tokio::task::spawn_blocking(move || collect_and_parse_q_files(&root)).await {
+                    Ok(pairs) => {
+                        let mut index = idx.write().await;
+                        for (uri, doc) in pairs {
+                            index.index_file(uri, doc);
+                        }
+                    }
+                    Err(e) => {
+                        client.log_message(MessageType::ERROR, format!("workspace indexing failed: {e}")).await;
+                    }
+                }
+            });
+        }
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -180,4 +244,36 @@ impl LanguageServer for QLanguageServer {
         let symbols = crate::symbols::document_symbols(doc);
         Ok(Some(DocumentSymbolResponse::Nested(symbols)))
     }
+}
+
+fn collect_and_parse_q_files(root: &std::path::Path) -> Vec<(Uri, Document)> {
+    let mut result = Vec::new();
+    collect_recursive(root, &mut result);
+    result
+}
+
+fn collect_recursive(dir: &std::path::Path, out: &mut Vec<(Uri, Document)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_recursive(&path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("q") {
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(uri) = path_to_uri(&path) else {
+                continue;
+            };
+            out.push((uri, Document::new(text, 0)));
+        }
+    }
+}
+
+fn path_to_uri(path: &std::path::Path) -> std::result::Result<Uri, ()> {
+    let abs = path.canonicalize().map_err(|_| ())?;
+    let s = format!("file://{}", abs.display());
+    s.parse().map_err(|_| ())
 }
