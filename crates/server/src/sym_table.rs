@@ -398,6 +398,13 @@ impl SymTable {
     pub fn global_entries(&self) -> impl Iterator<Item = (&str, &[u32])> {
         self.globals.iter().map(|(k, v)| (k.as_str(), v.as_slice()))
     }
+
+    /// Get all byte offsets where `name` is globally defined.
+    /// Returns an empty slice if `name` has no global definitions.
+    #[allow(dead_code)]
+    pub fn global_def_offsets(&self, name: &str) -> &[u32] {
+        self.globals.get(name).map_or(&[], Vec::as_slice)
+    }
 }
 
 /// Qualify `name` with `ns` if `should_qualify` and `ns` is non-empty.
@@ -450,5 +457,33 @@ fn parse_d_directive(text: &str) -> Option<SmolStr> {
         Some(SmolStr::new(rest))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::document::Document;
+
+    #[test]
+    fn global_def_offsets_returns_global_sites() {
+        let doc = Document::new("foo:1; foo:2".to_string(), 0);
+        let offs = doc.sym_table().global_def_offsets("foo");
+        assert_eq!(offs.len(), 2, "got: {offs:?}");
+    }
+
+    #[test]
+    fn global_def_offsets_empty_for_unknown() {
+        let doc = Document::new("foo:1".to_string(), 0);
+        assert!(doc.sym_table().global_def_offsets("bar").is_empty());
+    }
+
+    #[test]
+    fn global_def_offsets_empty_for_lambda_local() {
+        // `x` here is a lambda local, NOT a global.
+        let doc = Document::new("f:{x:42; x}".to_string(), 0);
+        assert!(
+            doc.sym_table().global_def_offsets("x").is_empty(),
+            "lambda locals must not appear as globals"
+        );
     }
 }
