@@ -71,6 +71,11 @@ pub fn find_references(
             let in_param_list = is_in_kind(&token, SyntaxKind::ParamList);
 
             let is_decl = def_offsets.contains(&off);
+            // Table constructor column defs (`id` in `([id:...])`) are not
+            // variable references even though resolve() would find the global.
+            if is_col_def_in_table(&token) {
+                continue;
+            }
             let resolves_to_def = is_decl
                 || (!in_param_list
                     && matches!(parent_kind, Some(SyntaxKind::IdentExpr | SyntaxKind::Namespace))
@@ -245,6 +250,21 @@ fn is_qsql_from_table_ident(token: &q_parser::SyntaxToken) -> bool {
     false
 }
 
+/// True when `token` is the column-name LHS of a `BinExpr` with `:` inside
+/// a `TableExpr` — e.g. the `id` in `([id:`u#`long$()]...)`.
+/// These are column definitions, not references to globals.
+fn is_col_def_in_table(token: &q_parser::SyntaxToken) -> bool {
+    let Some(ident_expr) = token.parent() else { return false };
+    if ident_expr.kind() != SyntaxKind::IdentExpr { return false };
+    let Some(bin) = ident_expr.parent() else { return false };
+    if bin.kind() != SyntaxKind::BinExpr { return false };
+    if bin.first_child().as_ref() != Some(&ident_expr) { return false };
+    let has_colon = bin.children_with_tokens()
+        .filter_map(|el| el.into_token())
+        .any(|t| matches!(t.kind(), SyntaxKind::Colon | SyntaxKind::ColonColon));
+    has_colon && bin.ancestors().any(|n| n.kind() == SyntaxKind::TableExpr)
+}
+
 /// True when `node` is an `ApplyExpr` whose first child is `IdentExpr("from")`.
 fn is_from_apply(node: &q_parser::SyntaxNode) -> bool {
     if node.kind() != SyntaxKind::ApplyExpr { return false; }
@@ -417,6 +437,20 @@ mod tests {
         let r = refs(src, cursor, true);
         let sym_off = src.find(":`id").unwrap() + 1;
         assert!(!r.contains(&sym_off), "rhs symbol falsely included; got {r:?}");
+    }
+
+    #[test]
+    fn table_col_def_lhs_not_included_as_ref() {
+        // `id` in `([id:`u#`long$()]...)` is a column name, not a ref to global id
+        let src = "\\d .cache\nid:0j\ncache:([id:`u#`long$()] size:`long$())\nuse:id";
+        let cursor = src.find("id:0j").unwrap();
+        let r = refs(src, cursor, true);
+        // col def offset
+        let col_off = src.find("([id:").unwrap() + 2; // offset of `id` inside ([
+        assert!(!r.contains(&col_off), "table col def falsely included; got {r:?}");
+        // the use site SHOULD be included
+        let use_off = src.rfind("use:id").unwrap() + "use:".len();
+        assert!(r.contains(&use_off), "use site missing; got {r:?}");
     }
 
     #[test]
