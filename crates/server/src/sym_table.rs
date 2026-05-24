@@ -393,6 +393,11 @@ impl SymTable {
     pub fn idents(&self) -> impl Iterator<Item = &str> {
         self.idents.iter().map(smol_str::SmolStr::as_str)
     }
+
+    /// All global definitions, yielding `(name, offsets)` pairs.
+    pub fn global_entries(&self) -> impl Iterator<Item = (&str, &[u32])> {
+        self.globals.iter().map(|(k, v)| (k.as_str(), v.as_slice()))
+    }
 }
 
 /// Qualify `name` with `ns` if `should_qualify` and `ns` is non-empty.
