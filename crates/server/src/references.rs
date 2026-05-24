@@ -178,3 +178,68 @@ mod tests {
         assert!(r.is_empty(), "got {r:?}");
     }
 }
+
+#[cfg(test)]
+mod aoc_tests {
+    use super::*;
+    use crate::document::Document;
+
+    // Regression: `minus` in q1b is assigned inside $[...] and used later in
+    // the same lambda. Both the def and ref sites must be found from either cursor.
+    #[test]
+    fn finds_minus_refs_in_q1b() {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../crates/parser/tests/data/real_q/aoc.q"
+        )).expect("aoc.q");
+
+        let doc = Document::new(src.clone(), 0);
+        let uri: Uri = "file:///aoc.q".parse().unwrap();
+
+        let def_cursor = src.find("minus:").expect("minus: def");
+        let ref_cursor = src.find("not minus").expect("(not minus)") + "not ".len();
+
+        let refs_from_def = find_references(&doc, doc.position_of(def_cursor), true, &uri);
+        let refs_from_ref = find_references(&doc, doc.position_of(ref_cursor), true, &uri);
+
+        assert!(refs_from_def.len() >= 2, "from def: expected ≥2, got {}", refs_from_def.len());
+        assert!(refs_from_ref.len() >= 2, "from ref: expected ≥2, got {}", refs_from_ref.len());
+    }
+}
+
+#[cfg(test)]
+mod vscode_simulation {
+    use super::*;
+    use crate::document::Document;
+
+    #[test]
+    fn find_refs_exclude_decl_from_def_site() {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../crates/parser/tests/data/real_q/aoc.q"
+        )).expect("aoc.q");
+        let doc = Document::new(src.clone(), 0);
+        let uri: Uri = "file:///aoc.q".parse().unwrap();
+        let def_cursor = src.find("minus:").unwrap();
+        let refs = find_references(&doc, doc.position_of(def_cursor), false, &uri);
+        eprintln!("include_decl=false from def: {} refs", refs.len());
+        for r in &refs { eprintln!("  {:?}", r.range); }
+        assert!(!refs.is_empty(), "expected ref site to be found, got 0");
+    }
+
+    #[test]
+    fn find_refs_loc_from_def_site() {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../crates/parser/tests/data/real_q/aoc.q"
+        )).expect("aoc.q");
+        let doc = Document::new(src.clone(), 0);
+        let uri: Uri = "file:///aoc.q".parse().unwrap();
+        // cursor on `loc` in `loc: x[0]+...`
+        let def_cursor = src.find("loc:").unwrap();
+        let refs = find_references(&doc, doc.position_of(def_cursor), false, &uri);
+        eprintln!("loc include_decl=false from def: {} refs", refs.len());
+        for r in &refs { eprintln!("  {:?}", r.range); }
+        assert!(!refs.is_empty(), "expected ref sites to be found, got 0");
+    }
+}
