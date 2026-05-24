@@ -19,7 +19,7 @@ const BUILTIN_INFIX: &[&str] = &[
 ];
 
 /// True if `text` names a builtin q verb that is conventionally used infix.
-#[must_use] 
+#[must_use]
 pub fn is_builtin_infix(text: &str) -> bool {
     BUILTIN_INFIX.binary_search(&text).is_ok()
 }

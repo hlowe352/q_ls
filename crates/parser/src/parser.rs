@@ -345,7 +345,7 @@ impl Parser {
 
     /// Lex `source` and build the flat token list, inserting synthetic
     /// [`SyntaxKind::Whitespace`] tokens for any gaps the lexer skipped.
-    #[must_use] 
+    #[must_use]
     pub fn new(source: &str) -> Self {
         let mut tokens: Vec<LexedToken> = Vec::new();
         let mut lexer = q_lexer::Token::lexer(source);
@@ -437,37 +437,37 @@ impl Parser {
     }
 
     /// Peek at the current (non-trivia) token kind.
-    #[must_use] 
+    #[must_use]
     pub fn current(&self) -> Option<SyntaxKind> {
         self.nth(0)
     }
 
     /// Lookahead: peek at the `n`-th non-trivia token kind from now.
-    #[must_use] 
+    #[must_use]
     pub fn nth(&self, n: usize) -> Option<SyntaxKind> {
         self.non_trivia_idx(n).map(|i| self.tokens[i].kind)
     }
 
     /// Text of the current (non-trivia) token.
-    #[must_use] 
+    #[must_use]
     pub fn current_text(&self) -> Option<&str> {
         self.nth_text(0)
     }
 
     /// Text of the `n`-th non-trivia token.
-    #[must_use] 
+    #[must_use]
     pub fn nth_text(&self, n: usize) -> Option<&str> {
         self.non_trivia_idx(n).map(|i| self.tokens[i].text.as_str())
     }
 
     /// Returns `true` if the current non-trivia token is `kind`.
-    #[must_use] 
+    #[must_use]
     pub fn at(&self, kind: SyntaxKind) -> bool {
         self.current() == Some(kind)
     }
 
     /// Returns `true` when there are no more non-trivia tokens.
-    #[must_use] 
+    #[must_use]
     pub fn at_end(&self) -> bool {
         self.current().is_none()
     }
@@ -478,7 +478,7 @@ impl Parser {
     /// q's line-continuation rule: a logical statement continues onto the next
     /// physical line when that line begins with whitespace (space or tab).
     /// A non-blank line starting in column 0 is a new statement.
-    #[must_use] 
+    #[must_use]
     pub fn has_preceding_newline(&self) -> bool {
         // Find the last Newline within the leading trivia block.
         let mut last_newline = None;
@@ -574,7 +574,7 @@ impl Parser {
     // Finalisation
     // -----------------------------------------------------------------------
 
-    #[must_use] 
+    #[must_use]
     pub fn finish(self) -> (Vec<Event>, Vec<ParseError>) {
         (self.events, self.errors)
     }
