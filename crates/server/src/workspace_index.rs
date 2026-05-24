@@ -122,4 +122,54 @@ mod tests {
         assert!(idents.contains(&"alpha"), "got: {idents:?}");
         assert!(idents.contains(&"beta"), "got: {idents:?}");
     }
+
+    #[test]
+    fn cross_file_goto_def_end_to_end() {
+        use crate::goto_def::goto_definition_with_workspace;
+        use std::collections::HashMap;
+        use tower_lsp_server::ls_types::{GotoDefinitionResponse, Position};
+
+        let uri_a: Uri = "file:///a.q".parse().unwrap();
+        let uri_b: Uri = "file:///b.q".parse().unwrap();
+
+        let doc_b = doc("sharedFn 99");
+
+        let mut idx = WorkspaceIndex::default();
+        idx.index_file(uri_a.clone(), doc("sharedFn:{x+1}"));
+
+        let open_docs: HashMap<Uri, crate::document::Document> = HashMap::new();
+        let result = goto_definition_with_workspace(
+            &doc_b,
+            Position::new(0, 0),
+            &uri_b,
+            &open_docs,
+            &idx,
+        );
+        assert!(result.is_some(), "cross-file goto-def must resolve sharedFn");
+        match result.unwrap() {
+            GotoDefinitionResponse::Array(locs) => {
+                assert!(!locs.is_empty());
+                assert_eq!(locs[0].uri, uri_a);
+            }
+            GotoDefinitionResponse::Scalar(loc) => assert_eq!(loc.uri, uri_a),
+            _ => panic!("unexpected response variant"),
+        }
+    }
+
+    #[test]
+    fn cross_file_diagnostic_suppression_end_to_end() {
+        use crate::diagnostics::compute_diagnostics_with_workspace;
+
+        let mut idx = WorkspaceIndex::default();
+        idx.index_file(
+            "file:///lib.q".parse().unwrap(),
+            doc("libFn:{x*2}"),
+        );
+
+        let consumer = doc("libFn 5");
+        let diags = compute_diagnostics_with_workspace(&consumer, &idx);
+        let bad: Vec<_> = diags.iter().filter(|d| d.message.contains("libFn")).collect();
+        assert!(bad.is_empty(),
+            "workspace-defined symbol must not produce unresolved warning: {diags:?}");
+    }
 }
