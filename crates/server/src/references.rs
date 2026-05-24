@@ -7,19 +7,31 @@
 //! them. A name with the same spelling but a different scope (an outer
 //! global vs. a lambda parameter) is a *different* symbol and is excluded.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[allow(clippy::wildcard_imports)]
 use tower_lsp_server::ls_types::*;
 use q_parser::SyntaxKind;
 
 use crate::document::Document;
+use crate::workspace_index::WorkspaceIndex;
 
 pub fn find_references(
     doc: &Document,
     pos: Position,
     include_declaration: bool,
     uri: &Uri,
+) -> Vec<Location> {
+    find_references_with_workspace(doc, pos, include_declaration, uri, &HashMap::new(), &WorkspaceIndex::default())
+}
+
+pub fn find_references_with_workspace(
+    doc: &Document,
+    pos: Position,
+    include_declaration: bool,
+    uri: &Uri,
+    all_open_docs: &HashMap<Uri, Document>,
+    workspace: &WorkspaceIndex,
 ) -> Vec<Location> {
     let cursor = doc.offset_of(pos);
     let table = doc.sym_table();
@@ -41,8 +53,43 @@ pub fn find_references(
     let qualified_name = table.qualified_for(cursor, &name)
         .map_or_else(|| name.clone(), |q| q.to_string());
 
+    // Collect same-file refs (existing logic).
+    let mut out = collect_refs_in_doc(doc, &name, &qualified_name, &def_offsets, include_declaration, uri);
+
+    // Cross-file: only if name is a global (not a lambda local or param).
+    let is_global = !table.global_def_offsets(&name).is_empty()
+        || !table.global_def_offsets(&qualified_name).is_empty();
+
+    if is_global {
+        // Scan all other docs: open docs (excluding current) + workspace background files.
+        let open_others = all_open_docs
+            .iter()
+            .filter(|(u, _)| *u != uri);
+        let workspace_only = workspace
+            .files()
+            .iter()
+            .filter(|(u, _)| !all_open_docs.contains_key(*u));
+
+        for (other_uri, other_doc) in open_others.chain(workspace_only) {
+            out.extend(collect_global_refs_in_doc(other_doc, &name, &qualified_name, other_uri));
+        }
+    }
+
+    out
+}
+
+fn collect_refs_in_doc(
+    doc: &Document,
+    name: &str,
+    qualified_name: &str,
+    def_offsets: &HashSet<usize>,
+    include_declaration: bool,
+    uri: &Uri,
+) -> Vec<Location> {
     let root = doc.parse().syntax();
+    let table = doc.sym_table();
     let mut out = Vec::new();
+
     for token in root
         .descendants_with_tokens()
         .filter_map(q_parser::SyntaxElement::into_token)
@@ -54,10 +101,10 @@ pub fn find_references(
             let tok_text = token.text();
             // Match bare name OR the qualified form (e.g. `.cache.cache` when
             // searching for `cache` inside `\d .cache`).
-            let lookup_name: &str = if tok_text == name.as_str() {
-                &name
-            } else if tok_text == qualified_name.as_str() {
-                &qualified_name
+            let lookup_name: &str = if tok_text == name {
+                name
+            } else if tok_text == qualified_name {
+                qualified_name
             } else {
                 continue;
             };
@@ -111,7 +158,65 @@ pub fn find_references(
             out.push(Location { uri: uri.clone(), range: Range::new(start, end) });
         }
     }
+    out
+}
 
+fn collect_global_refs_in_doc(
+    doc: &Document,
+    name: &str,
+    qualified_name: &str,
+    uri: &Uri,
+) -> Vec<Location> {
+    let root = doc.parse().syntax();
+    let table = doc.sym_table();
+    let mut out = Vec::new();
+
+    for token in root
+        .descendants_with_tokens()
+        .filter_map(q_parser::SyntaxElement::into_token)
+    {
+        let tk = token.kind();
+        if !matches!(tk, SyntaxKind::Ident | SyntaxKind::DottedIdent) {
+            continue;
+        }
+        let tok_text = token.text();
+        let lookup = if tok_text == name {
+            name
+        } else if tok_text == qualified_name {
+            qualified_name
+        } else {
+            continue;
+        };
+        if is_in_kind(&token, SyntaxKind::ParamList) {
+            continue;
+        }
+        if is_in_qsql(&token) && !is_qsql_from_table_ident(&token) {
+            continue;
+        }
+        if is_col_def_in_table(&token) {
+            continue;
+        }
+        let off: usize = token.text_range().start().into();
+        let parent_kind = token.parent().map(|p| p.kind());
+        if !matches!(parent_kind, Some(SyntaxKind::IdentExpr | SyntaxKind::Namespace)) {
+            continue;
+        }
+        // Accept the token if it either (a) resolves to a global in *this*
+        // file, or (b) has no local definition at all (unresolved reference
+        // that must come from another file).
+        let resolved_off = table.resolve(off, lookup);
+        let passes = match resolved_off {
+            None => true, // no local binding — treat as cross-file use
+            Some(r) => u32::try_from(r)
+                .is_ok_and(|r_u32| table.global_def_offsets(lookup).contains(&r_u32)),
+        };
+        if !passes {
+            continue;
+        }
+        let start = doc.position_of(off);
+        let end = doc.position_of(off + tok_text.len());
+        out.push(Location { uri: uri.clone(), range: Range::new(start, end) });
+    }
     out
 }
 
@@ -457,6 +562,56 @@ mod tests {
         let cursor = src.find(';').unwrap();
         let r = refs(src, cursor, true);
         assert!(r.is_empty(), "got {r:?}");
+    }
+
+    #[test]
+    fn cross_file_global_refs_found() {
+        use crate::workspace_index::WorkspaceIndex;
+
+        let uri_a: Uri = "file:///a.q".parse().unwrap();
+        let uri_b: Uri = "file:///b.q".parse().unwrap();
+
+        let doc_b_src = "foo+2".to_string();
+
+        let mut idx = WorkspaceIndex::default();
+        idx.index_file(uri_b.clone(), Document::new(doc_b_src.clone(), 0));
+
+        let mut open_docs: HashMap<Uri, Document> = HashMap::new();
+        open_docs.insert(uri_a.clone(), Document::new("foo:1".to_string(), 0));
+        let doc_a = Document::new("foo:1".to_string(), 0);
+
+        let locs = find_references_with_workspace(
+            &doc_a,
+            doc_a.position_of(0),
+            true,
+            &uri_a,
+            &open_docs,
+            &idx,
+        );
+        let b_locs: Vec<_> = locs.iter().filter(|l| l.uri == uri_b).collect();
+        assert!(!b_locs.is_empty(), "cross-file ref in b.q not found; got: {locs:?}");
+    }
+
+    #[test]
+    fn lambda_local_not_found_cross_file() {
+        use crate::workspace_index::WorkspaceIndex;
+
+        let uri_a: Uri = "file:///a.q".parse().unwrap();
+        let uri_b: Uri = "file:///b.q".parse().unwrap();
+
+        let src_a = "f:{x:42; x}".to_string();
+
+        let mut idx = WorkspaceIndex::default();
+        idx.index_file(uri_b.clone(), Document::new("g:{x:99; x}".to_string(), 0));
+
+        let mut open_docs: HashMap<Uri, Document> = HashMap::new();
+        open_docs.insert(uri_a.clone(), Document::new(src_a.clone(), 0));
+
+        let doc_a = Document::new(src_a.clone(), 0);
+        let x_pos = doc_a.position_of(src_a.find("x:42").unwrap());
+        let locs = find_references_with_workspace(&doc_a, x_pos, true, &uri_a, &open_docs, &idx);
+        let b_locs: Vec<_> = locs.iter().filter(|l| l.uri == uri_b).collect();
+        assert!(b_locs.is_empty(), "lambda local must not find cross-file refs: {locs:?}");
     }
 }
 

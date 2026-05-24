@@ -251,8 +251,11 @@ impl LanguageServer for QLanguageServer {
         let pos = params.text_document_position.position;
         let include_declaration = params.context.include_declaration;
         let docs = self.documents.read().await;
+        let idx = self.workspace_index.read().await;
         let Some(doc) = docs.get(&uri) else { return Ok(None) };
-        let locs = crate::references::find_references(doc, pos, include_declaration, &uri);
+        let locs = crate::references::find_references_with_workspace(
+            doc, pos, include_declaration, &uri, &docs, &idx,
+        );
         Ok(Some(locs))
     }
 
