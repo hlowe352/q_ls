@@ -272,6 +272,38 @@ mod tests {
         assert!(warnings.is_empty(), "got: {warnings:?}");
     }
 
+    #[test]
+    fn unresolved_system_d_qualifies_bare_global() {
+        let src = "system \"d .test\"\nval:42\nshow .test.val";
+        let warnings = unresolved_for(src);
+        assert!(warnings.is_empty(), "system d form got: {warnings:?}");
+    }
+
+    #[test]
+    fn unresolved_d_directive_qualifies_bare_global() {
+        // \d .cache puts us in .cache; `cache:` defines .cache.cache
+        let src = "\\d .cache\ncache:1\n\\d .\nshow .cache.cache";
+        let warnings = unresolved_for(src);
+        assert!(warnings.is_empty(), "got: {warnings:?}");
+    }
+
+    #[test]
+    fn unresolved_d_directive_reset_to_root() {
+        // After \d . we're back at root; plain names are global
+        let src = "\\d .foo\nval:42\n\\d .\nshow val";
+        let warnings = unresolved_for(src);
+        // `val` at root scope is not .foo.val, so `show val` should warn
+        assert!(warnings.iter().any(|w| w.contains("`val`")), "got: {warnings:?}");
+    }
+
+    #[test]
+    fn unresolved_d_directive_cross_ref_qualified() {
+        // .cache.cache in the same file is resolved via \d .cache
+        let src = "\\d .cache\ncache:([id:`u#`long$()] )\nfuncs:(`u#`long$())!()\n\\d .\nuse:.cache.cache";
+        let warnings = unresolved_for(src);
+        assert!(warnings.is_empty(), "got: {warnings:?}");
+    }
+
     /// Sanity: dbmaint.q is real q. Surface any unresolved-name false
     /// positives so we can tune the builtin allow-list.
     ///
