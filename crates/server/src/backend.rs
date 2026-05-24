@@ -223,8 +223,9 @@ impl LanguageServer for QLanguageServer {
         let uri = &params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
         let docs = self.documents.read().await;
+        let idx = self.workspace_index.read().await;
         let Some(doc) = docs.get(uri) else { return Ok(None) };
-        let items = crate::completion::complete(doc, pos);
+        let items = crate::completion::complete_with_workspace(doc, pos, &idx);
         Ok(Some(CompletionResponse::Array(items)))
     }
 
