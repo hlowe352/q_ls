@@ -28,13 +28,13 @@ pub fn prepare_rename(doc: &Document, pos: Position) -> Option<PrepareRenameResp
     })
 }
 
-/// Build the WorkspaceEdit for renaming the symbol at `pos` to `new_name`.
+/// Build the `WorkspaceEdit` for renaming the symbol at `pos` to `new_name`.
 /// Returns `None` if the cursor isn't on a renameable identifier or the
 /// new name fails the same identifier-shape check.
 pub fn rename(
     doc: &Document,
     pos: Position,
-    new_name: String,
+    new_name: &str,
     uri: &Uri,
 ) -> Option<WorkspaceEdit> {
     let cursor = doc.offset_of(pos);
@@ -42,7 +42,7 @@ pub fn rename(
     if is_builtin(old_name) {
         return None;
     }
-    if !is_valid_identifier(&new_name) {
+    if !is_valid_identifier(new_name) {
         return None;
     }
 
@@ -54,7 +54,7 @@ pub fn rename(
 
     let edits: Vec<TextEdit> = locations
         .into_iter()
-        .map(|loc| TextEdit { range: loc.range, new_text: new_name.clone() })
+        .map(|loc| TextEdit { range: loc.range, new_text: new_name.to_string() })
         .collect();
 
     let mut changes = HashMap::new();
@@ -110,7 +110,7 @@ mod tests {
     fn rename_rewrites_all_uses() {
         let doc = Document::new("foo:1; bar:foo+foo".to_string(), 0);
         let pos = doc.position_of(0); // on `foo:` def
-        let edit = rename(&doc, pos, "baz".to_string(), &uri()).expect("rename ok");
+        let edit = rename(&doc, pos, "baz", &uri()).expect("rename ok");
         let edits = edit
             .changes
             .as_ref()
@@ -127,7 +127,7 @@ mod tests {
         // `x` in lambda param scope and outer `x:99` are different bindings.
         let doc = Document::new("x:99; f:{[x] x+1}".to_string(), 0);
         let pos = doc.position_of(0); // on outer `x`
-        let edit = rename(&doc, pos, "y".to_string(), &uri()).expect("rename ok");
+        let edit = rename(&doc, pos, "y", &uri()).expect("rename ok");
         let edits = edit
             .changes
             .as_ref()
@@ -143,7 +143,7 @@ mod tests {
         let doc = Document::new("f:{a:1; a:2; a}".to_string(), 0);
         let src = doc.text().to_string();
         let pos = doc.position_of(src.find("a:2").unwrap());
-        let edit = rename(&doc, pos, "b".to_string(), &uri()).expect("rename ok");
+        let edit = rename(&doc, pos, "b", &uri()).expect("rename ok");
         let edits = edit
             .changes
             .as_ref()
@@ -156,9 +156,9 @@ mod tests {
     fn rename_rejects_invalid_new_name() {
         let doc = Document::new("foo:1".to_string(), 0);
         let pos = doc.position_of(0);
-        assert!(rename(&doc, pos, "1bad".to_string(), &uri()).is_none());
-        assert!(rename(&doc, pos, "with space".to_string(), &uri()).is_none());
-        assert!(rename(&doc, pos, String::new(), &uri()).is_none());
+        assert!(rename(&doc, pos, "1bad", &uri()).is_none());
+        assert!(rename(&doc, pos, "with space", &uri()).is_none());
+        assert!(rename(&doc, pos, "", &uri()).is_none());
     }
 
     #[test]

@@ -238,7 +238,7 @@ pub enum Token {
     #[token("\\")]
     Backslash,
 
-    /// Forward slash — "over" adverb (bare `/` not matched by LineComment)
+    /// Forward slash — "over" adverb (bare `/` not matched by `LineComment`)
     #[token("/")]
     Slash,
 

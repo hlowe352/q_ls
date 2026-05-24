@@ -1,3 +1,4 @@
+#[allow(clippy::wildcard_imports)]
 use tower_lsp_server::ls_types::*;
 use q_parser::{SyntaxKind, SyntaxNode};
 use crate::document::Document;
@@ -32,7 +33,7 @@ fn unindented_close_warnings(doc: &Document) -> Vec<Diagnostic> {
     let root = doc.parse().syntax();
     let mut diagnostics = Vec::new();
 
-    for tok in root.descendants_with_tokens().filter_map(|e| e.into_token()) {
+    for tok in root.descendants_with_tokens().filter_map(q_parser::SyntaxElement::into_token) {
         let kind = tok.kind();
         if !matches!(kind, SyntaxKind::RBrace | SyntaxKind::RBracket | SyntaxKind::RParen) {
             continue;
@@ -97,7 +98,7 @@ fn unresolved_reference_warnings(doc: &Document) -> Vec<Diagnostic> {
         }
         let Some(token) = node
             .descendants_with_tokens()
-            .filter_map(|el| el.into_token())
+            .filter_map(q_parser::SyntaxElement::into_token)
             .find(|t| !t.kind().is_trivia())
         else {
             continue;
@@ -151,7 +152,7 @@ fn is_assignment_lhs(node: &SyntaxNode) -> bool {
     }
     parent
         .children_with_tokens()
-        .filter_map(|el| el.into_token())
+        .filter_map(q_parser::SyntaxElement::into_token)
         .any(|t| t.kind() == SyntaxKind::Colon || t.kind() == SyntaxKind::ColonColon)
 }
 

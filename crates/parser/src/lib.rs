@@ -35,6 +35,7 @@ use rowan::GreenNode;
 /// Always succeeds — parse errors are accumulated in [`Parse::errors`] rather
 /// than returned as a `Result`. The returned tree covers 100 % of the input
 /// bytes regardless of errors.
+#[must_use] 
 pub fn parse(source: &str) -> Parse {
     let mut p = parser::Parser::new(source);
     let m = p.start();
@@ -60,11 +61,13 @@ pub struct Parse {
 
 impl Parse {
     /// Root [`SyntaxNode`] of the concrete syntax tree.
+    #[must_use] 
     pub fn syntax(&self) -> SyntaxNode {
         SyntaxNode::new_root(self.green.clone())
     }
 
     /// Underlying rowan [`GreenNode`] (useful for incremental re-parsing).
+    #[must_use] 
     pub fn green(&self) -> &GreenNode {
         &self.green
     }

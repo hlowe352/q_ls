@@ -169,7 +169,7 @@ pub enum SyntaxKind {
     SignalExpr,
     /// `k)…` or `p)…` — DSL escape statement.
     DslStmt,
-    /// `` `:path `` literal expression node (wraps the FileSymbol token).
+    /// `` `:path `` literal expression node (wraps the `FileSymbol` token).
     FileSymbolExpr,
     /// `[stmt; stmt; ...]` — progn (sequence of statements, returns last).
     PrognExpr,
@@ -183,6 +183,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Map a lexer token to the corresponding [`SyntaxKind`].
+    #[must_use] 
     pub fn from_token(token: q_lexer::Token) -> Self {
         match token {
             q_lexer::Token::Boolean     => SyntaxKind::Boolean,
@@ -257,6 +258,7 @@ impl SyntaxKind {
 
     /// Returns `true` for trivia kinds that are typically skipped by the
     /// parser but preserved in the lossless CST.
+    #[must_use] 
     pub fn is_trivia(self) -> bool {
         matches!(self, SyntaxKind::Whitespace | SyntaxKind::Newline | SyntaxKind::LineComment | SyntaxKind::Shebang | SyntaxKind::CommentBlock)
     }

@@ -1,4 +1,5 @@
 use q_parser::Parse;
+#[allow(clippy::wildcard_imports)]
 use tower_lsp_server::ls_types::*;
 
 use crate::line_index::LineIndex;
@@ -43,17 +44,14 @@ impl Document {
         // the line index after each edit so subsequent ranges stay correct).
         // A full-document replace (no `range`) discards prior text.
         for change in changes {
-            match change.range {
-                Some(range) => {
-                    let s = self.line_index.offset(&self.text, range.start);
-                    let e = self.line_index.offset(&self.text, range.end);
-                    self.text.replace_range(s..e, &change.text);
-                    self.line_index = LineIndex::new(&self.text);
-                }
-                None => {
-                    self.text = change.text;
-                    self.line_index = LineIndex::new(&self.text);
-                }
+            if let Some(range) = change.range {
+                let s = self.line_index.offset(&self.text, range.start);
+                let e = self.line_index.offset(&self.text, range.end);
+                self.text.replace_range(s..e, &change.text);
+                self.line_index = LineIndex::new(&self.text);
+            } else {
+                self.text = change.text;
+                self.line_index = LineIndex::new(&self.text);
             }
         }
 
