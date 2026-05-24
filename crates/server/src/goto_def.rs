@@ -1,18 +1,54 @@
 #[allow(clippy::wildcard_imports)]
 use tower_lsp_server::ls_types::*;
+use std::collections::HashMap;
 use crate::document::Document;
+use crate::workspace_index::WorkspaceIndex;
 
+#[allow(dead_code)]
 pub fn goto_definition(doc: &Document, pos: Position, uri: &Uri) -> Option<GotoDefinitionResponse> {
+    goto_definition_with_workspace(doc, pos, uri, &HashMap::new(), &WorkspaceIndex::default())
+}
+
+pub fn goto_definition_with_workspace(
+    doc: &Document,
+    pos: Position,
+    uri: &Uri,
+    _open_docs: &HashMap<Uri, Document>,
+    workspace: &WorkspaceIndex,
+) -> Option<GotoDefinitionResponse> {
     let offset = doc.offset_of(pos);
     let (name, _, _) = doc.ident_at(offset)?;
 
-    let def_offset = doc.sym_table().resolve(offset, name)?;
-    let def_pos = doc.position_of(def_offset);
+    // 1. Try same-file resolution first.
+    if let Some(def_offset) = doc.sym_table().resolve(offset, name) {
+        let def_pos = doc.position_of(def_offset);
+        return Some(GotoDefinitionResponse::Scalar(Location {
+            uri: uri.clone(),
+            range: Range::new(def_pos, def_pos),
+        }));
+    }
 
-    Some(GotoDefinitionResponse::Scalar(Location {
-        uri: uri.clone(),
-        range: Range::new(def_pos, def_pos),
-    }))
+    // 2. Fall back to workspace-wide globals.
+    let sites = workspace.resolve_global(name)?;
+    let locations: Vec<Location> = sites
+        .iter()
+        .map(|(def_uri, off)| {
+            let def_pos = workspace
+                .files()
+                .get(def_uri)
+                .map(|d| d.position_of(*off as usize))
+                .unwrap_or(Position::new(0, 0));
+            Location {
+                uri: def_uri.clone(),
+                range: Range::new(def_pos, def_pos),
+            }
+        })
+        .collect();
+    if locations.is_empty() {
+        None
+    } else {
+        Some(GotoDefinitionResponse::Array(locations))
+    }
 }
 
 #[cfg(test)]
@@ -162,6 +198,47 @@ mod tests {
     /// Wide-stack thread: rowan's `GreenNode` drops recursively and
     /// dbmaint.q nests deep enough to overflow the default 2 MB test
     /// thread stack on teardown — not a logic issue.
+    #[test]
+    fn cross_file_goto_def() {
+        use crate::workspace_index::WorkspaceIndex;
+        use std::collections::HashMap;
+
+        let uri_a: Uri = "file:///a.q".parse().unwrap();
+        let uri_b: Uri = "file:///b.q".parse().unwrap();
+
+        let doc_b = Document::new("foo+1".to_string(), 0);
+
+        let mut idx = WorkspaceIndex::default();
+        idx.index_file(uri_a.clone(), Document::new("foo:42".to_string(), 0));
+
+        let open_docs: HashMap<Uri, Document> = HashMap::new();
+        let result = goto_definition_with_workspace(&doc_b, Position::new(0, 0), &uri_b, &open_docs, &idx);
+        let result = result.expect("should resolve cross-file");
+        match result {
+            GotoDefinitionResponse::Array(locs) => {
+                assert!(!locs.is_empty(), "expected at least one location");
+                assert_eq!(locs[0].uri, uri_a);
+            }
+            GotoDefinitionResponse::Scalar(loc) => {
+                assert_eq!(loc.uri, uri_a);
+            }
+            _ => panic!("unexpected response variant"),
+        }
+    }
+
+    #[test]
+    fn same_file_def_still_works_with_workspace() {
+        use crate::workspace_index::WorkspaceIndex;
+        use std::collections::HashMap;
+
+        let uri: Uri = "file:///x.q".parse().unwrap();
+        let doc = Document::new("bar:99; bar+1".to_string(), 0);
+        let idx = WorkspaceIndex::default();
+        let open_docs: HashMap<Uri, Document> = HashMap::new();
+        let result = goto_definition_with_workspace(&doc, doc.position_of(8), &uri, &open_docs, &idx);
+        assert!(result.is_some(), "same-file def should still resolve");
+    }
+
     #[test]
     fn dbmaint_fn_resolves_to_lambda_param() {
         std::thread::Builder::new()

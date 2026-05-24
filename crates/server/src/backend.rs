@@ -238,8 +238,9 @@ impl LanguageServer for QLanguageServer {
         let uri = params.text_document_position_params.text_document.uri.clone();
         let pos = params.text_document_position_params.position;
         let docs = self.documents.read().await;
+        let idx = self.workspace_index.read().await;
         let Some(doc) = docs.get(&uri) else { return Ok(None) };
-        Ok(crate::goto_def::goto_definition(doc, pos, &uri))
+        Ok(crate::goto_def::goto_definition_with_workspace(doc, pos, &uri, &docs, &idx))
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
