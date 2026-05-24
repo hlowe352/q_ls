@@ -1,3 +1,4 @@
+#[allow(clippy::wildcard_imports)]
 use tower_lsp_server::ls_types::*;
 use crate::builtins::lookup_doc;
 use crate::document::Document;
@@ -42,13 +43,12 @@ pub fn hover(doc: &Document, pos: Position) -> Option<Hover> {
             } else {
                 table
                     .qualified_for(offset, name)
-                    .map(|q| q.to_string())
-                    .unwrap_or_else(|| name.to_string())
+                    .map_or_else(|| name.to_string(), |q| q.to_string())
             };
-            let value = if display != name {
-                format!("`{name}` → **`{display}`**")
-            } else {
+            let value = if display == name {
                 format!("**`{display}`**")
+            } else {
+                format!("`{name}` → **`{display}`**")
             };
             return Some(Hover {
                 contents: HoverContents::Markup(MarkupContent {
@@ -63,6 +63,7 @@ pub fn hover(doc: &Document, pos: Position) -> Option<Hover> {
     None
 }
 
+#[allow(clippy::cast_possible_truncation)]
 fn cursor_in_table_expr(doc: &Document, offset: usize) -> bool {
     use q_parser::SyntaxKind;
     let root = doc.parse().syntax();
@@ -70,8 +71,7 @@ fn cursor_in_table_expr(doc: &Document, offset: usize) -> bool {
     let token = root.token_at_offset(pos).left_biased();
     token
         .and_then(|t| t.parent())
-        .map(|n| n.ancestors().any(|a| a.kind() == SyntaxKind::TableExpr))
-        .unwrap_or(false)
+        .is_some_and(|n| n.ancestors().any(|a| a.kind() == SyntaxKind::TableExpr))
 }
 
 fn get_word_at(text: &str, offset: usize) -> Option<String> {

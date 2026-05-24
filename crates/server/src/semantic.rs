@@ -57,7 +57,7 @@ pub fn semantic_tokens(doc: &Document) -> Vec<SemanticToken> {
 
     for tok in root
         .descendants_with_tokens()
-        .filter_map(|el| el.into_token())
+        .filter_map(q_parser::SyntaxElement::into_token)
     {
         let Some((ty, modifiers)) = classify_token(&tok) else {
             continue;
@@ -80,6 +80,7 @@ pub fn semantic_tokens(doc: &Document) -> Vec<SemanticToken> {
             }
             let visible = &line[..visible_len];
 
+            #[allow(clippy::cast_possible_truncation)]
             let length: u32 = visible.chars().map(|c| c.len_utf16() as u32).sum();
             if length > 0 {
                 let pos = doc.position_of(line_off);
@@ -112,17 +113,13 @@ pub fn semantic_tokens(doc: &Document) -> Vec<SemanticToken> {
 /// `None` if the token shouldn't be highlighted (whitespace, structural
 /// punctuation we leave to the editor's grammar).
 fn classify_token(tok: &SyntaxToken) -> Option<(u32, u32)> {
+    #[allow(clippy::wildcard_imports, clippy::enum_glob_use)]
     use SyntaxKind::*;
     let kind = tok.kind();
     match kind {
-        // Trivia / structure — let the editor's grammar handle these.
-        Whitespace | Newline | LParen | RParen | LBracket | RBracket
-        | LBrace | RBrace | Semi | Error => None,
-
         LineComment | CommentBlock | Shebang => Some((TYPE_COMMENT, 0)),
 
-        String => Some((TYPE_STRING, 0)),
-        Symbol | FileSymbol => Some((TYPE_STRING, 0)),
+        String | Symbol | FileSymbol => Some((TYPE_STRING, 0)),
 
         Integer | Float | Timestamp | Date | Month | Guid | Timespan
         | Datetime | Minute | Second | Time | ByteList => Some((TYPE_NUMBER, 0)),
@@ -138,7 +135,6 @@ fn classify_token(tok: &SyntaxToken) -> Option<(u32, u32)> {
 
         Ident | DottedIdent => Some(classify_ident(tok)),
 
-        // Anything else (a syntax-node kind not expected as a leaf) — skip.
         _ => None,
     }
 }
@@ -152,7 +148,7 @@ fn classify_ident(tok: &SyntaxToken) -> (u32, u32) {
     }
 
     let parent = tok.parent();
-    let parent_kind = parent.as_ref().map(|p| p.kind());
+    let parent_kind = parent.as_ref().map(q_parser::SyntaxNode::kind);
 
     // Bare namespace prefix (e.g. `.app` in `.app.cfg` parsed as Namespace).
     if parent_kind == Some(SyntaxKind::Namespace) {
@@ -170,12 +166,12 @@ fn classify_ident(tok: &SyntaxToken) -> (u32, u32) {
     // whose LHS is the IdentExpr containing this token.
     let is_decl = parent
         .as_ref()
-        .and_then(|p| p.parent())
+        .and_then(q_parser::SyntaxNode::parent)
         .is_some_and(|gp| {
             gp.kind() == SyntaxKind::BinExpr
                 && gp.first_child().as_ref() == parent.as_ref()
                 && gp.children_with_tokens()
-                    .filter_map(|el| el.into_token())
+                    .filter_map(q_parser::SyntaxElement::into_token)
                     .any(|t| matches!(t.kind(), SyntaxKind::Colon | SyntaxKind::ColonColon))
         });
 
@@ -239,6 +235,7 @@ mod tests {
         let lines: Vec<&str> = src.split('\n').collect();
         for &(ln, start, length) in &comment_spans {
             let line_text = lines[ln as usize];
+            #[allow(clippy::cast_possible_truncation)]
             let line_utf16: u32 = line_text.chars().map(|c| c.len_utf16() as u32).sum();
             assert!(
                 start + length <= line_utf16,

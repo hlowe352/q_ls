@@ -1,3 +1,4 @@
+#[allow(clippy::wildcard_imports)]
 use tower_lsp_server::ls_types::*;
 use q_parser::{SyntaxKind, SyntaxNode, SyntaxToken};
 use crate::document::Document;
@@ -17,7 +18,7 @@ pub fn document_symbols(doc: &Document) -> Vec<DocumentSymbol> {
     out
 }
 
-/// Build a DocumentSymbol for an assignment BinExpr, including any nested
+/// Build a `DocumentSymbol` for an assignment `BinExpr`, including any nested
 /// assignments inside the RHS lambda body as children.
 fn symbol_for_assign(doc: &Document, bin: &SyntaxNode) -> Option<DocumentSymbol> {
     if !is_assignment(bin) {
@@ -60,18 +61,18 @@ fn symbol_for_assign(doc: &Document, bin: &SyntaxNode) -> Option<DocumentSymbol>
 
 fn is_assignment(bin: &SyntaxNode) -> bool {
     bin.children_with_tokens()
-        .filter_map(|el| el.into_token())
+        .filter_map(q_parser::SyntaxElement::into_token)
         .any(|t| t.kind() == SyntaxKind::Colon || t.kind() == SyntaxKind::ColonColon)
 }
 
 fn first_lhs_name(bin: &SyntaxNode) -> Option<SyntaxToken> {
     let lhs = bin.first_child()?;
     lhs.descendants_with_tokens()
-        .filter_map(|el| el.into_token())
+        .filter_map(q_parser::SyntaxElement::into_token)
         .find(|t| matches!(t.kind(), SyntaxKind::Ident | SyntaxKind::DottedIdent))
 }
 
-/// If the BinExpr's RHS *is* a lambda (possibly wrapped in trivially
+/// If the `BinExpr`'s RHS *is* a lambda (possibly wrapped in trivially
 /// transparent shapes), return that lambda.
 ///
 /// "Transparent" wrappers are nodes where the lambda is the value of the
@@ -105,7 +106,7 @@ fn peel_to_lambda(node: SyntaxNode) -> Option<SyntaxNode> {
     }
 }
 
-/// Walk a lambda body and emit a child DocumentSymbol for each plain
+/// Walk a lambda body and emit a child `DocumentSymbol` for each plain
 /// assignment, recursing into nested lambdas.
 fn collect_lambda_body_symbols(doc: &Document, lambda: &SyntaxNode) -> Vec<DocumentSymbol> {
     let mut out = Vec::new();

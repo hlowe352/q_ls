@@ -31,7 +31,7 @@ pub struct SymTable {
     /// Used to feed completion without re-walking the tree.
     idents: HashSet<SmolStr>,
     /// Namespace change points from `\d` directives, sorted by byte offset.
-    /// Each entry is (offset_of_directive, new_namespace).
+    /// Each entry is `(offset_of_directive, new_namespace)`.
     /// `""` means root namespace; `".foo"` means namespace `.foo`.
     ns_changes: Vec<(u32, SmolStr)>,
 }
@@ -76,7 +76,7 @@ impl SymTable {
             if matches!(kind, SyntaxKind::IdentExpr | SyntaxKind::Namespace)
                 && let Some(tok) = node
                     .descendants_with_tokens()
-                    .filter_map(|el| el.into_token())
+                    .filter_map(q_parser::SyntaxElement::into_token)
                     .find(|t| !t.kind().is_trivia())
             {
                 t.idents.insert(SmolStr::new(tok.text()));
@@ -86,7 +86,7 @@ impl SymTable {
             if kind == SyntaxKind::SystemCmdStmt {
                 if let Some(cmd_tok) = node
                     .descendants_with_tokens()
-                    .filter_map(|el| el.into_token())
+                    .filter_map(q_parser::SyntaxElement::into_token)
                     .find(|t| t.kind() == SyntaxKind::SystemCmd)
                     && let Some(ns) = parse_d_directive(cmd_tok.text()) {
                         let off: u32 = cmd_tok.text_range().start().into();
@@ -111,7 +111,7 @@ impl SymTable {
                 {
                     for tok in plist
                         .children_with_tokens()
-                        .filter_map(|el| el.into_token())
+                        .filter_map(q_parser::SyntaxElement::into_token)
                         .filter(|tok| tok.kind() == SyntaxKind::Ident)
                     {
                         let off: u32 = tok.text_range().start().into();
@@ -152,7 +152,7 @@ impl SymTable {
         // Look for an assignment colon directly on this BinExpr.
         let Some(op) = bin
             .children_with_tokens()
-            .filter_map(|el| el.into_token())
+            .filter_map(q_parser::SyntaxElement::into_token)
             .find(|t| t.kind() == SyntaxKind::Colon || t.kind() == SyntaxKind::ColonColon)
         else {
             return;
@@ -165,7 +165,7 @@ impl SymTable {
         // Single-name assign: `name:` or `.ns.name:`.
         let single_name = lhs
             .descendants_with_tokens()
-            .filter_map(|el| el.into_token())
+            .filter_map(q_parser::SyntaxElement::into_token)
             .find(|t| !t.kind().is_trivia())
             .filter(|t| t.kind() == SyntaxKind::Ident || t.kind() == SyntaxKind::DottedIdent);
 
@@ -193,7 +193,7 @@ impl SymTable {
             for entry in lhs.children() {
                 let Some(tok) = entry
                     .descendants_with_tokens()
-                    .filter_map(|el| el.into_token())
+                    .filter_map(q_parser::SyntaxElement::into_token)
                     .find(|t| t.kind() == SyntaxKind::Ident || t.kind() == SyntaxKind::DottedIdent)
                 else {
                     continue;
@@ -212,6 +212,7 @@ impl SymTable {
 
     /// Active namespace at `offset` based on `\d` directives seen so far.
     /// Returns `""` (root) or `".foo"`.
+    #[allow(clippy::cast_possible_truncation)]
     fn active_ns_at(&self, offset: usize) -> &str {
         let off = offset as u32;
         let i = self.ns_changes.partition_point(|(o, _)| *o <= off);
@@ -227,6 +228,7 @@ impl SymTable {
     /// before `cursor` and walk back through siblings whose range ended
     /// before `cursor` until we find one whose range still contains it.
     /// The walk-back is bounded by sibling count, not total lambda count.
+    #[allow(clippy::cast_possible_truncation)]
     fn innermost_lambda(&self, cursor: usize) -> Option<usize> {
         let off = cursor as u32;
         let mut hi = self.lambdas.partition_point(|l| {
@@ -353,8 +355,7 @@ impl SymTable {
             let qualified = format!("{ns}.{name}");
             let namespaced: Vec<usize> = self.globals
                 .get(qualified.as_str())
-                .map(|v| v.iter().map(|&o| o as usize).collect())
-                .unwrap_or_default();
+                .map_or_else(Vec::new, |v| v.iter().map(|&o| o as usize).collect());
             if !namespaced.is_empty() {
                 return namespaced;
             }
@@ -390,7 +391,7 @@ impl SymTable {
 
     /// All identifier texts seen in the document (for completion).
     pub fn idents(&self) -> impl Iterator<Item = &str> {
-        self.idents.iter().map(|s| s.as_str())
+        self.idents.iter().map(smol_str::SmolStr::as_str)
     }
 }
 
@@ -412,7 +413,7 @@ fn parse_system_d_call(apply: &SyntaxNode) -> Option<SmolStr> {
     }
     let func_ident = func
         .descendants_with_tokens()
-        .filter_map(|el| el.into_token())
+        .filter_map(q_parser::SyntaxElement::into_token)
         .find(|t| t.kind() == SyntaxKind::Ident)?;
     if func_ident.text() != "system" {
         return None;
@@ -423,7 +424,7 @@ fn parse_system_d_call(apply: &SyntaxNode) -> Option<SmolStr> {
     }
     let str_tok = arg
         .descendants_with_tokens()
-        .filter_map(|el| el.into_token())
+        .filter_map(q_parser::SyntaxElement::into_token)
         .find(|t| t.kind() == SyntaxKind::String)?;
     // Strip surrounding quotes then delegate to the same logic as \d.
     let raw = str_tok.text();

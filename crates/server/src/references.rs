@@ -9,6 +9,7 @@
 
 use std::collections::HashSet;
 
+#[allow(clippy::wildcard_imports)]
 use tower_lsp_server::ls_types::*;
 use q_parser::SyntaxKind;
 
@@ -38,14 +39,13 @@ pub fn find_references(
     // Qualified form of `name` (e.g. `.cache.cache` when name is `cache`
     // inside `\d .cache`).  Used to match backtick symbol tokens.
     let qualified_name = table.qualified_for(cursor, &name)
-        .map(|q| q.to_string())
-        .unwrap_or_else(|| name.clone());
+        .map_or_else(|| name.clone(), |q| q.to_string());
 
     let root = doc.parse().syntax();
     let mut out = Vec::new();
     for token in root
         .descendants_with_tokens()
-        .filter_map(|el| el.into_token())
+        .filter_map(q_parser::SyntaxElement::into_token)
     {
         let tk = token.kind();
         let off: usize = token.text_range().start().into();
@@ -145,7 +145,7 @@ fn is_in_qsql(token: &q_parser::SyntaxToken) -> bool {
                     && func.kind() == SyntaxKind::IdentExpr {
                         let text = func
                             .children_with_tokens()
-                            .filter_map(|el| el.into_token())
+                            .filter_map(q_parser::SyntaxElement::into_token)
                             .find(|t| t.kind() == SyntaxKind::Ident)
                             .map(|t| t.text().to_string())
                             .unwrap_or_default();
@@ -167,12 +167,12 @@ fn is_in_qsql(token: &q_parser::SyntaxToken) -> bool {
 /// True only when a Symbol token is used as a global table reference:
 ///
 /// - LHS of a `upsert` / `insert` binary expression:
-///   `` `.t upsert row `` → BinExpr { LiteralExpr(Symbol), "upsert", … }
+///   `` `.t upsert row `` → `BinExpr` { `LiteralExpr`(Symbol), "upsert", … }
 /// - Table argument of a `from` clause in any context (statement or lambda):
 ///   `` delete from `.t where … `` / `` update … from `.t where … ``
-///   Even inside lambdas the parser emits an ApplyExpr chain; we detect the
-///   `from`-apply pattern: LiteralExpr is first child of ApplyExpr whose
-///   parent is an ApplyExpr with `IdentExpr("from")` as its first child.
+///   Even inside lambdas the parser emits an `ApplyExpr` chain; we detect the
+///   `from`-apply pattern: `LiteralExpr` is first child of `ApplyExpr` whose
+///   parent is an `ApplyExpr` with `IdentExpr`("from") as its first child.
 ///
 /// Excluded: dict/list indexing (`r`id`), assignment RHS (`x:`sym`),
 /// symbol lists, function arguments, etc.
@@ -191,7 +191,7 @@ fn is_inplace_table_symbol(token: &q_parser::SyntaxToken) -> bool {
             parent.first_child().as_ref() == Some(&lit)
                 && parent
                     .children_with_tokens()
-                    .filter_map(|el| el.into_token())
+                    .filter_map(q_parser::SyntaxElement::into_token)
                     .any(|t| t.kind() == SyntaxKind::Ident
                         && matches!(t.text(), "upsert" | "insert"))
         }
@@ -253,12 +253,12 @@ fn is_qsql_from_table_ident(token: &q_parser::SyntaxToken) -> bool {
 /// These are column definitions, not references to globals.
 fn is_col_def_in_table(token: &q_parser::SyntaxToken) -> bool {
     let Some(ident_expr) = token.parent() else { return false };
-    if ident_expr.kind() != SyntaxKind::IdentExpr { return false };
+    if ident_expr.kind() != SyntaxKind::IdentExpr { return false; }
     let Some(bin) = ident_expr.parent() else { return false };
-    if bin.kind() != SyntaxKind::BinExpr { return false };
-    if bin.first_child().as_ref() != Some(&ident_expr) { return false };
+    if bin.kind() != SyntaxKind::BinExpr { return false; }
+    if bin.first_child().as_ref() != Some(&ident_expr) { return false; }
     let has_colon = bin.children_with_tokens()
-        .filter_map(|el| el.into_token())
+        .filter_map(q_parser::SyntaxElement::into_token)
         .any(|t| matches!(t.kind(), SyntaxKind::Colon | SyntaxKind::ColonColon));
     has_colon && bin.ancestors().any(|n| n.kind() == SyntaxKind::TableExpr)
 }
@@ -268,10 +268,9 @@ fn is_from_apply(node: &q_parser::SyntaxNode) -> bool {
     if node.kind() != SyntaxKind::ApplyExpr { return false; }
     node.first_child()
         .filter(|fc| fc.kind() == SyntaxKind::IdentExpr)
-        .map(|fc| fc.children_with_tokens()
-            .filter_map(|el| el.into_token())
+        .is_some_and(|fc| fc.children_with_tokens()
+            .filter_map(q_parser::SyntaxElement::into_token)
             .any(|t| t.kind() == SyntaxKind::Ident && t.text() == "from"))
-        .unwrap_or(false)
 }
 
 #[cfg(test)]

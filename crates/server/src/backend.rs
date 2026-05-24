@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_lsp_server::jsonrpc::Result;
+#[allow(clippy::wildcard_imports)]
 use tower_lsp_server::ls_types::*;
 use tower_lsp_server::{Client, LanguageServer};
 
@@ -49,11 +50,11 @@ impl LanguageServer for QLanguageServer {
                 document_symbol_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Right(RenameOptions {
                     prepare_provider: Some(true),
-                    work_done_progress_options: Default::default(),
+                    work_done_progress_options: WorkDoneProgressOptions::default(),
                 })),
                 semantic_tokens_provider: Some(
                     SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
-                        work_done_progress_options: Default::default(),
+                        work_done_progress_options: WorkDoneProgressOptions::default(),
                         legend: {
                             let (token_types, token_modifiers) = crate::semantic::legend();
                             SemanticTokensLegend { token_types, token_modifiers }
@@ -155,7 +156,7 @@ impl LanguageServer for QLanguageServer {
         let pos = params.text_document_position.position;
         let docs = self.documents.read().await;
         let Some(doc) = docs.get(&uri) else { return Ok(None) };
-        Ok(crate::rename::rename(doc, pos, params.new_name, &uri))
+        Ok(crate::rename::rename(doc, pos, &params.new_name, &uri))
     }
 
     async fn semantic_tokens_full(

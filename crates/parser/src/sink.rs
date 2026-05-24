@@ -11,6 +11,7 @@ pub struct Sink {
 }
 
 impl Sink {
+    #[must_use]
     pub fn new(events: Vec<Event>, errors: Vec<ParseError>) -> Self {
         Self {
             builder: GreenNodeBuilder::new(),
@@ -19,6 +20,7 @@ impl Sink {
         }
     }
 
+    #[must_use]
     pub fn finish(mut self) -> (GreenNode, Vec<ParseError>) {
         // Indices of Start events that have already been emitted as part of a
         // forward_parent chain (so we skip them when we reach them normally).

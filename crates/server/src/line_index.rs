@@ -18,6 +18,7 @@ pub struct LineIndex {
 }
 
 impl LineIndex {
+    #[allow(clippy::cast_possible_truncation)]
     pub fn new(text: &str) -> Self {
         let mut starts = Vec::with_capacity(text.len() / 40 + 1);
         starts.push(0);
@@ -64,6 +65,7 @@ impl LineIndex {
     }
 
     /// Convert a UTF-8 byte offset to an LSP Position (UTF-16).
+    #[allow(clippy::cast_possible_truncation)]
     pub fn position(&self, text: &str, offset: usize) -> Position {
         let offset = offset.min(self.len as usize);
         // Binary search: find the largest line whose start ≤ offset.
@@ -73,7 +75,7 @@ impl LineIndex {
         };
         let line_start = self.starts[line] as usize;
         let line_text = &text[line_start..offset];
-        let character: usize = line_text.chars().map(|c| c.len_utf16()).sum();
+        let character: usize = line_text.chars().map(char::len_utf16).sum();
         Position::new(line as u32, character as u32)
     }
 }

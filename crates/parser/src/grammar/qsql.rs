@@ -3,6 +3,7 @@ use crate::syntax_kind::SyntaxKind;
 use super::expressions;
 
 /// Check if current token is a qSQL keyword.
+#[must_use]
 pub fn at_qsql_keyword(p: &Parser) -> bool {
     p.at(SyntaxKind::Ident) && matches!(
         p.current_text(),
@@ -10,7 +11,12 @@ pub fn at_qsql_keyword(p: &Parser) -> bool {
     )
 }
 
-/// Parse a qSQL expression. Called when at_qsql_keyword() is true.
+/// Parse a qSQL expression. Called when `at_qsql_keyword()` is true.
+///
+/// # Panics
+///
+/// Panics if called when the current token is not a qSQL keyword (i.e.,
+/// when [`at_qsql_keyword`] would return `false`).
 pub fn parse_qsql(p: &mut Parser) {
     let text = p.current_text().unwrap();
     match text {

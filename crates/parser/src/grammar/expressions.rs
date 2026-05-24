@@ -11,8 +11,8 @@ pub fn expr(p: &mut Parser) {
 /// In q, ALL operators have equal precedence and are right-associative.
 /// `2*3+4` evaluates as `2*(3+4)` = 14.
 ///
-/// We use binding power (l_bp=1, r_bp=0): since we recurse with r_bp=0,
-/// any operator to the right will always win (its l_bp=1 >= min_bp=0),
+/// We use binding power (`l_bp=1`, `r_bp=0)`: since we recurse with `r_bp=0`,
+/// any operator to the right will always win (its `l_bp=1` >= `min_bp=0`),
 /// so it gets consumed into the RHS — giving right-associativity.
 fn expr_bp(p: &mut Parser, min_bp: u8) {
     let Some(mut lhs) = atom(p) else {
@@ -89,6 +89,7 @@ fn expr_bp(p: &mut Parser, min_bp: u8) {
 }
 
 /// Parse an atomic expression (leaves and prefix constructs).
+#[allow(clippy::too_many_lines)]
 fn atom(p: &mut Parser) -> Option<CompletedMarker> {
     let kind = p.current()?;
     match kind {
@@ -270,6 +271,7 @@ fn atom(p: &mut Parser) -> Option<CompletedMarker> {
 
 /// Parse a progn block: `[stmt; stmt; ...]` — a sequence of statements
 /// returning the value of the last one.  Used as an expression in q.
+#[allow(clippy::unnecessary_wraps)]
 fn parse_progn(p: &mut Parser) -> Option<CompletedMarker> {
     let m = p.start();
     p.expect(SyntaxKind::LBracket);
@@ -287,6 +289,7 @@ fn parse_progn(p: &mut Parser) -> Option<CompletedMarker> {
     Some(m.complete(p, SyntaxKind::PrognExpr))
 }
 
+#[allow(clippy::unnecessary_wraps)]
 fn parse_paren(p: &mut Parser) -> Option<CompletedMarker> {
     let m = p.start();
     p.bump(); // (
@@ -339,6 +342,7 @@ fn parse_paren(p: &mut Parser) -> Option<CompletedMarker> {
 }
 
 /// Parse a control word: if[...], do[...], while[...]
+#[allow(clippy::unnecessary_wraps)]
 fn parse_control_word(p: &mut Parser, kind: SyntaxKind) -> Option<CompletedMarker> {
     let m = p.start();
     p.bump(); // keyword (if/do/while)
@@ -346,6 +350,7 @@ fn parse_control_word(p: &mut Parser, kind: SyntaxKind) -> Option<CompletedMarke
     Some(m.complete(p, kind))
 }
 
+#[allow(clippy::unnecessary_wraps)]
 fn parse_lambda(p: &mut Parser) -> Option<CompletedMarker> {
     let m = p.start();
     p.bump(); // {
@@ -395,7 +400,7 @@ fn parse_lambda(p: &mut Parser) -> Option<CompletedMarker> {
 
 /// Parse an entry that may be an expression or assignment.
 /// Since `:` and `::` are now binary operators, assignments like `x:42`
-/// parse as BinExpr(x, :, 42) inside expr().
+/// parse as BinExpr(x, :, 42) inside `expr()`.
 fn parse_stmt_or_expr(p: &mut Parser) {
     let m = p.start();
     expr(p);
