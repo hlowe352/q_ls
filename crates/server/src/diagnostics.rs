@@ -273,6 +273,13 @@ mod tests {
     }
 
     #[test]
+    fn unresolved_system_d_qualifies_bare_global() {
+        let src = "system \"d .test\"\nval:42\nshow .test.val";
+        let warnings = unresolved_for(src);
+        assert!(warnings.is_empty(), "system d form got: {warnings:?}");
+    }
+
+    #[test]
     fn unresolved_d_directive_qualifies_bare_global() {
         // \d .cache puts us in .cache; `cache:` defines .cache.cache
         let src = "\\d .cache\ncache:1\n\\d .\nshow .cache.cache";

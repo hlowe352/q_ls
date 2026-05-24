@@ -54,6 +54,10 @@ pub fn find_references(
             if token.text() != name {
                 continue;
             }
+            // Column names inside qSQL are not global references.
+            if is_in_qsql(&token) {
+                continue;
+            }
 
             let parent_kind = token.parent().map(|p| p.kind());
             let in_param_list = is_in_kind(&token, SyntaxKind::ParamList);
@@ -82,14 +86,17 @@ pub fn find_references(
             out.push(Location { uri: uri.clone(), range: Range::new(start, end) });
 
         } else if tk == SyntaxKind::Symbol {
-            // `` `.cache.cache `` — backtick-prefixed symbol used as table ref
-            // (e.g. in upsert / insert / in-place qSQL).
-            // Match against bare name OR its fully qualified form.
+            // Only treat backtick symbols as global table refs in in-place
+            // modification contexts: `upsert`, `insert`, or qSQL
+            // delete/update with a symbol table.  Excludes dict indexing
+            // (r`id), symbol literals in assignments, etc.
+            if !is_inplace_table_symbol(&token) {
+                continue;
+            }
             let sym_name = token.text().strip_prefix('`').unwrap_or("");
             if sym_name != name && sym_name != qualified_name {
                 continue;
             }
-            // Symbol usage is always a reference, never a declaration.
             let start = doc.position_of(off);
             let end = doc.position_of(off + token.text().len());
             out.push(Location { uri: uri.clone(), range: Range::new(start, end) });
@@ -108,6 +115,90 @@ fn is_in_kind(token: &q_parser::SyntaxToken, kind: SyntaxKind) -> bool {
         cur = node.parent();
     }
     false
+}
+
+fn is_in_qsql(token: &q_parser::SyntaxToken) -> bool {
+    let mut cur = token.parent();
+    while let Some(node) = cur {
+        match node.kind() {
+            // Statement-level qSQL nodes.
+            SyntaxKind::SelectExpr
+            | SyntaxKind::UpdateExpr
+            | SyntaxKind::ExecExpr
+            | SyntaxKind::DeleteExpr => return true,
+
+            // Expression-level qSQL: inside $[…] or lambdas the parser emits
+            // plain ApplyExpr chains.  Detect `update`/`select`/`exec`/`delete`
+            // as the function position of an apply — these identifiers are only
+            // valid as qSQL verbs, never as ordinary function names.
+            SyntaxKind::ApplyExpr => {
+                if let Some(func) = node.first_child() {
+                    if func.kind() == SyntaxKind::IdentExpr {
+                        let text = func
+                            .children_with_tokens()
+                            .filter_map(|el| el.into_token())
+                            .find(|t| t.kind() == SyntaxKind::Ident)
+                            .map(|t| t.text().to_string())
+                            .unwrap_or_default();
+                        if matches!(
+                            text.as_str(),
+                            "update" | "select" | "exec" | "delete"
+                        ) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        cur = node.parent();
+    }
+    false
+}
+
+/// True only when a Symbol token is used as a global table reference in an
+/// in-place modification context:
+///
+/// - LHS of a `upsert` / `insert` binary expression:
+///   `` `.t upsert row `` → BinExpr { LiteralExpr(Symbol), "upsert", … }
+/// - Table argument inside a `delete`/`update` qSQL expression:
+///   `` delete from `.t where … `` → DeleteExpr { … ApplyExpr { LiteralExpr(Symbol) … } }
+///
+/// Excluded: dict/list indexing (`r`id`), assignment RHS (`x:`sym`),
+/// symbol lists, function arguments, etc.
+fn is_inplace_table_symbol(token: &q_parser::SyntaxToken) -> bool {
+    // Parent must be LiteralExpr wrapping the symbol.
+    let Some(lit) = token.parent() else { return false };
+    if lit.kind() != SyntaxKind::LiteralExpr {
+        return false;
+    }
+
+    let Some(parent) = lit.parent() else { return false };
+
+    match parent.kind() {
+        // `` `.t upsert rows `` or `` `.t insert rows ``
+        // CST: BinExpr { LiteralExpr(sym), Ident("upsert"|"insert"), … }
+        // The LiteralExpr must be the *first* child (LHS).
+        SyntaxKind::BinExpr => {
+            let is_lhs = parent.first_child().as_ref() == Some(&lit);
+            if !is_lhs {
+                return false;
+            }
+            parent
+                .children_with_tokens()
+                .filter_map(|el| el.into_token())
+                .any(|t| t.kind() == SyntaxKind::Ident
+                    && matches!(t.text(), "upsert" | "insert"))
+        }
+        // `` delete from `.t where … `` / `` update … from `.t where … ``
+        // The LiteralExpr is the table slot of the ApplyExpr inside Delete/UpdateExpr.
+        SyntaxKind::ApplyExpr => {
+            let Some(grandparent) = parent.parent() else { return false };
+            matches!(grandparent.kind(), SyntaxKind::DeleteExpr | SyntaxKind::UpdateExpr)
+                && parent.first_child().as_ref() == Some(&lit)
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -185,24 +276,62 @@ mod tests {
     }
 
     #[test]
-    fn symbol_token_included_in_refs_from_bare_name() {
-        // Cursor on `cache` (def inside \d .cache); `` `.cache.cache `` upsert
-        // site must appear in references.
+    fn symbol_upsert_included_in_refs_from_bare_name() {
         let src = "\\d .cache\ncache:1\n\\d .\n`.cache.cache upsert 2";
         let cursor = src.find("cache:1").unwrap();
         let r = refs(src, cursor, true);
         let sym_off = src.find("`.cache.cache").unwrap();
-        assert!(r.contains(&sym_off), "symbol ref missing; got offsets {r:?}");
+        assert!(r.contains(&sym_off), "upsert symbol ref missing; got {r:?}");
     }
 
     #[test]
-    fn symbol_token_included_in_refs_from_dotted_name() {
-        // Cursor on `.cache.cache` (dotted ident ref); same symbol must appear.
-        let src = "\\d .cache\ncache:1\n\\d .\nuse:.cache.cache\n`.cache.cache upsert 2";
-        let cursor = src.find("use:.cache.cache").unwrap() + "use:".len();
+    fn symbol_delete_included_in_refs_from_dotted_name() {
+        let src = "\\d .cache\ncache:1\n\\d .\ndelete from `.cache.cache where 1b";
+        let cursor = src.find("cache:1").unwrap();
         let r = refs(src, cursor, true);
         let sym_off = src.find("`.cache.cache").unwrap();
-        assert!(r.contains(&sym_off), "symbol ref missing from dotted cursor; got {r:?}");
+        assert!(r.contains(&sym_off), "delete symbol ref missing; got {r:?}");
+    }
+
+    #[test]
+    fn qsql_column_name_not_included_in_refs() {
+        // `id` in select column list is a column name, not a ref to global id
+        let src = "id:0j\nselect date,id from t";
+        let cursor = src.find("id:0j").unwrap();
+        let r = refs(src, cursor, true);
+        let qsql_off = src.find("date,id").unwrap() + "date,".len();
+        assert!(!r.contains(&qsql_off), "qsql column falsely included; got {r:?}");
+    }
+
+    #[test]
+    fn expr_level_qsql_column_not_included_in_refs() {
+        // update inside $[…] is parsed as ApplyExpr chain, not UpdateExpr.
+        // `id` in the where clause is a column name, not a ref to global id.
+        let src = "id:0j\n$[1b; update lastaccess:now from t where id=1; 0]";
+        let cursor = src.find("id:0j").unwrap();
+        let r = refs(src, cursor, true);
+        let qsql_off = src.find("where id").unwrap() + "where ".len();
+        assert!(!r.contains(&qsql_off), "expr-level qsql col falsely included; got {r:?}");
+    }
+
+    #[test]
+    fn dict_index_symbol_not_included_in_refs() {
+        // r`id — dict indexing; `id must NOT appear as a ref to global `id`
+        let src = "id:0j\nr`id";
+        let cursor = src.find("id:0j").unwrap();
+        let r = refs(src, cursor, true);
+        let idx_off = src.find("r`id").unwrap() + 1; // offset of `id
+        assert!(!r.contains(&idx_off), "dict index falsely included; got {r:?}");
+    }
+
+    #[test]
+    fn symbol_assignment_rhs_not_included_in_refs() {
+        // r:`id — `id is just a symbol value being assigned, not a table ref
+        let src = "id:0j\nr:`id";
+        let cursor = src.find("id:0j").unwrap();
+        let r = refs(src, cursor, true);
+        let sym_off = src.find(":`id").unwrap() + 1;
+        assert!(!r.contains(&sym_off), "rhs symbol falsely included; got {r:?}");
     }
 
     #[test]

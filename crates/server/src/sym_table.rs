@@ -82,7 +82,7 @@ impl SymTable {
                 t.idents.insert(SmolStr::new(tok.text()));
             }
 
-            // Track \d .namespace directives so bare globals are qualified.
+            // Track \d .namespace and system "d .namespace" directives.
             if kind == SyntaxKind::SystemCmdStmt {
                 if let Some(cmd_tok) = node
                     .descendants_with_tokens()
@@ -94,6 +94,12 @@ impl SymTable {
                         active_ns = ns.clone();
                         t.ns_changes.push((off, ns));
                     }
+                }
+            } else if kind == SyntaxKind::ApplyExpr {
+                if let Some(ns) = parse_system_d_call(&node) {
+                    let off: u32 = node.text_range().start().into();
+                    active_ns = ns.clone();
+                    t.ns_changes.push((off, ns));
                 }
             }
 
@@ -140,6 +146,12 @@ impl SymTable {
     }
 
     fn record_bin_expr(&mut self, bin: &SyntaxNode, stack: &[usize], active_ns: &str) {
+        // Column definitions inside a TableExpr (keyed or plain table
+        // constructor) are not variable assignments — skip them.
+        if bin.ancestors().any(|n| n.kind() == SyntaxKind::TableExpr) {
+            return;
+        }
+
         // Look for an assignment colon directly on this BinExpr.
         let Some(op) = bin
             .children_with_tokens()
@@ -356,9 +368,9 @@ impl SymTable {
         }
     }
 
-    /// If `name` at `cursor` resolves only via namespace fallback (i.e. the
-    /// bare name has no direct global entry but `active_ns.name` does),
-    /// returns the qualified form.  Used by hover to surface the full name.
+    /// If `name` at `cursor` resolves via namespace fallback AND that resolution
+    /// is not shadowed by a lambda param or local, returns the qualified form.
+    /// Used by hover to surface the full name.
     pub fn qualified_for(&self, cursor: usize, name: &str) -> Option<SmolStr> {
         if name.starts_with('.') {
             return None; // already qualified
@@ -368,7 +380,15 @@ impl SymTable {
             return None;
         }
         let q = format!("{ns}.{name}");
-        self.resolve_global(cursor, &q).map(|_| SmolStr::new(q))
+        let global_off = self.resolve_global(cursor, &q)?;
+        // A param or local shadows the global if resolve() returns a different
+        // offset (the local def site rather than the global one).
+        let resolved_off = self.resolve(cursor, name)?;
+        if resolved_off == global_off {
+            Some(SmolStr::new(q))
+        } else {
+            None
+        }
     }
 
     /// All identifier texts seen in the document (for completion).
@@ -384,6 +404,36 @@ fn qualify(name: &str, should_qualify: bool, ns: &str) -> SmolStr {
     } else {
         SmolStr::new(name)
     }
+}
+
+/// Detect `system "d .ns"` / `system "d ."` calls and return the new namespace.
+fn parse_system_d_call(apply: &SyntaxNode) -> Option<SmolStr> {
+    let mut children = apply.children();
+    let func = children.next()?;
+    if func.kind() != SyntaxKind::IdentExpr {
+        return None;
+    }
+    let func_ident = func
+        .descendants_with_tokens()
+        .filter_map(|el| el.into_token())
+        .find(|t| t.kind() == SyntaxKind::Ident)?;
+    if func_ident.text() != "system" {
+        return None;
+    }
+    let arg = children.next()?;
+    if arg.kind() != SyntaxKind::LiteralExpr {
+        return None;
+    }
+    let str_tok = arg
+        .descendants_with_tokens()
+        .filter_map(|el| el.into_token())
+        .find(|t| t.kind() == SyntaxKind::String)?;
+    // Strip surrounding quotes then delegate to the same logic as \d.
+    let raw = str_tok.text();
+    let content = raw.strip_prefix('"')?.strip_suffix('"')?;
+    // Must start with 'd'; remainder is the namespace argument.
+    let after_d = content.strip_prefix('d')?;
+    parse_d_directive(&format!("\\d{after_d}"))
 }
 
 /// Parse a `\d` directive token text and return the new active namespace.
