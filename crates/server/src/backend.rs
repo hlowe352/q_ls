@@ -35,12 +35,68 @@ impl QLanguageServer {
             .publish_diagnostics(uri, diagnostics, Some(doc.version()))
             .await;
     }
+
+    /// Set workspace root to `root` (if not already set) and kick off background
+    /// indexing. Returns `true` if indexing was started, `false` if a root was
+    /// already set and this call was a no-op.
+    async fn try_start_indexing(&self, root: PathBuf) -> bool {
+        // Atomically claim the root so concurrent did_open calls don't double-index.
+        {
+            let mut guard = self.workspace_root.write().await;
+            if guard.is_some() {
+                return false;
+            }
+            *guard = Some(root.clone());
+        }
+        self.client
+            .log_message(
+                MessageType::INFO,
+                format!("q-ls: indexing workspace at {}", root.display()),
+            )
+            .await;
+        let idx = Arc::clone(&self.workspace_index);
+        let docs = Arc::clone(&self.documents);
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            match tokio::task::spawn_blocking(move || collect_and_parse_q_files(&root)).await {
+                Ok(pairs) => {
+                    let n = pairs.len();
+                    {
+                        let mut index = idx.write().await;
+                        for (uri, doc) in pairs {
+                            index.index_file(uri, doc);
+                        }
+                    }
+                    client
+                        .log_message(MessageType::INFO, format!("q-ls: indexed {n} .q files"))
+                        .await;
+                    // Re-publish diagnostics for all open documents now that the
+                    // full workspace index is available.
+                    let open = docs.read().await;
+                    let index = idx.read().await;
+                    for (uri, doc) in open.iter() {
+                        let diags = crate::diagnostics::compute_diagnostics_with_workspace(doc, &index);
+                        client.publish_diagnostics(uri.clone(), diags, Some(doc.version())).await;
+                    }
+                }
+                Err(e) => {
+                    client
+                        .log_message(
+                            MessageType::ERROR,
+                            format!("q-ls: workspace indexing failed: {e}"),
+                        )
+                        .await;
+                }
+            }
+        });
+        true
+    }
 }
 
 impl LanguageServer for QLanguageServer {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
         #[allow(deprecated)]
-        let root: Option<PathBuf> = params
+        let client_root: Option<PathBuf> = params
             .workspace_folders
             .as_ref()
             .and_then(|folders| folders.first())
@@ -51,6 +107,9 @@ impl LanguageServer for QLanguageServer {
                     .as_ref()
                     .and_then(|u| u.to_file_path().map(Cow::into_owned))
             });
+        // Upgrade to the nearest .git root so a client that sends a sub-folder
+        // (or Neovim sending the file's parent dir) still gets the full repo.
+        let root = client_root.and_then(|p| find_git_root(&p).or(Some(p)));
         *self.workspace_root.write().await = root;
 
         Ok(InitializeResult {
@@ -127,23 +186,59 @@ impl LanguageServer for QLanguageServer {
         };
         let _ = self.client.register_capability(vec![registration]).await;
 
+        // Start indexing if initialize resolved a root. If it didn't (client
+        // sent no root at all), did_open will detect the root from the first
+        // opened file and call try_start_indexing then.
         let root = self.workspace_root.read().await.clone();
         if let Some(root) = root {
+            // workspace_root already set by initialize; spawn indexing directly.
+            // try_start_indexing's atomic guard would no-op here.
             let idx = Arc::clone(&self.workspace_index);
+            let docs = Arc::clone(&self.documents);
             let client = self.client.clone();
+            self.client
+                .log_message(
+                    MessageType::INFO,
+                    format!("q-ls: indexing workspace at {}", root.display()),
+                )
+                .await;
             tokio::spawn(async move {
                 match tokio::task::spawn_blocking(move || collect_and_parse_q_files(&root)).await {
                     Ok(pairs) => {
-                        let mut index = idx.write().await;
-                        for (uri, doc) in pairs {
-                            index.index_file(uri, doc);
+                        let n = pairs.len();
+                        {
+                            let mut index = idx.write().await;
+                            for (uri, doc) in pairs {
+                                index.index_file(uri, doc);
+                            }
+                        }
+                        client
+                            .log_message(MessageType::INFO, format!("q-ls: indexed {n} .q files"))
+                            .await;
+                        let open = docs.read().await;
+                        let index = idx.read().await;
+                        for (uri, doc) in open.iter() {
+                            let diags = crate::diagnostics::compute_diagnostics_with_workspace(doc, &index);
+                            client.publish_diagnostics(uri.clone(), diags, Some(doc.version())).await;
                         }
                     }
                     Err(e) => {
-                        client.log_message(MessageType::ERROR, format!("workspace indexing failed: {e}")).await;
+                        client
+                            .log_message(
+                                MessageType::ERROR,
+                                format!("q-ls: workspace indexing failed: {e}"),
+                            )
+                            .await;
                     }
                 }
             });
+        } else {
+            self.client
+                .log_message(
+                    MessageType::INFO,
+                    "q-ls: no workspace root from client — will detect from first opened file",
+                )
+                .await;
         }
     }
 
@@ -155,6 +250,16 @@ impl LanguageServer for QLanguageServer {
         let uri = params.text_document.uri.clone();
         let text = params.text_document.text;
         let version = params.text_document.version;
+
+        // Fallback: client sent no root in InitializeParams. Walk up from the
+        // opened file to find .git and index the whole repo from there.
+        if self.workspace_root.read().await.is_none() {
+            if let Some(file_path) = uri.to_file_path().map(Cow::into_owned) {
+                if let Some(git_root) = find_git_root(&file_path) {
+                    self.try_start_indexing(git_root).await;
+                }
+            }
+        }
 
         {
             let mut idx = self.workspace_index.write().await;
@@ -233,8 +338,9 @@ impl LanguageServer for QLanguageServer {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
         let docs = self.documents.read().await;
+        let idx = self.workspace_index.read().await;
         let Some(doc) = docs.get(uri) else { return Ok(None) };
-        Ok(crate::hover::hover(doc, pos))
+        Ok(crate::hover::hover_with_workspace(doc, pos, &idx))
     }
 
     async fn goto_definition(&self, params: GotoDefinitionParams) -> Result<Option<GotoDefinitionResponse>> {
@@ -298,6 +404,24 @@ impl LanguageServer for QLanguageServer {
         let Some(doc) = docs.get(uri) else { return Ok(None) };
         let symbols = crate::symbols::document_symbols(doc);
         Ok(Some(DocumentSymbolResponse::Nested(symbols)))
+    }
+}
+
+/// Walk up the directory tree from `path` until a `.git` entry is found.
+/// Returns the directory that contains `.git`, or `None` if never found.
+fn find_git_root(path: &std::path::Path) -> Option<PathBuf> {
+    let mut dir = if path.is_file() {
+        path.parent()?.to_path_buf()
+    } else {
+        path.to_path_buf()
+    };
+    loop {
+        if dir.join(".git").exists() {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            return None;
+        }
     }
 }
 
