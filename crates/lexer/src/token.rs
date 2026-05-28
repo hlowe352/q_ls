@@ -108,7 +108,7 @@ pub enum Token {
     DslLine,
 
     /// Dotted/namespaced identifier starting with dot: `.q.func`, `.Q.en`, `.z.ts`, `.d`
-    #[regex(r"\.[a-zA-Z][a-zA-Z0-9]*(\.[a-zA-Z][a-zA-Z0-9]*)*")]
+    #[regex(r"\.[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)*")]
     DottedIdent,
 
     /// Regular identifier (may include dot-separated segments): `trade`, `myVar`, `assert.true`
@@ -411,6 +411,27 @@ mod tests {
     fn lex_dotted_ident_upper() {
         let mut lex = Token::lexer(".Q.en");
         assert_eq!(lex.next(), Some(Ok(Token::DottedIdent)));
+    }
+
+    #[test]
+    fn lex_ident_with_underscore() {
+        let mut lex = Token::lexer("my_var");
+        assert_eq!(lex.next(), Some(Ok(Token::Ident)));
+        assert_eq!(lex.slice(), "my_var");
+    }
+
+    #[test]
+    fn lex_dotted_ident_with_underscore() {
+        let mut lex = Token::lexer(".proc.my_func");
+        assert_eq!(lex.next(), Some(Ok(Token::DottedIdent)));
+        assert_eq!(lex.slice(), ".proc.my_func");
+    }
+
+    #[test]
+    fn lex_dotted_ident_underscore_in_first_segment() {
+        let mut lex = Token::lexer(".my_ns.func");
+        assert_eq!(lex.next(), Some(Ok(Token::DottedIdent)));
+        assert_eq!(lex.slice(), ".my_ns.func");
     }
 
     #[test]

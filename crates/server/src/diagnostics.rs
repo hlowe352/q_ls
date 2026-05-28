@@ -3,8 +3,9 @@ use tower_lsp_server::ls_types::*;
 use q_parser::{SyntaxKind, SyntaxNode};
 use crate::document::Document;
 use crate::builtins::is_builtin;
+use crate::workspace_index::WorkspaceIndex;
 
-pub fn compute_diagnostics(doc: &Document) -> Vec<Diagnostic> {
+pub fn compute_diagnostics_with_workspace(doc: &Document, workspace: &WorkspaceIndex) -> Vec<Diagnostic> {
     let mut out: Vec<Diagnostic> = doc.parse().errors.iter().map(|err| {
         let start = doc.position_of(err.offset);
         let end = doc.position_of(err.offset + err.len);
@@ -18,8 +19,13 @@ pub fn compute_diagnostics(doc: &Document) -> Vec<Diagnostic> {
     }).collect();
 
     out.extend(unindented_close_warnings(doc));
-    out.extend(unresolved_reference_warnings(doc));
+    out.extend(unresolved_reference_warnings_with_workspace(doc, workspace));
     out
+}
+
+#[allow(dead_code)] // Part of public API
+pub fn compute_diagnostics(doc: &Document) -> Vec<Diagnostic> {
+    compute_diagnostics_with_workspace(doc, &WorkspaceIndex::default())
 }
 
 /// Warn on closing brackets at column 0 inside a multi-line construct.
@@ -72,7 +78,7 @@ fn unindented_close_warnings(doc: &Document) -> Vec<Diagnostic> {
 }
 
 /// Warn on identifier references that don't resolve to any visible
-/// definition.
+/// definition, considering both local and workspace-level definitions.
 ///
 /// Walks every `IdentExpr` / `Namespace` node, skips:
 /// - assignment LHS (the definition site itself),
@@ -80,11 +86,13 @@ fn unindented_close_warnings(doc: &Document) -> Vec<Diagnostic> {
 /// - tokens inside qSQL clauses (`SelectExpr`/`UpdateExpr`/`ExecExpr`/
 ///   `DeleteExpr`) — column names there come from row context and aren't
 ///   bound by visible code,
-/// - q built-ins (see [`crate::builtins`]).
+/// - q built-ins (see [`crate::builtins`]),
+/// - symbols defined anywhere in the workspace.
 ///
 /// For everything else, calls `SymTable::resolve` at the token's
-/// position. If it returns `None`, emit a warning.
-fn unresolved_reference_warnings(doc: &Document) -> Vec<Diagnostic> {
+/// position. If it returns `None`, checks `WorkspaceIndex::resolve_global`.
+/// Only emits a warning if neither resolves the reference.
+fn unresolved_reference_warnings_with_workspace(doc: &Document, workspace: &WorkspaceIndex) -> Vec<Diagnostic> {
     let root = doc.parse().syntax();
     let table = doc.sym_table();
     let mut diagnostics = Vec::new();
@@ -111,6 +119,10 @@ fn unresolved_reference_warnings(doc: &Document) -> Vec<Diagnostic> {
         if table.resolve(off, name).is_some() {
             continue;
         }
+        // Cross-file: suppress if defined anywhere in workspace.
+        if workspace.resolve_global(name).is_some() {
+            continue;
+        }
 
         let pos = doc.position_of(off);
         let end = doc.position_of(off + name.len());
@@ -124,6 +136,24 @@ fn unresolved_reference_warnings(doc: &Document) -> Vec<Diagnostic> {
     }
 
     diagnostics
+}
+
+/// Warn on identifier references that don't resolve to any visible
+/// definition.
+///
+/// Walks every `IdentExpr` / `Namespace` node, skips:
+/// - assignment LHS (the definition site itself),
+/// - parameter list entries (declarations, not refs),
+/// - tokens inside qSQL clauses (`SelectExpr`/`UpdateExpr`/`ExecExpr`/
+///   `DeleteExpr`) — column names there come from row context and aren't
+///   bound by visible code,
+/// - q built-ins (see [`crate::builtins`]).
+///
+/// For everything else, calls `SymTable::resolve` at the token's
+/// position. If it returns `None`, emit a warning.
+#[allow(dead_code)] // Used by test helper `unresolved_for`
+fn unresolved_reference_warnings(doc: &Document) -> Vec<Diagnostic> {
+    unresolved_reference_warnings_with_workspace(doc, &WorkspaceIndex::default())
 }
 
 fn is_in_qsql(node: &SyntaxNode) -> bool {
@@ -333,5 +363,37 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    fn unresolved_with_workspace_for(src: &str, workspace: &WorkspaceIndex) -> Vec<String> {
+        let doc = Document::new(src.to_string(), 0);
+        unresolved_reference_warnings_with_workspace(&doc, workspace)
+            .into_iter()
+            .map(|d| d.message)
+            .collect()
+    }
+
+    #[test]
+    fn unresolved_suppressed_when_defined_in_workspace() {
+        use crate::workspace_index::WorkspaceIndex;
+
+        let mut idx = WorkspaceIndex::default();
+        idx.index_file(
+            "file:///other.q".parse().unwrap(),
+            Document::new("helper:{x+1}".to_string(), 0),
+        );
+
+        let warnings = unresolved_with_workspace_for("helper 42", &idx);
+        assert!(warnings.is_empty(),
+            "symbol defined in workspace must not warn: {warnings:?}");
+    }
+
+    #[test]
+    fn unresolved_still_warns_when_nowhere_defined() {
+        use crate::workspace_index::WorkspaceIndex;
+        let idx = WorkspaceIndex::default();
+        let warnings = unresolved_with_workspace_for("ghost 42", &idx);
+        assert!(warnings.iter().any(|w| w.contains("`ghost`")),
+            "truly undefined name must still warn: {warnings:?}");
     }
 }

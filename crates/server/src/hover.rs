@@ -2,8 +2,14 @@
 use tower_lsp_server::ls_types::*;
 use crate::builtins::lookup_doc;
 use crate::document::Document;
+use crate::workspace_index::WorkspaceIndex;
 
+#[allow(dead_code)]
 pub fn hover(doc: &Document, pos: Position) -> Option<Hover> {
+    hover_with_workspace(doc, pos, &WorkspaceIndex::default())
+}
+
+pub fn hover_with_workspace(doc: &Document, pos: Position, workspace: &WorkspaceIndex) -> Option<Hover> {
     let offset = doc.offset_of(pos);
 
     // Try the word at cursor (handles bare idents and dotted idents).
@@ -29,7 +35,7 @@ pub fn hover(doc: &Document, pos: Position) -> Option<Hover> {
         });
     }
 
-    // User-defined name: resolve via sym_table.
+    // User-defined name: resolve via sym_table, then fall back to workspace.
     // Strip a leading backtick so hovering on `` `.cache.cache `` works.
     let name = word.strip_prefix('`').unwrap_or(word.as_str());
     if !name.is_empty() {
@@ -54,6 +60,26 @@ pub fn hover(doc: &Document, pos: Position) -> Option<Hover> {
                 contents: HoverContents::Markup(MarkupContent {
                     kind: MarkupKind::Markdown,
                     value,
+                }),
+                range: None,
+            });
+        }
+
+        // Same-file resolution failed — try workspace globals.
+        // Qualify bare name with active namespace for lookup.
+        let ns = table.active_ns_at(offset);
+        let qualified_name: String;
+        let lookup_name = if !ns.is_empty() && !name.starts_with('.') {
+            qualified_name = format!("{ns}.{name}");
+            qualified_name.as_str()
+        } else {
+            name
+        };
+        if workspace.resolve_global(lookup_name).is_some() {
+            return Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: format!("**`{lookup_name}`** *(workspace)*"),
                 }),
                 range: None,
             });
@@ -182,5 +208,28 @@ mod tests {
         let cursor = src.find("count").unwrap();
         let text = hover_text(src, cursor).unwrap_or_default();
         assert!(text.to_lowercase().contains("count"), "got: {text}");
+    }
+
+    #[test]
+    fn workspace_cross_file_hover_shows_name() {
+        use crate::workspace_index::WorkspaceIndex;
+        // torq.q defines .proc.cp; cache.q references it
+        let torq_src = "\\d .proc\n$[1b;[cp:{.z.p}];[cp:{.z.P}]];\n\\d .";
+        let torq_uri: tower_lsp_server::ls_types::Uri =
+            "file:///TorQ/torq.q".parse().unwrap();
+        let mut idx = WorkspaceIndex::default();
+        idx.index_file(torq_uri, Document::new(torq_src.to_string(), 0));
+
+        let cache_src = "\\d .cache\nadd:{[f] now:.proc.cp[];now}\n\\d .";
+        let cache_doc = Document::new(cache_src.to_string(), 0);
+        let offset = cache_src.find(".proc.cp").unwrap();
+        let pos = cache_doc.position_of(offset);
+
+        let result = hover_with_workspace(&cache_doc, pos, &idx);
+        let text = result.map(|h| match h.contents {
+            HoverContents::Markup(m) => m.value,
+            _ => String::new(),
+        }).unwrap_or_default();
+        assert!(text.contains(".proc.cp"), "expected .proc.cp in hover; got: {text}");
     }
 }

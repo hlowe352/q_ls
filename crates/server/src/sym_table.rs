@@ -213,7 +213,7 @@ impl SymTable {
     /// Active namespace at `offset` based on `\d` directives seen so far.
     /// Returns `""` (root) or `".foo"`.
     #[allow(clippy::cast_possible_truncation)]
-    fn active_ns_at(&self, offset: usize) -> &str {
+    pub fn active_ns_at(&self, offset: usize) -> &str {
         let off = offset as u32;
         let i = self.ns_changes.partition_point(|(o, _)| *o <= off);
         if i == 0 { "" } else { self.ns_changes[i - 1].1.as_str() }
@@ -393,6 +393,18 @@ impl SymTable {
     pub fn idents(&self) -> impl Iterator<Item = &str> {
         self.idents.iter().map(smol_str::SmolStr::as_str)
     }
+
+    /// All global definitions, yielding `(name, offsets)` pairs.
+    pub fn global_entries(&self) -> impl Iterator<Item = (&str, &[u32])> {
+        self.globals.iter().map(|(k, v)| (k.as_str(), v.as_slice()))
+    }
+
+    /// Get all byte offsets where `name` is globally defined.
+    /// Returns an empty slice if `name` has no global definitions.
+    #[allow(dead_code)]
+    pub fn global_def_offsets(&self, name: &str) -> &[u32] {
+        self.globals.get(name).map_or(&[], Vec::as_slice)
+    }
 }
 
 /// Qualify `name` with `ns` if `should_qualify` and `ns` is non-empty.
@@ -445,5 +457,110 @@ fn parse_d_directive(text: &str) -> Option<SmolStr> {
         Some(SmolStr::new(rest))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::document::Document;
+
+    #[test]
+    fn global_def_offsets_returns_global_sites() {
+        let doc = Document::new("foo:1; foo:2".to_string(), 0);
+        let offs = doc.sym_table().global_def_offsets("foo");
+        assert_eq!(offs.len(), 2, "got: {offs:?}");
+    }
+
+    #[test]
+    fn global_def_offsets_empty_for_unknown() {
+        let doc = Document::new("foo:1".to_string(), 0);
+        assert!(doc.sym_table().global_def_offsets("bar").is_empty());
+    }
+
+    #[test]
+    fn global_def_offsets_empty_for_lambda_local() {
+        // `x` here is a lambda local, NOT a global.
+        let doc = Document::new("f:{x:42; x}".to_string(), 0);
+        assert!(
+            doc.sym_table().global_def_offsets("x").is_empty(),
+            "lambda locals must not appear as globals"
+        );
+    }
+
+    #[test]
+    fn torq_style_cp_in_cond_progn_indexed_as_proc_cp() {
+        // torq.q assigns `cp` inside `$[cond; [cp:{.z.p}]; ...]` under `\d .proc`.
+        // Must be indexed as `.proc.cp`, not bare `cp`.
+        let src = "\\d .proc\n$[1b;[cp:{.z.p};cd:{.z.d}];[cp:{.z.P};cd:{.z.D}]];\n\\d .";
+        let doc = Document::new(src.to_string(), 0);
+        let st = doc.sym_table();
+        let entries: Vec<_> = st.global_entries().collect();
+        assert!(
+            !st.global_def_offsets(".proc.cp").is_empty(),
+            "expected .proc.cp in globals, got: {entries:?}"
+        );
+        assert!(
+            st.global_def_offsets("cp").is_empty(),
+            "bare `cp` must not appear — must be qualified, got: {entries:?}"
+        );
+    }
+
+    /// Index the real torq.q and confirm .proc.cp is found.
+    #[test]
+    #[ignore = "requires /Users/hugo/projects/TorQ/torq.q — run manually"]
+    fn real_torq_q_indexes_proc_cp() {
+        let path = "/Users/hugo/projects/TorQ/torq.q";
+        let Ok(src) = std::fs::read_to_string(path) else {
+            eprintln!("skipping: {path} not found");
+            return;
+        };
+        let doc = crate::document::Document::new(src, 0);
+        let st = doc.sym_table();
+        let entries: Vec<_> = st.global_entries().map(|(k, _)| k).collect();
+        assert!(
+            !st.global_def_offsets(".proc.cp").is_empty(),
+            ".proc.cp not in globals. found: {:?}",
+            entries.iter().filter(|k| k.contains("proc")).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn torq_style_cross_file_goto_def() {
+        use crate::document::Document;
+        use crate::goto_def::goto_definition_with_workspace;
+        use crate::workspace_index::WorkspaceIndex;
+        use tower_lsp_server::ls_types::GotoDefinitionResponse;
+
+        let torq_src = "\\d .proc\n$[1b;[cp:{.z.p}];[cp:{.z.P}]];\n\\d .";
+        let torq_uri: tower_lsp_server::ls_types::Uri =
+            "file:///TorQ/torq.q".parse().unwrap();
+        let mut idx = WorkspaceIndex::default();
+        idx.index_file(torq_uri.clone(), Document::new(torq_src.to_string(), 0));
+
+        // cache.q references .proc.cp inside \d .cache
+        let cache_src = "\\d .cache\nadd:{[f] now:.proc.cp[];now}\n\\d .";
+        let cache_uri: tower_lsp_server::ls_types::Uri =
+            "file:///TorQ/code/common/cache.q".parse().unwrap();
+        let cache_doc = Document::new(cache_src.to_string(), 0);
+
+        let offset = cache_src.find(".proc.cp").expect("fixture must contain .proc.cp");
+        let pos = cache_doc.position_of(offset);
+
+        let result = goto_definition_with_workspace(
+            &cache_doc,
+            pos,
+            &cache_uri,
+            &idx,
+        );
+        match result {
+            Some(GotoDefinitionResponse::Array(locs)) => {
+                assert!(!locs.is_empty(), "expected at least one location");
+                assert_eq!(locs[0].uri, torq_uri, "must resolve to torq.q");
+            }
+            Some(GotoDefinitionResponse::Scalar(loc)) => {
+                assert_eq!(loc.uri, torq_uri, "must resolve to torq.q");
+            }
+            other => panic!("expected Some(Array|Scalar), got {other:?}"),
+        }
     }
 }

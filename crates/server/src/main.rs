@@ -11,6 +11,7 @@ mod rename;
 mod semantic;
 mod sym_table;
 mod symbols;
+mod workspace_index;
 
 use backend::QLanguageServer;
 use tower_lsp_server::{LspService, Server};
