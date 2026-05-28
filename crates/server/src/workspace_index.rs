@@ -55,7 +55,7 @@ impl WorkspaceIndex {
     }
 
     pub fn all_idents(&self) -> impl Iterator<Item = &str> {
-        self.files.values().flat_map(|doc| doc.sym_table().idents())
+        self.globals.keys().map(|s| s.as_str())
     }
 }
 
@@ -124,9 +124,19 @@ mod tests {
     }
 
     #[test]
+    fn all_idents_excludes_lambda_params_and_locals() {
+        let mut idx = WorkspaceIndex::default();
+        // `globalFn` is a global def; `localParam` and `tmp` are lambda-local only
+        idx.index_file(uri("file:///a.q"), doc("globalFn:{[localParam] tmp:localParam+1; tmp}"));
+        let idents: Vec<&str> = idx.all_idents().collect();
+        assert!(idents.contains(&"globalFn"), "global def must appear: {idents:?}");
+        assert!(!idents.contains(&"localParam"), "lambda param must not appear: {idents:?}");
+        assert!(!idents.contains(&"tmp"), "lambda-local must not appear: {idents:?}");
+    }
+
+    #[test]
     fn cross_file_goto_def_end_to_end() {
         use crate::goto_def::goto_definition_with_workspace;
-        use std::collections::HashMap;
         use tower_lsp_server::ls_types::{GotoDefinitionResponse, Position};
 
         let uri_a: Uri = "file:///a.q".parse().unwrap();
@@ -137,12 +147,10 @@ mod tests {
         let mut idx = WorkspaceIndex::default();
         idx.index_file(uri_a.clone(), doc("sharedFn:{x+1}"));
 
-        let open_docs: HashMap<Uri, crate::document::Document> = HashMap::new();
         let result = goto_definition_with_workspace(
             &doc_b,
             Position::new(0, 0),
             &uri_b,
-            &open_docs,
             &idx,
         );
         assert!(result.is_some(), "cross-file goto-def must resolve sharedFn");

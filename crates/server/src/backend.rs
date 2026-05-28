@@ -36,27 +36,12 @@ impl QLanguageServer {
             .await;
     }
 
-    /// Set workspace root to `root` (if not already set) and kick off background
-    /// indexing. Returns `true` if indexing was started, `false` if a root was
-    /// already set and this call was a no-op.
-    async fn try_start_indexing(&self, root: PathBuf) -> bool {
-        // Atomically claim the root so concurrent did_open calls don't double-index.
-        {
-            let mut guard = self.workspace_root.write().await;
-            if guard.is_some() {
-                return false;
-            }
-            *guard = Some(root.clone());
-        }
-        self.client
-            .log_message(
-                MessageType::INFO,
-                format!("q-ls: indexing workspace at {}", root.display()),
-            )
-            .await;
-        let idx = Arc::clone(&self.workspace_index);
-        let docs = Arc::clone(&self.documents);
-        let client = self.client.clone();
+    fn spawn_indexing(
+        root: PathBuf,
+        idx: Arc<RwLock<WorkspaceIndex>>,
+        docs: Arc<RwLock<HashMap<Uri, Document>>>,
+        client: Client,
+    ) {
         tokio::spawn(async move {
             match tokio::task::spawn_blocking(move || collect_and_parse_q_files(&root)).await {
                 Ok(pairs) => {
@@ -89,6 +74,32 @@ impl QLanguageServer {
                 }
             }
         });
+    }
+
+    /// Set workspace root to `root` (if not already set) and kick off background
+    /// indexing. Returns `true` if indexing was started, `false` if a root was
+    /// already set and this call was a no-op.
+    async fn try_start_indexing(&self, root: PathBuf) -> bool {
+        // Atomically claim the root so concurrent did_open calls don't double-index.
+        {
+            let mut guard = self.workspace_root.write().await;
+            if guard.is_some() {
+                return false;
+            }
+            *guard = Some(root.clone());
+        }
+        self.client
+            .log_message(
+                MessageType::INFO,
+                format!("q-ls: indexing workspace at {}", root.display()),
+            )
+            .await;
+        Self::spawn_indexing(
+            root,
+            Arc::clone(&self.workspace_index),
+            Arc::clone(&self.documents),
+            self.client.clone(),
+        );
         true
     }
 }
@@ -181,7 +192,7 @@ impl LanguageServer for QLanguageServer {
                         kind: None,
                     }],
                 })
-                .unwrap(),
+                .expect("static registration options are always serialisable"),
             ),
         };
         let _ = self.client.register_capability(vec![registration]).await;
@@ -191,47 +202,18 @@ impl LanguageServer for QLanguageServer {
         // opened file and call try_start_indexing then.
         let root = self.workspace_root.read().await.clone();
         if let Some(root) = root {
-            // workspace_root already set by initialize; spawn indexing directly.
-            // try_start_indexing's atomic guard would no-op here.
-            let idx = Arc::clone(&self.workspace_index);
-            let docs = Arc::clone(&self.documents);
-            let client = self.client.clone();
             self.client
                 .log_message(
                     MessageType::INFO,
                     format!("q-ls: indexing workspace at {}", root.display()),
                 )
                 .await;
-            tokio::spawn(async move {
-                match tokio::task::spawn_blocking(move || collect_and_parse_q_files(&root)).await {
-                    Ok(pairs) => {
-                        let n = pairs.len();
-                        {
-                            let mut index = idx.write().await;
-                            for (uri, doc) in pairs {
-                                index.index_file(uri, doc);
-                            }
-                        }
-                        client
-                            .log_message(MessageType::INFO, format!("q-ls: indexed {n} .q files"))
-                            .await;
-                        let open = docs.read().await;
-                        let index = idx.read().await;
-                        for (uri, doc) in open.iter() {
-                            let diags = crate::diagnostics::compute_diagnostics_with_workspace(doc, &index);
-                            client.publish_diagnostics(uri.clone(), diags, Some(doc.version())).await;
-                        }
-                    }
-                    Err(e) => {
-                        client
-                            .log_message(
-                                MessageType::ERROR,
-                                format!("q-ls: workspace indexing failed: {e}"),
-                            )
-                            .await;
-                    }
-                }
-            });
+            Self::spawn_indexing(
+                root,
+                Arc::clone(&self.workspace_index),
+                Arc::clone(&self.documents),
+                self.client.clone(),
+            );
         } else {
             self.client
                 .log_message(
@@ -257,6 +239,13 @@ impl LanguageServer for QLanguageServer {
             if let Some(file_path) = uri.to_file_path().map(Cow::into_owned) {
                 if let Some(git_root) = find_git_root(&file_path) {
                     self.try_start_indexing(git_root).await;
+                } else {
+                    self.client
+                        .log_message(
+                            MessageType::WARNING,
+                            "q-ls: no .git root found — cross-file features unavailable",
+                        )
+                        .await;
                 }
             }
         }
@@ -349,7 +338,7 @@ impl LanguageServer for QLanguageServer {
         let docs = self.documents.read().await;
         let idx = self.workspace_index.read().await;
         let Some(doc) = docs.get(&uri) else { return Ok(None) };
-        Ok(crate::goto_def::goto_definition_with_workspace(doc, pos, &uri, &docs, &idx))
+        Ok(crate::goto_def::goto_definition_with_workspace(doc, pos, &uri, &idx))
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
@@ -443,7 +432,8 @@ fn collect_recursive(dir: &std::path::Path, out: &mut Vec<(Uri, Document)>) {
             let Ok(text) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            let Ok(uri) = path_to_uri(&path) else {
+            let Ok(abs) = path.canonicalize() else { continue };
+            let Ok(uri) = path_to_uri(&abs) else {
                 continue;
             };
             out.push((uri, Document::new(text, 0)));
@@ -451,8 +441,20 @@ fn collect_recursive(dir: &std::path::Path, out: &mut Vec<(Uri, Document)>) {
     }
 }
 
-fn path_to_uri(path: &std::path::Path) -> std::result::Result<Uri, ()> {
-    let abs = path.canonicalize().map_err(|_| ())?;
-    let s = format!("file://{}", abs.display());
-    s.parse().map_err(|_| ())
+fn path_to_uri(abs: &std::path::Path) -> std::result::Result<Uri, ()> {
+    Uri::from_file_path(abs).ok_or(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn path_to_uri_encodes_spaces() {
+        let uri = path_to_uri(std::path::Path::new("/tmp/my file.q"))
+            .expect("must produce a Uri for path with spaces");
+        let s = uri.as_str();
+        assert!(!s.contains(' '), "URI must not contain literal spaces: {s}");
+        assert!(s.contains("%20"), "spaces must be percent-encoded: {s}");
+    }
 }

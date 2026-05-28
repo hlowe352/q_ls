@@ -212,12 +212,8 @@ impl SymTable {
 
     /// Active namespace at `offset` based on `\d` directives seen so far.
     /// Returns `""` (root) or `".foo"`.
-    pub fn active_ns_at_pub(&self, offset: usize) -> &str {
-        self.active_ns_at(offset)
-    }
-
     #[allow(clippy::cast_possible_truncation)]
-    fn active_ns_at(&self, offset: usize) -> &str {
+    pub fn active_ns_at(&self, offset: usize) -> &str {
         let off = offset as u32;
         let i = self.ns_changes.partition_point(|(o, _)| *o <= off);
         if i == 0 { "" } else { self.ns_changes[i - 1].1.as_str() }
@@ -511,6 +507,7 @@ mod tests {
 
     /// Index the real torq.q and confirm .proc.cp is found.
     #[test]
+    #[ignore = "requires /Users/hugo/projects/TorQ/torq.q — run manually"]
     fn real_torq_q_indexes_proc_cp() {
         let path = "/Users/hugo/projects/TorQ/torq.q";
         let Ok(src) = std::fs::read_to_string(path) else {
@@ -532,7 +529,6 @@ mod tests {
         use crate::document::Document;
         use crate::goto_def::goto_definition_with_workspace;
         use crate::workspace_index::WorkspaceIndex;
-        use std::collections::HashMap;
         use tower_lsp_server::ls_types::GotoDefinitionResponse;
 
         let torq_src = "\\d .proc\n$[1b;[cp:{.z.p}];[cp:{.z.P}]];\n\\d .";
@@ -554,7 +550,6 @@ mod tests {
             &cache_doc,
             pos,
             &cache_uri,
-            &HashMap::new(),
             &idx,
         );
         match result {

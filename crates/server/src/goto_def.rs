@@ -1,19 +1,17 @@
 #[allow(clippy::wildcard_imports)]
 use tower_lsp_server::ls_types::*;
-use std::collections::HashMap;
 use crate::document::Document;
 use crate::workspace_index::WorkspaceIndex;
 
 #[allow(dead_code)]
 pub fn goto_definition(doc: &Document, pos: Position, uri: &Uri) -> Option<GotoDefinitionResponse> {
-    goto_definition_with_workspace(doc, pos, uri, &HashMap::new(), &WorkspaceIndex::default())
+    goto_definition_with_workspace(doc, pos, uri, &WorkspaceIndex::default())
 }
 
 pub fn goto_definition_with_workspace(
     doc: &Document,
     pos: Position,
     uri: &Uri,
-    _open_docs: &HashMap<Uri, Document>,
     workspace: &WorkspaceIndex,
 ) -> Option<GotoDefinitionResponse> {
     let offset = doc.offset_of(pos);
@@ -200,7 +198,6 @@ mod tests {
     #[test]
     fn cross_file_goto_def() {
         use crate::workspace_index::WorkspaceIndex;
-        use std::collections::HashMap;
 
         let uri_a: Uri = "file:///a.q".parse().unwrap();
         let uri_b: Uri = "file:///b.q".parse().unwrap();
@@ -210,8 +207,7 @@ mod tests {
         let mut idx = WorkspaceIndex::default();
         idx.index_file(uri_a.clone(), Document::new("foo:42".to_string(), 0));
 
-        let open_docs: HashMap<Uri, Document> = HashMap::new();
-        let result = goto_definition_with_workspace(&doc_b, Position::new(0, 0), &uri_b, &open_docs, &idx);
+        let result = goto_definition_with_workspace(&doc_b, Position::new(0, 0), &uri_b, &idx);
         let result = result.expect("should resolve cross-file");
         match result {
             GotoDefinitionResponse::Array(locs) => {
@@ -228,13 +224,11 @@ mod tests {
     #[test]
     fn same_file_def_still_works_with_workspace() {
         use crate::workspace_index::WorkspaceIndex;
-        use std::collections::HashMap;
 
         let uri: Uri = "file:///x.q".parse().unwrap();
         let doc = Document::new("bar:99; bar+1".to_string(), 0);
         let idx = WorkspaceIndex::default();
-        let open_docs: HashMap<Uri, Document> = HashMap::new();
-        let result = goto_definition_with_workspace(&doc, doc.position_of(8), &uri, &open_docs, &idx);
+        let result = goto_definition_with_workspace(&doc, doc.position_of(8), &uri, &idx);
         assert!(result.is_some(), "same-file def should still resolve");
     }
 

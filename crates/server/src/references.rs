@@ -62,6 +62,7 @@ pub fn find_references_with_workspace(
 
     if is_global {
         // Scan all other docs: open docs (excluding current) + workspace background files.
+        // O(total tokens × files) — add an inverted index to WorkspaceIndex if this becomes a bottleneck.
         let open_others = all_open_docs
             .iter()
             .filter(|(u, _)| *u != uri);

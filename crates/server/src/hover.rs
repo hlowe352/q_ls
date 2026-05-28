@@ -4,6 +4,7 @@ use crate::builtins::lookup_doc;
 use crate::document::Document;
 use crate::workspace_index::WorkspaceIndex;
 
+#[allow(dead_code)]
 pub fn hover(doc: &Document, pos: Position) -> Option<Hover> {
     hover_with_workspace(doc, pos, &WorkspaceIndex::default())
 }
@@ -66,7 +67,7 @@ pub fn hover_with_workspace(doc: &Document, pos: Position, workspace: &Workspace
 
         // Same-file resolution failed — try workspace globals.
         // Qualify bare name with active namespace for lookup.
-        let ns = table.active_ns_at_pub(offset);
+        let ns = table.active_ns_at(offset);
         let qualified_name: String;
         let lookup_name = if !ns.is_empty() && !name.starts_with('.') {
             qualified_name = format!("{ns}.{name}");
