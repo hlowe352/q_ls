@@ -235,8 +235,8 @@ impl LanguageServer for QLanguageServer {
 
         // Fallback: client sent no root in InitializeParams. Walk up from the
         // opened file to find .git and index the whole repo from there.
-        if self.workspace_root.read().await.is_none() {
-            if let Some(file_path) = uri.to_file_path().map(Cow::into_owned) {
+        if self.workspace_root.read().await.is_none()
+            && let Some(file_path) = uri.to_file_path().map(Cow::into_owned) {
                 if let Some(git_root) = find_git_root(&file_path) {
                     self.try_start_indexing(git_root).await;
                 } else {
@@ -248,7 +248,6 @@ impl LanguageServer for QLanguageServer {
                         .await;
                 }
             }
-        }
 
         {
             let mut idx = self.workspace_index.write().await;
