@@ -34,6 +34,7 @@ pub fn prepare_rename(doc: &Document, pos: Position) -> Option<PrepareRenameResp
 /// new name fails the same identifier-shape check.
 ///
 /// This is a single-file convenience wrapper around [`rename_with_workspace`].
+#[allow(dead_code)]
 pub fn rename(
     doc: &Document,
     pos: Position,

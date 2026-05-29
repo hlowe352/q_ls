@@ -16,6 +16,7 @@ use q_parser::SyntaxKind;
 use crate::document::Document;
 use crate::workspace_index::WorkspaceIndex;
 
+#[allow(dead_code)]
 pub fn find_references(
     doc: &Document,
     pos: Position,

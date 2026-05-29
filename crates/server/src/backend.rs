@@ -368,8 +368,9 @@ impl LanguageServer for QLanguageServer {
         let uri = params.text_document_position.text_document.uri.clone();
         let pos = params.text_document_position.position;
         let docs = self.documents.read().await;
+        let idx = self.workspace_index.read().await;
         let Some(doc) = docs.get(&uri) else { return Ok(None) };
-        Ok(crate::rename::rename(doc, pos, &params.new_name, &uri))
+        Ok(crate::rename::rename_with_workspace(doc, pos, &params.new_name, &uri, &docs, &idx))
     }
 
     async fn semantic_tokens_full(
