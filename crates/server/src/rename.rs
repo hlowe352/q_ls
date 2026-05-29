@@ -1,8 +1,8 @@
 //! `textDocument/rename` and `textDocument/prepareRename`.
 //!
-//! Reuses [`crate::references::find_references`] to locate every
-//! occurrence of the symbol under the cursor, then emits a single
-//! `WorkspaceEdit` mapping the document URI to one `TextEdit` per ref.
+//! Reuses [`crate::references::find_references_with_workspace`] to locate every
+//! occurrence of the symbol under the cursor across all open files, then emits
+//! a `WorkspaceEdit` mapping each file URI to its `TextEdit`s.
 
 use std::collections::HashMap;
 use tower_lsp_server::ls_types::{
@@ -11,7 +11,8 @@ use tower_lsp_server::ls_types::{
 
 use crate::builtins::is_builtin;
 use crate::document::Document;
-use crate::references::find_references;
+use crate::references::find_references_with_workspace;
+use crate::workspace_index::WorkspaceIndex;
 
 /// Validate that the cursor sits on a renameable identifier and return its
 /// current text + range. Refuses built-ins and tokens that don't look like
@@ -31,11 +32,29 @@ pub fn prepare_rename(doc: &Document, pos: Position) -> Option<PrepareRenameResp
 /// Build the `WorkspaceEdit` for renaming the symbol at `pos` to `new_name`.
 /// Returns `None` if the cursor isn't on a renameable identifier or the
 /// new name fails the same identifier-shape check.
+///
+/// This is a single-file convenience wrapper around [`rename_with_workspace`].
 pub fn rename(
     doc: &Document,
     pos: Position,
     new_name: &str,
     uri: &Uri,
+) -> Option<WorkspaceEdit> {
+    rename_with_workspace(doc, pos, new_name, uri, &HashMap::new(), &WorkspaceIndex::default())
+}
+
+/// Build the `WorkspaceEdit` for renaming the symbol at `pos` to `new_name`,
+/// searching across all open documents and the workspace index for references.
+///
+/// Returns `None` if the cursor isn't on a renameable identifier or the
+/// new name fails the identifier-shape check.
+pub fn rename_with_workspace(
+    doc: &Document,
+    pos: Position,
+    new_name: &str,
+    uri: &Uri,
+    open_docs: &HashMap<Uri, Document>,
+    workspace: &WorkspaceIndex,
 ) -> Option<WorkspaceEdit> {
     let cursor = doc.offset_of(pos);
     let (old_name, _, _) = doc.ident_at(cursor)?;
@@ -46,19 +65,20 @@ pub fn rename(
         return None;
     }
 
-    // include_declaration so the def site is rewritten too.
-    let locations = find_references(doc, pos, true, uri);
+    let locations = find_references_with_workspace(doc, pos, true, uri, open_docs, workspace);
     if locations.is_empty() {
         return None;
     }
 
-    let edits: Vec<TextEdit> = locations
-        .into_iter()
-        .map(|loc| TextEdit { range: loc.range, new_text: new_name.to_string() })
-        .collect();
+    // Group locations by file URI — WorkspaceEdit supports multi-file edits.
+    let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
+    for loc in locations {
+        changes
+            .entry(loc.uri)
+            .or_default()
+            .push(TextEdit { range: loc.range, new_text: new_name.to_string() });
+    }
 
-    let mut changes = HashMap::new();
-    changes.insert(uri.clone(), edits);
     Some(WorkspaceEdit { changes: Some(changes), document_changes: None, change_annotations: None })
 }
 
@@ -169,5 +189,56 @@ mod tests {
         assert!(!is_valid_identifier("1foo"));
         assert!(!is_valid_identifier(""));
         assert!(!is_valid_identifier("a b"));
+    }
+
+    #[test]
+    fn rename_with_workspace_rewrites_across_files() {
+        use crate::document::Document;
+        use crate::workspace_index::WorkspaceIndex;
+        use std::collections::HashMap;
+
+        let uri_a: Uri = "file:///a.q".parse().unwrap();
+        let uri_b: Uri = "file:///b.q".parse().unwrap();
+
+        let doc_a = Document::new("sharedFn:{x+1}".to_string(), 0);
+
+        let mut idx = WorkspaceIndex::default();
+        idx.index_file(uri_a.clone(), Document::new("sharedFn:{x+1}".to_string(), 0));
+
+        let mut open_docs = HashMap::new();
+        open_docs.insert(uri_b.clone(), Document::new("sharedFn 99".to_string(), 0));
+
+        let pos = doc_a.position_of(0); // cursor on `sharedFn` def in a.q
+        let edit = rename_with_workspace(&doc_a, pos, "newFn", &uri_a, &open_docs, &idx)
+            .expect("rename_with_workspace must return Some");
+
+        let changes = edit.changes.as_ref().expect("must have changes");
+        assert!(changes.contains_key(&uri_a), "must rewrite a.q");
+        assert!(changes.contains_key(&uri_b), "must rewrite b.q");
+        assert_eq!(changes[&uri_a][0].new_text, "newFn");
+        assert_eq!(changes[&uri_b][0].new_text, "newFn");
+    }
+
+    #[test]
+    fn rename_with_workspace_from_use_site_rewrites_across_files() {
+        use crate::document::Document;
+        use crate::workspace_index::WorkspaceIndex;
+        use std::collections::HashMap;
+
+        let uri_a: Uri = "file:///a.q".parse().unwrap();
+        let uri_b: Uri = "file:///b.q".parse().unwrap();
+
+        let doc_b = Document::new("sharedFn 99".to_string(), 0);
+
+        let mut idx = WorkspaceIndex::default();
+        idx.index_file(uri_a.clone(), Document::new("sharedFn:{x+1}".to_string(), 0));
+
+        let pos = doc_b.position_of(0); // cursor on `sharedFn` use in b.q
+        let edit = rename_with_workspace(&doc_b, pos, "newFn", &uri_b, &HashMap::new(), &idx)
+            .expect("rename from use site must return Some");
+
+        let changes = edit.changes.as_ref().expect("must have changes");
+        assert!(changes.contains_key(&uri_a), "must rewrite def in a.q");
+        assert!(changes.contains_key(&uri_b), "must rewrite use in b.q");
     }
 }
