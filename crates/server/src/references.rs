@@ -40,11 +40,14 @@ pub fn find_references_with_workspace(
     // holding a reference into `doc.text`.
     let name = name.to_string();
 
-    // All def sites of `name` in the scope the cursor lives in. If `name`
-    // isn't bound anywhere visible, bail.
+    // All def sites of `name` in the scope the cursor lives in.
     let def_offsets: HashSet<usize> =
         table.def_offsets_for(cursor, &name).into_iter().collect();
-    if def_offsets.is_empty() {
+
+    // If no local def, check whether it's a workspace-known global. If so,
+    // we can still do a cross-file scan — fall through with empty def_offsets.
+    // If it's not known anywhere, bail.
+    if def_offsets.is_empty() && workspace.resolve_global(&name).is_none() {
         return Vec::new();
     }
 
@@ -53,14 +56,26 @@ pub fn find_references_with_workspace(
     let qualified_name = table.qualified_for(cursor, &name)
         .map_or_else(|| name.clone(), |q| q.to_string());
 
-    // Collect same-file refs (existing logic).
-    let mut out = collect_refs_in_doc(doc, &name, &qualified_name, &def_offsets, include_declaration, uri);
+    // Collect same-file refs via def-offset matching (only when we have local defs).
+    let mut out = if def_offsets.is_empty() {
+        Vec::new()
+    } else {
+        collect_refs_in_doc(doc, &name, &qualified_name, &def_offsets, include_declaration, uri)
+    };
 
-    // Cross-file: only if name is a global (not a lambda local or param).
-    let is_global = !table.global_def_offsets(&name).is_empty()
+    // Cross-file scan when:
+    // (a) symbol has a local global def, OR
+    // (b) symbol has no local def at all but is known in the workspace index
+    //     (cursor is on a use-only site; def lives in another file).
+    let is_local_global = !table.global_def_offsets(&name).is_empty()
         || !table.global_def_offsets(&qualified_name).is_empty();
+    let is_workspace_global = workspace.resolve_global(&name).is_some();
 
-    if is_global {
+    if is_local_global || is_workspace_global {
+        if def_offsets.is_empty() {
+            // No local def — collect_refs_in_doc was skipped; scan current file via global path.
+            out.extend(collect_global_refs_in_doc(doc, &name, &qualified_name, uri));
+        }
         // Scan all other docs: open docs (excluding current) + workspace background files.
         // O(total tokens × files) — add an inverted index to WorkspaceIndex if this becomes a bottleneck.
         let open_others = all_open_docs
@@ -563,6 +578,33 @@ mod tests {
         let cursor = src.find(';').unwrap();
         let r = refs(src, cursor, true);
         assert!(r.is_empty(), "got {r:?}");
+    }
+
+    #[test]
+    fn find_refs_from_use_site_when_def_is_in_another_file() {
+        use crate::document::Document;
+        use crate::workspace_index::WorkspaceIndex;
+        use std::collections::HashMap;
+
+        // `sharedFn` is defined in a.q, used in b.q. Cursor is in b.q on the use.
+        let uri_a: Uri = "file:///a.q".parse().unwrap();
+        let uri_b: Uri = "file:///b.q".parse().unwrap();
+
+        let mut idx = WorkspaceIndex::default();
+        idx.index_file(uri_a.clone(), Document::new("sharedFn:{x+1}".to_string(), 0));
+
+        let doc_b = Document::new("sharedFn 99".to_string(), 0);
+        // cursor on `sharedFn` at offset 0
+        let pos = doc_b.position_of(0);
+
+        let locs = find_references_with_workspace(
+            &doc_b, pos, true, &uri_b, &HashMap::new(), &idx,
+        );
+
+        assert!(!locs.is_empty(), "must find references when def is in another file");
+        let uris: Vec<_> = locs.iter().map(|l| &l.uri).collect();
+        assert!(uris.contains(&&uri_a), "must include def site in a.q: {locs:?}");
+        assert!(uris.contains(&&uri_b), "must include use site in b.q: {locs:?}");
     }
 
     #[test]
