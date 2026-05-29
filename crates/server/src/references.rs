@@ -319,24 +319,28 @@ fn is_inplace_table_symbol(token: &q_parser::SyntaxToken) -> bool {
         }
 
         SyntaxKind::ApplyExpr => {
-            if parent.first_child().as_ref() != Some(&lit) {
-                return false;
-            }
-            let Some(grandparent) = parent.parent() else { return false };
+            if parent.first_child().as_ref() == Some(&lit) {
+                let Some(grandparent) = parent.parent() else { return false };
 
-            // Pattern A: LiteralExpr → ApplyExpr → DeleteExpr|UpdateExpr|SelectExpr
-            // (statement-level `delete from `.t` with no column list)
-            if matches!(grandparent.kind(),
-                SyntaxKind::DeleteExpr | SyntaxKind::UpdateExpr
-                | SyntaxKind::SelectExpr | SyntaxKind::ExecExpr)
-            {
-                return true;
-            }
+                // Pattern A: LiteralExpr → ApplyExpr → DeleteExpr|UpdateExpr|SelectExpr
+                // (statement-level `delete from `.t` with no column list)
+                if matches!(grandparent.kind(),
+                    SyntaxKind::DeleteExpr | SyntaxKind::UpdateExpr
+                    | SyntaxKind::SelectExpr | SyntaxKind::ExecExpr)
+                {
+                    return true;
+                }
 
-            // Pattern B: `from`-apply chain — covers lambdas and update with
-            // column assignments where the parser folds `from` into an apply.
-            // LiteralExpr → ApplyExpr → ApplyExpr { IdentExpr("from"), … }
-            is_from_apply(&grandparent)
+                // Pattern B: `from`-apply chain — covers lambdas and update with
+                // column assignments where the parser folds `from` into an apply.
+                // LiteralExpr → ApplyExpr → ApplyExpr { IdentExpr("from"), … }
+                is_from_apply(&grandparent)
+            } else {
+                // Pattern C: simple `from `tbl`` with no where clause or table args.
+                // Parser emits ApplyExpr { IdentExpr("from"), LiteralExpr(`tbl`) }.
+                // LiteralExpr is the non-first argument of the from-apply.
+                is_from_apply(&parent)
+            }
         }
         _ => false,
     }
@@ -359,13 +363,20 @@ fn is_qsql_from_table_ident(token: &q_parser::SyntaxToken) -> bool {
         return true;
     }
 
-    // Case 2: `from`-apply chain (the common case — see is_inplace_table_symbol).
+    // Case 2: `from`-apply chain (for `from tbl[args]`).
     // IdentExpr is first child of ApplyExpr whose parent is ApplyExpr { from, … }.
     if parent.kind() == SyntaxKind::ApplyExpr
         && parent.first_child().as_ref() == Some(&ident_expr)
         && let Some(grandparent) = parent.parent() {
             return is_from_apply(&grandparent);
         }
+
+    // Case 3: simple `from tbl` in an ApplyExpr chain (no table args, no where
+    // clause). Parser emits ApplyExpr { IdentExpr("from"), IdentExpr("tbl") }.
+    // IdentExpr is the non-first argument of a from-apply.
+    if is_from_apply(&parent) && parent.first_child().as_ref() != Some(&ident_expr) {
+        return true;
+    }
 
     false
 }
@@ -515,6 +526,27 @@ mod tests {
         let r = refs(src, cursor, true);
         let tbl_off = src.rfind(".cache.cache").unwrap();
         assert!(r.contains(&tbl_off), "select from table ref missing; got {r:?}");
+    }
+
+    #[test]
+    fn exec_from_table_inside_if_included() {
+        // `exec size from cache` inside if[…] is parsed as an ApplyExpr chain,
+        // not ExecExpr. `cache` must still be detected as the from-table.
+        let src = "\\d .cache\ncache:1\nf:{if[1b; exec size from cache; 0]}";
+        let cursor = src.find("cache:1").unwrap();
+        let r = refs(src, cursor, true);
+        let tbl_off = src.rfind("from cache").unwrap() + "from ".len();
+        assert!(r.contains(&tbl_off), "exec from-table ref inside if missing; got {r:?}");
+    }
+
+    #[test]
+    fn select_from_table_inside_lambda_included() {
+        // `select … from cache` inside a lambda body — parsed as ApplyExpr chain.
+        let src = "\\d .cache\ncache:1\nevict:{[r] r:select lastaccess,id from cache; r}";
+        let cursor = src.find("cache:1").unwrap();
+        let r = refs(src, cursor, true);
+        let tbl_off = src.rfind("from cache").unwrap() + "from ".len();
+        assert!(r.contains(&tbl_off), "select from-table ref inside lambda missing; got {r:?}");
     }
 
     #[test]
