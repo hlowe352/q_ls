@@ -59,10 +59,10 @@ impl SymTable {
         let mut t = SymTable::default();
         let mut scope_stack: Vec<usize> = Vec::new();
         let mut active_ns = SmolStr::default(); // "" = root; ".foo" = namespace .foo
-        // Deferred compound-assigns inside lambdas: (scope_idx, name, offset).
+        // Deferred compound-assigns inside lambdas: (scope_idx, name, offset, active_ns).
         // Resolved in a second pass: only recorded as locals if the name has no
         // global def (meaning the compound-assign introduces the binding).
-        let mut deferred_compound: Vec<(usize, SmolStr, u32)> = Vec::new();
+        let mut deferred_compound: Vec<(usize, SmolStr, u32, SmolStr)> = Vec::new();
         let mut work: Vec<Step> = vec![Step::Visit(root.clone())];
 
         while let Some(step) = work.pop() {
@@ -144,10 +144,24 @@ impl SymTable {
         }
 
         // Second pass: resolve deferred compound-assigns inside lambdas.
-        // If the name has no global def (the compound-assign IS the first binding),
-        // record it as a local in the captured scope.
-        for (scope_idx, name, off) in deferred_compound {
-            if !t.globals.contains_key(&name) {
+        // Rules:
+        //   (a) If the name resolves to a global (bare or namespace-qualified),
+        //       the compound-assign amends that global — don't create a local.
+        //   (b) Only the FIRST compound-assign per (scope, name) introduces the
+        //       local binding; subsequent ones amend the already-created local.
+        let mut seen_local: std::collections::HashSet<(usize, SmolStr)> = std::collections::HashSet::new();
+        for (scope_idx, name, off, ns) in deferred_compound {
+            // Check both bare name and namespace-qualified form.
+            let qualified = if !ns.is_empty() && !name.starts_with('.') {
+                SmolStr::from(format!("{ns}.{name}"))
+            } else {
+                name.clone()
+            };
+            if t.globals.contains_key(name.as_str()) || t.globals.contains_key(qualified.as_str()) {
+                continue; // amends a global
+            }
+            // Only the first compound-assign in this scope creates the binding.
+            if seen_local.insert((scope_idx, name.clone())) {
                 t.lambdas[scope_idx].locals.push((name, off));
             }
         }
@@ -160,7 +174,7 @@ impl SymTable {
         bin: &SyntaxNode,
         stack: &[usize],
         active_ns: &str,
-        deferred_compound: &mut Vec<(usize, SmolStr, u32)>,
+        deferred_compound: &mut Vec<(usize, SmolStr, u32, SmolStr)>,
     ) {
         // Column definitions inside a TableExpr (keyed or plain table
         // constructor) are not variable assignments — skip them.
@@ -200,7 +214,7 @@ impl SymTable {
             if is_compound && in_lambda.is_some() {
                 // Defer: record as local only if name has no global def (resolved after pass 1).
                 if let Some(idx) = in_lambda {
-                    deferred_compound.push((idx, name, off));
+                    deferred_compound.push((idx, name, off, SmolStr::new(active_ns)));
                 }
                 return;
             }
@@ -603,6 +617,21 @@ mod tests {
         let a_use_off = src.rfind("; a}").unwrap() + 2; // the bare `a` at end
         let resolved = table.resolve(a_use_off, "a");
         assert!(resolved.is_some(), "a introduced by `,: ` must resolve inside lambda");
+    }
+
+    #[test]
+    fn compound_assign_second_occurrence_not_a_new_def() {
+        // Only the FIRST `a,:` creates the local; subsequent ones amend it.
+        // goto-def from a use after the second `,: ` must point to the FIRST.
+        use crate::document::Document;
+        let src = "f:{a,:1 2; a,:3 4; a}";
+        let doc = Document::new(src.to_string(), 0);
+        let table = doc.sym_table();
+        let first_def_off = src.find("a,:1").unwrap();
+        let a_use_off = src.rfind("; a}").unwrap() + 2;
+        let resolved = table.resolve(a_use_off, "a").expect("a must resolve");
+        assert_eq!(resolved, first_def_off,
+            "must point to first `,: `, not the second one");
     }
 
     #[test]
