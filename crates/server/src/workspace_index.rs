@@ -212,7 +212,7 @@ mod tests {
         let changes = edit.changes.as_ref().expect("must have changes");
         assert!(changes.contains_key(&uri_a), "must rewrite a.q: {changes:?}");
         assert!(changes.contains_key(&uri_b), "must rewrite b.q: {changes:?}");
-        for (_, edits) in changes {
+        for edits in changes.values() {
             for e in edits {
                 assert_eq!(e.new_text, "renamed");
             }
