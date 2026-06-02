@@ -59,6 +59,10 @@ impl SymTable {
         let mut t = SymTable::default();
         let mut scope_stack: Vec<usize> = Vec::new();
         let mut active_ns = SmolStr::default(); // "" = root; ".foo" = namespace .foo
+        // Deferred compound-assigns inside lambdas: (scope_idx, name, offset).
+        // Resolved in a second pass: only recorded as locals if the name has no
+        // global def (meaning the compound-assign introduces the binding).
+        let mut deferred_compound: Vec<(usize, SmolStr, u32)> = Vec::new();
         let mut work: Vec<Step> = vec![Step::Visit(root.clone())];
 
         while let Some(step) = work.pop() {
@@ -129,7 +133,7 @@ impl SymTable {
                 // PopScope runs after all children have been processed.
                 work.push(Step::PopScope);
             } else if kind == SyntaxKind::BinExpr {
-                t.record_bin_expr(&node, &scope_stack, &active_ns);
+                t.record_bin_expr(&node, &scope_stack, &active_ns, &mut deferred_compound);
             }
 
             // Push children in reverse so leftmost is visited first.
@@ -139,20 +143,31 @@ impl SymTable {
             }
         }
 
+        // Second pass: resolve deferred compound-assigns inside lambdas.
+        // If the name has no global def (the compound-assign IS the first binding),
+        // record it as a local in the captured scope.
+        for (scope_idx, name, off) in deferred_compound {
+            if !t.globals.contains_key(&name) {
+                t.lambdas[scope_idx].locals.push((name, off));
+            }
+        }
+
         t
     }
 
-    fn record_bin_expr(&mut self, bin: &SyntaxNode, stack: &[usize], active_ns: &str) {
+    fn record_bin_expr(
+        &mut self,
+        bin: &SyntaxNode,
+        stack: &[usize],
+        active_ns: &str,
+        deferred_compound: &mut Vec<(usize, SmolStr, u32)>,
+    ) {
         // Column definitions inside a TableExpr (keyed or plain table
         // constructor) are not variable assignments — skip them.
         if bin.ancestors().any(|n| n.kind() == SyntaxKind::TableExpr) {
             return;
         }
 
-        // Look for an assignment colon directly on this BinExpr.
-        // CompoundAssign (`+:`, `,:`, `-:`, etc.) is only recorded as a def at
-        // global scope.  Inside a lambda it amends an existing binding (global or
-        // local) and does not introduce a new local variable.
         let Some(op) = bin
             .children_with_tokens()
             .filter_map(q_parser::SyntaxElement::into_token)
@@ -164,11 +179,6 @@ impl SymTable {
         let is_compound = op.kind() == SyntaxKind::CompoundAssign;
         let is_double_colon = op.kind() == SyntaxKind::ColonColon;
         let in_lambda = stack.last().copied();
-        // Skip compound-assign inside a lambda — it amends an existing binding,
-        // it does not introduce a new local variable.
-        if is_compound && in_lambda.is_some() {
-            return;
-        }
 
         let Some(lhs) = bin.first_child() else { return };
 
@@ -185,8 +195,16 @@ impl SymTable {
             let is_dotted = tok.kind() == SyntaxKind::DottedIdent;
             let off: u32 = tok.text_range().start().into();
             let is_global = is_double_colon || is_dotted || in_lambda.is_none();
-            // Qualify bare idents with the active \d namespace when at global scope.
             let name = qualify(tok.text(), is_global && !is_dotted, active_ns);
+
+            if is_compound && in_lambda.is_some() {
+                // Defer: record as local only if name has no global def (resolved after pass 1).
+                if let Some(idx) = in_lambda {
+                    deferred_compound.push((idx, name, off));
+                }
+                return;
+            }
+
             if is_global {
                 self.globals.entry(name).or_default().push(off);
             } else if let Some(idx) = in_lambda {
@@ -572,6 +590,19 @@ mod tests {
             }
             other => panic!("expected Some(Array|Scalar), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn compound_assign_in_lambda_creates_local_when_no_global() {
+        // `a,:value` inside a lambda when `a` has no global def → creates a local.
+        // Subsequent uses of `a` in the lambda must resolve (no unresolved warning).
+        use crate::document::Document;
+        let src = "f:{[path] a,:raze 1 2 3; a}";
+        let doc = Document::new(src.to_string(), 0);
+        let table = doc.sym_table();
+        let a_use_off = src.rfind("; a}").unwrap() + 2; // the bare `a` at end
+        let resolved = table.resolve(a_use_off, "a");
+        assert!(resolved.is_some(), "a introduced by `,: ` must resolve inside lambda");
     }
 
     #[test]
