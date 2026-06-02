@@ -8,6 +8,7 @@ use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
 use tower_lsp_server::{Client, LanguageServer};
 
+use crate::config::Config;
 use crate::document::Document;
 use crate::workspace_index::WorkspaceIndex;
 
@@ -16,6 +17,7 @@ pub struct QLanguageServer {
     documents: Arc<RwLock<HashMap<Uri, Document>>>,
     workspace_index: Arc<RwLock<WorkspaceIndex>>,
     workspace_root: Arc<RwLock<Option<PathBuf>>>,
+    config: Arc<RwLock<Config>>,
 }
 
 impl QLanguageServer {
@@ -25,12 +27,14 @@ impl QLanguageServer {
             documents: Arc::new(RwLock::new(HashMap::new())),
             workspace_index: Arc::new(RwLock::new(WorkspaceIndex::default())),
             workspace_root: Arc::new(RwLock::new(None)),
+            config: Arc::new(RwLock::new(Config::default())),
         }
     }
 
     async fn on_change(&self, uri: Uri, doc: &Document) {
         let idx = self.workspace_index.read().await;
-        let diagnostics = crate::diagnostics::compute_diagnostics_with_workspace(doc, &idx);
+        let cfg = self.config.read().await;
+        let diagnostics = crate::diagnostics::compute_diagnostics_with_workspace_and_config(doc, &idx, &cfg);
         self.client
             .publish_diagnostics(uri, diagnostics, Some(doc.version()))
             .await;
@@ -40,6 +44,7 @@ impl QLanguageServer {
         root: PathBuf,
         idx: Arc<RwLock<WorkspaceIndex>>,
         docs: Arc<RwLock<HashMap<Uri, Document>>>,
+        cfg: Arc<RwLock<Config>>,
         client: Client,
     ) {
         tokio::spawn(async move {
@@ -59,8 +64,9 @@ impl QLanguageServer {
                     // full workspace index is available.
                     let open = docs.read().await;
                     let index = idx.read().await;
+                    let config = cfg.read().await;
                     for (uri, doc) in open.iter() {
-                        let diags = crate::diagnostics::compute_diagnostics_with_workspace(doc, &index);
+                        let diags = crate::diagnostics::compute_diagnostics_with_workspace_and_config(doc, &index, &config);
                         client.publish_diagnostics(uri.clone(), diags, Some(doc.version())).await;
                     }
                 }
@@ -88,6 +94,7 @@ impl QLanguageServer {
             }
             *guard = Some(root.clone());
         }
+        *self.config.write().await = Config::load(&root);
         self.client
             .log_message(
                 MessageType::INFO,
@@ -98,6 +105,7 @@ impl QLanguageServer {
             root,
             Arc::clone(&self.workspace_index),
             Arc::clone(&self.documents),
+            Arc::clone(&self.config),
             self.client.clone(),
         );
         true
@@ -121,6 +129,9 @@ impl LanguageServer for QLanguageServer {
         // Upgrade to the nearest .git root so a client that sends a sub-folder
         // (or Neovim sending the file's parent dir) still gets the full repo.
         let root = client_root.and_then(|p| find_git_root(&p).or(Some(p)));
+        if let Some(ref r) = root {
+            *self.config.write().await = Config::load(r);
+        }
         *self.workspace_root.write().await = root;
 
         Ok(InitializeResult {
@@ -212,6 +223,7 @@ impl LanguageServer for QLanguageServer {
                 root,
                 Arc::clone(&self.workspace_index),
                 Arc::clone(&self.documents),
+                Arc::clone(&self.config),
                 self.client.clone(),
             );
         } else {

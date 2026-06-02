@@ -1,11 +1,20 @@
 #[allow(clippy::wildcard_imports)]
 use tower_lsp_server::ls_types::*;
 use q_parser::{SyntaxKind, SyntaxNode};
+use crate::config::Config;
 use crate::document::Document;
 use crate::builtins::is_builtin;
 use crate::workspace_index::WorkspaceIndex;
 
 pub fn compute_diagnostics_with_workspace(doc: &Document, workspace: &WorkspaceIndex) -> Vec<Diagnostic> {
+    compute_diagnostics_with_workspace_and_config(doc, workspace, &Config::default())
+}
+
+pub fn compute_diagnostics_with_workspace_and_config(
+    doc: &Document,
+    workspace: &WorkspaceIndex,
+    config: &Config,
+) -> Vec<Diagnostic> {
     let mut out: Vec<Diagnostic> = doc.parse().errors.iter().map(|err| {
         let start = doc.position_of(err.offset);
         let end = doc.position_of(err.offset + err.len);
@@ -19,7 +28,7 @@ pub fn compute_diagnostics_with_workspace(doc: &Document, workspace: &WorkspaceI
     }).collect();
 
     out.extend(unindented_close_warnings(doc));
-    out.extend(unresolved_reference_warnings_with_workspace(doc, workspace));
+    out.extend(unresolved_reference_warnings_with_workspace(doc, workspace, config));
     out
 }
 
@@ -92,7 +101,11 @@ fn unindented_close_warnings(doc: &Document) -> Vec<Diagnostic> {
 /// For everything else, calls `SymTable::resolve` at the token's
 /// position. If it returns `None`, checks `WorkspaceIndex::resolve_global`.
 /// Only emits a warning if neither resolves the reference.
-fn unresolved_reference_warnings_with_workspace(doc: &Document, workspace: &WorkspaceIndex) -> Vec<Diagnostic> {
+fn unresolved_reference_warnings_with_workspace(
+    doc: &Document,
+    workspace: &WorkspaceIndex,
+    config: &Config,
+) -> Vec<Diagnostic> {
     let root = doc.parse().syntax();
     let table = doc.sym_table();
     let mut diagnostics = Vec::new();
@@ -113,6 +126,9 @@ fn unresolved_reference_warnings_with_workspace(doc: &Document, workspace: &Work
         };
         let name = token.text();
         if is_builtin(name) {
+            continue;
+        }
+        if config.suppress_unresolved.contains(name) {
             continue;
         }
         let off: usize = token.text_range().start().into();
@@ -153,7 +169,7 @@ fn unresolved_reference_warnings_with_workspace(doc: &Document, workspace: &Work
 /// position. If it returns `None`, emit a warning.
 #[allow(dead_code)] // Used by test helper `unresolved_for`
 fn unresolved_reference_warnings(doc: &Document) -> Vec<Diagnostic> {
-    unresolved_reference_warnings_with_workspace(doc, &WorkspaceIndex::default())
+    unresolved_reference_warnings_with_workspace(doc, &WorkspaceIndex::default(), &Config::default())
 }
 
 fn is_in_qsql(node: &SyntaxNode) -> bool {
@@ -392,7 +408,7 @@ mod tests {
 
     fn unresolved_with_workspace_for(src: &str, workspace: &WorkspaceIndex) -> Vec<String> {
         let doc = Document::new(src.to_string(), 0);
-        unresolved_reference_warnings_with_workspace(&doc, workspace)
+        unresolved_reference_warnings_with_workspace(&doc, workspace, &Config::default())
             .into_iter()
             .map(|d| d.message)
             .collect()
@@ -420,6 +436,37 @@ mod tests {
         let warnings = unresolved_with_workspace_for("ghost 42", &idx);
         assert!(warnings.iter().any(|w| w.contains("`ghost`")),
             "truly undefined name must still warn: {warnings:?}");
+    }
+
+    #[test]
+    fn suppress_unresolved_via_config() {
+        use crate::workspace_index::WorkspaceIndex;
+        use crate::config::Config;
+        use std::collections::HashSet;
+
+        let cfg = Config {
+            suppress_unresolved: HashSet::from(["proctype".to_string(), "procname".to_string()]),
+        };
+        let doc = Document::new("proctype".to_string(), 0);
+        let idx = WorkspaceIndex::default();
+        let diags = compute_diagnostics_with_workspace_and_config(&doc, &idx, &cfg);
+        assert!(diags.is_empty(), "suppressed name must not warn: {diags:?}");
+    }
+
+    #[test]
+    fn unsuppressed_name_still_warns() {
+        use crate::workspace_index::WorkspaceIndex;
+        use crate::config::Config;
+        use std::collections::HashSet;
+
+        let cfg = Config {
+            suppress_unresolved: HashSet::from(["proctype".to_string()]),
+        };
+        let doc = Document::new("ghost".to_string(), 0);
+        let idx = WorkspaceIndex::default();
+        let diags = compute_diagnostics_with_workspace_and_config(&doc, &idx, &cfg);
+        assert!(diags.iter().any(|d| d.message.contains("`ghost`")),
+            "non-suppressed name must still warn: {diags:?}");
     }
 
     #[test]
