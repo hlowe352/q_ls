@@ -157,13 +157,27 @@ fn unresolved_reference_warnings(doc: &Document) -> Vec<Diagnostic> {
 }
 
 fn is_in_qsql(node: &SyntaxNode) -> bool {
-    node.ancestors().any(|n| matches!(
-        n.kind(),
-        SyntaxKind::SelectExpr
+    node.ancestors().any(|n| {
+        match n.kind() {
+            // Statement-level qSQL nodes.
+            SyntaxKind::SelectExpr
             | SyntaxKind::UpdateExpr
             | SyntaxKind::ExecExpr
-            | SyntaxKind::DeleteExpr
-    ))
+            | SyntaxKind::DeleteExpr => true,
+            // Expression-level qSQL: inside lambdas or $[…] the parser emits
+            // ApplyExpr chains.  Detect `select`/`exec`/`update`/`delete` in
+            // the function position.
+            SyntaxKind::ApplyExpr => n
+                .first_child()
+                .filter(|fc| fc.kind() == SyntaxKind::IdentExpr)
+                .is_some_and(|fc| fc
+                    .children_with_tokens()
+                    .filter_map(q_parser::SyntaxElement::into_token)
+                    .any(|t| t.kind() == SyntaxKind::Ident
+                        && matches!(t.text(), "select" | "exec" | "update" | "delete"))),
+            _ => false,
+        }
+    })
 }
 
 fn is_in_param_list(node: &SyntaxNode) -> bool {
@@ -273,6 +287,17 @@ mod tests {
         // refs. Adjust if/when qSQL gets tighter handling.
         assert!(warnings.iter().all(|w| !w.contains("`sym`") && !w.contains("`px`")),
             "qSQL columns must not be flagged: {warnings:?}");
+    }
+
+    #[test]
+    fn unresolved_skips_expr_level_qsql_columns() {
+        // Inside a lambda, qSQL is parsed as ApplyExpr chains (not SelectExpr etc.).
+        // Column names must still be suppressed.
+        let src = "evict:{[r] select lastaccess,id,size from cache}";
+        let warnings = unresolved_for(src);
+        assert!(warnings.iter().all(|w|
+            !w.contains("`lastaccess`") && !w.contains("`id`") && !w.contains("`size`")
+        ), "expr-level qSQL columns must not be flagged: {warnings:?}");
     }
 
     #[test]
