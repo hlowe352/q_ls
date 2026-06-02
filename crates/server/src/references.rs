@@ -118,10 +118,23 @@ fn collect_refs_in_doc(
             let tok_text = token.text();
             // Match bare name OR the qualified form (e.g. `.cache.cache` when
             // searching for `cache` inside `\d .cache`).
+            //
+            // Also match the bare last component of a qualified name so that
+            // go-to-ref from `.cache.cache` also finds bare `cache` refs
+            // inside `\d .cache`.  Correctness is still enforced by the
+            // `resolve → def_offsets` check below.
+            let q = if qualified_name.starts_with('.') { qualified_name } else { name };
+            let bare_of_qualified = q.rsplit('.').next().unwrap_or("");
             let lookup_name: &str = if tok_text == name {
                 name
             } else if tok_text == qualified_name {
                 qualified_name
+            } else if !bare_of_qualified.is_empty()
+                && bare_of_qualified != name
+                && bare_of_qualified != qualified_name
+                && tok_text == bare_of_qualified
+            {
+                bare_of_qualified
             } else {
                 continue;
             };
@@ -526,6 +539,28 @@ mod tests {
         let r = refs(src, cursor, true);
         let tbl_off = src.rfind(".cache.cache").unwrap();
         assert!(r.contains(&tbl_off), "select from table ref missing; got {r:?}");
+    }
+
+    #[test]
+    fn refs_from_qualified_name_finds_bare_refs() {
+        // go-to-ref from `.cache.cache` (dotted form) must find bare `cache`
+        // refs inside `\d .cache`, same as go-to-ref from the bare definition.
+        let src = "\\d .cache\ncache:1\nf:{exec size from cache}\n\\d .\nshow .cache.cache";
+        let doc = Document::new(src.to_string(), 0);
+        let uri: Uri = "file:///x.q".parse().unwrap();
+        // cursor on `.cache.cache` (the dotted-ident use outside the namespace)
+        let dotted_off = src.rfind(".cache.cache").unwrap();
+        let pos = doc.position_of(dotted_off);
+        let r: Vec<usize> = find_references(&doc, pos, true, &uri)
+            .into_iter()
+            .map(|loc| doc.offset_of(loc.range.start))
+            .collect();
+        // Must find the bare `cache` def at line 2.
+        let def_off = src.find("cache:1").unwrap();
+        assert!(r.contains(&def_off), "bare cache def not found from qualified cursor; got {r:?}");
+        // Must find the bare `cache` use inside the lambda.
+        let use_off = src.rfind("from cache").unwrap() + "from ".len();
+        assert!(r.contains(&use_off), "bare cache use inside lambda not found from qualified cursor; got {r:?}");
     }
 
     #[test]
