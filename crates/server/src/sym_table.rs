@@ -150,7 +150,9 @@ impl SymTable {
         }
 
         // Look for an assignment colon directly on this BinExpr.
-        // CompoundAssign covers `+:`, `,:`, `-:`, etc. — all define the LHS variable.
+        // CompoundAssign (`+:`, `,:`, `-:`, etc.) is only recorded as a def at
+        // global scope.  Inside a lambda it amends an existing binding (global or
+        // local) and does not introduce a new local variable.
         let Some(op) = bin
             .children_with_tokens()
             .filter_map(q_parser::SyntaxElement::into_token)
@@ -159,8 +161,14 @@ impl SymTable {
         else {
             return;
         };
+        let is_compound = op.kind() == SyntaxKind::CompoundAssign;
         let is_double_colon = op.kind() == SyntaxKind::ColonColon;
         let in_lambda = stack.last().copied();
+        // Skip compound-assign inside a lambda — it amends an existing binding,
+        // it does not introduce a new local variable.
+        if is_compound && in_lambda.is_some() {
+            return;
+        }
 
         let Some(lhs) = bin.first_child() else { return };
 
@@ -563,6 +571,38 @@ mod tests {
                 assert_eq!(loc.uri, torq_uri, "must resolve to torq.q");
             }
             other => panic!("expected Some(Array|Scalar), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compound_assign_in_lambda_does_not_shadow_global() {
+        // `loadedf:enlist enlist""` is a global def.
+        // Inside a lambda, `loadedf,:enlist x` amends the global — it must NOT
+        // create a new local that shadows it.  goto-def on a use inside the
+        // lambda must resolve to the global def, not the amend site.
+        use crate::document::Document;
+        use crate::goto_def::goto_definition;
+        use tower_lsp_server::ls_types::{GotoDefinitionResponse, Uri};
+
+        let src = "loadedf:enlist enlist\"\"\nf:{[x] if[x in loadedf;:()]; loadedf,:enlist x}";
+        let doc = Document::new(src.to_string(), 0);
+        let uri: Uri = "file:///a.q".parse().unwrap();
+
+        // cursor on `loadedf` in `x in loadedf` (use inside lambda)
+        let use_off = src.find("x in loadedf").unwrap() + "x in ".len();
+        let pos = doc.position_of(use_off);
+        let def_off = src.find("loadedf:enlist").unwrap(); // line 1 global def
+
+        match goto_definition(&doc, pos, &uri) {
+            Some(GotoDefinitionResponse::Array(locs)) => {
+                let got = doc.offset_of(locs[0].range.start);
+                assert_eq!(got, def_off, "must point to global def, not amend site");
+            }
+            Some(GotoDefinitionResponse::Scalar(loc)) => {
+                let got = doc.offset_of(loc.range.start);
+                assert_eq!(got, def_off, "must point to global def, not amend site");
+            }
+            other => panic!("expected Some location, got {other:?}"),
         }
     }
 }
