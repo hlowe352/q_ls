@@ -65,14 +65,26 @@ pub fn find_references_with_workspace(
     };
 
     // Cross-file scan when:
-    // (a) symbol has a local global def, OR
-    // (b) symbol has no local def at all but is known in the workspace index
-    //     (cursor is on a use-only site; def lives in another file).
+    // (a) cursor is on a global symbol (not a lambda param/local), AND
+    //     (i) the file has a global def of this name, OR
+    //     (ii) no local def at all (use-site whose def lives in another file).
     let is_local_global = !table.global_def_offsets(&name).is_empty()
         || !table.global_def_offsets(&qualified_name).is_empty();
     let is_workspace_global = workspace.resolve_global(&name).is_some();
 
-    if is_local_global || is_workspace_global {
+    // Only do cross-file scanning when the cursor is actually on a global
+    // binding, not a lambda param or local.  When `def_offsets` is non-empty,
+    // confirm at least one of those offsets is in the global table; if none
+    // match, the cursor is on a lambda-local/param and must stay in-scope.
+    let cursor_on_global = def_offsets.is_empty() || {
+        let g_name = table.global_def_offsets(&name);
+        let g_qual = table.global_def_offsets(&qualified_name);
+        def_offsets.iter().any(|&off| {
+            g_name.contains(&(off as u32)) || g_qual.contains(&(off as u32))
+        })
+    };
+
+    if cursor_on_global && (is_local_global || is_workspace_global) {
         if def_offsets.is_empty() {
             // No local def — collect_refs_in_doc was skipped; scan current file via global path.
             out.extend(collect_global_refs_in_doc(doc, &name, &qualified_name, uri));
@@ -701,6 +713,35 @@ mod tests {
         );
         let b_locs: Vec<_> = locs.iter().filter(|l| l.uri == uri_b).collect();
         assert!(!b_locs.is_empty(), "cross-file ref in b.q not found; got: {locs:?}");
+    }
+
+    #[test]
+    fn lambda_param_not_found_cross_file() {
+        // Cursor on param `x` in `{[x] x+1}`. a.q also has a global `x:99`.
+        // b.q has its own global `x:77`.
+        // Cross-file scan must NOT return b.q's `x`.
+        use crate::workspace_index::WorkspaceIndex;
+
+        let uri_a: Uri = "file:///a.q".parse().unwrap();
+        let uri_b: Uri = "file:///b.q".parse().unwrap();
+
+        let src_a = "x:99\nf:{[x] x+1}".to_string();
+        let mut idx = WorkspaceIndex::default();
+        idx.index_file(uri_b.clone(), Document::new("x:77".to_string(), 0));
+
+        let doc_a = Document::new(src_a.clone(), 0);
+        // Cursor on the param declaration `x` in `{[x] ...}`
+        let param_pos = doc_a.position_of(src_a.find("{[x]").unwrap() + 2);
+        let locs = find_references_with_workspace(&doc_a, param_pos, true, &uri_a, &HashMap::new(), &idx);
+        let b_locs: Vec<_> = locs.iter().filter(|l| l.uri == uri_b).collect();
+        assert!(b_locs.is_empty(), "lambda param must not cross-file scan: {locs:?}");
+        // All returned refs must be inside the lambda body/param list
+        let global_x_off = src_a.find("x:99").unwrap();
+        let any_global = locs.iter().any(|l| {
+            let off = doc_a.offset_of(l.range.start);
+            off == global_x_off
+        });
+        assert!(!any_global, "global x:99 must not appear in param refs: {locs:?}");
     }
 
     #[test]
