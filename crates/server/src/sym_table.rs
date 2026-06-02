@@ -150,10 +150,12 @@ impl SymTable {
         }
 
         // Look for an assignment colon directly on this BinExpr.
+        // CompoundAssign covers `+:`, `,:`, `-:`, etc. — all define the LHS variable.
         let Some(op) = bin
             .children_with_tokens()
             .filter_map(q_parser::SyntaxElement::into_token)
-            .find(|t| t.kind() == SyntaxKind::Colon || t.kind() == SyntaxKind::ColonColon)
+            .find(|t| matches!(t.kind(),
+                SyntaxKind::Colon | SyntaxKind::ColonColon | SyntaxKind::CompoundAssign))
         else {
             return;
         };

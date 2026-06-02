@@ -25,6 +25,7 @@ pub enum Token {
     /// Priority 3 keeps hex above the plain decimal regex (default priority 2).
     #[regex(r"0x[0-9A-Fa-f]{1,3}", priority = 4)]  // hex (1-3 digits)
     #[regex(r"0N[ijhp]", priority = 5)]        // typed nulls (guid/timespan/datetime/minute/second handled separately)
+    #[regex(r"0N", priority = 4)]             // bare long null `0N` (longer typed patterns take priority)
     #[regex(r"0W[ijhp]", priority = 5)]        // typed infs
     #[regex(r"[0-9]+[ijh]?")]                   // plain decimal, optional suffix
     Integer,
@@ -767,6 +768,17 @@ mod tests {
         let mut lex = Token::lexer("0Ng");
         assert_eq!(lex.next(), Some(Ok(Token::Guid)));
         assert_eq!(lex.slice(), "0Ng");
+    }
+
+    #[test]
+    fn lex_bare_long_null() {
+        // `0N` without a suffix is the long null (integer type)
+        assert_eq!(Token::lexer("0N").next(), Some(Ok(Token::Integer)));
+        // Ensure typed nulls still work (longer match wins)
+        assert_eq!(Token::lexer("0Ni").next(), Some(Ok(Token::Integer)));
+        assert_eq!(Token::lexer("0Nj").next(), Some(Ok(Token::Integer)));
+        assert_eq!(Token::lexer("0Nn").next(), Some(Ok(Token::Timespan)));
+        assert_eq!(Token::lexer("0Nd").next(), Some(Ok(Token::Date)));
     }
 
     #[test]
