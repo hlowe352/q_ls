@@ -58,9 +58,10 @@ pub enum Token {
     #[regex(r"0[NW]g", priority = 6)]
     Guid,
 
-    /// Timespan literal: `0D00:00:00.000000000`, `0Nn`, `0Wn`
+    /// Timespan literal: `1D`, `0D00:00:00.000000000`, `0Nn`, `0Wn`
     #[regex(r"0[NW]n", priority = 6)]
     #[regex(r"[0-9]+D[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?", priority = 6)]
+    #[regex(r"[0-9]+D", priority = 5)]
     Timespan,
 
     /// Datetime literal: `0Nz`, `0Wz`
@@ -838,6 +839,10 @@ mod tests {
         assert_eq!(Token::lexer("0D00:00:00.000000000").next(), Some(Ok(Token::Timespan)));
         assert_eq!(Token::lexer("0Nn").next(), Some(Ok(Token::Timespan)));
         assert_eq!(Token::lexer("0Wn").next(), Some(Ok(Token::Timespan)));
+        // bare days form: `1D`, `2D`, `0D`
+        assert_eq!(Token::lexer("1D").next(), Some(Ok(Token::Timespan)));
+        assert_eq!(Token::lexer("2D").next(), Some(Ok(Token::Timespan)));
+        assert_eq!(Token::lexer("0D").next(), Some(Ok(Token::Timespan)));
     }
 
     #[test]
