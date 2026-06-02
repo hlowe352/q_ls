@@ -66,21 +66,75 @@ pub fn rename_with_workspace(
         return None;
     }
 
+    // Qualified form (e.g. `.cache.cache` when cursor is on `cache` inside `\d .cache`).
+    let qualified_old = doc.sym_table()
+        .qualified_for(cursor, old_name)
+        .map_or_else(|| old_name.to_string(), |q| q.to_string());
+    // Namespace prefix: `.cache.` for `.cache.cache`, empty for bare names.
+    let ns_prefix: String = qualified_old
+        .rsplit_once('.')
+        .map(|(prefix, _)| format!("{prefix}."))
+        .unwrap_or_default();
+
     let locations = find_references_with_workspace(doc, pos, true, uri, open_docs, workspace);
     if locations.is_empty() {
         return None;
     }
 
-    // Group locations by file URI — WorkspaceEdit supports multi-file edits.
+    // Build a lookup for original document text: current doc + open docs + workspace.
+    let get_doc = |u: &Uri| -> Option<&Document> {
+        if u == uri { return Some(doc); }
+        if let Some(d) = open_docs.get(u) { return Some(d); }
+        workspace.files().get(u)
+    };
+
+    // Group locations by file URI, computing the right new_text per token shape.
     let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
     for loc in locations {
-        changes
-            .entry(loc.uri)
-            .or_default()
-            .push(TextEdit { range: loc.range, new_text: new_name.to_string() });
+        let new_text = get_doc(&loc.uri).and_then(|d| {
+            let start = d.offset_of(loc.range.start);
+            let end   = d.offset_of(loc.range.end);
+            d.text().get(start..end)
+        }).map_or_else(
+            || new_name.to_string(),
+            |original| rewrite_token(original, new_name, old_name, &qualified_old, &ns_prefix),
+        );
+        changes.entry(loc.uri).or_default()
+            .push(TextEdit { range: loc.range, new_text });
     }
 
     Some(WorkspaceEdit { changes: Some(changes), document_changes: None, change_annotations: None })
+}
+
+/// Given the original token text and the new bare name, produce the
+/// correctly shaped replacement:
+///
+/// | Original             | Result                |
+/// |----------------------|-----------------------|
+/// | `cache`              | `newName`             |
+/// | `.cache.cache`       | `.cache.newName`      |
+/// | `` `.cache.cache ``  | `` `.cache.newName `` |
+/// | `` `cache ``         | `` `newName ``        |
+fn rewrite_token(original: &str, new_name: &str, old_name: &str, qualified_old: &str, ns_prefix: &str) -> String {
+    if let Some(sym_body) = original.strip_prefix('`') {
+        // Symbol token — preserve the leading backtick.
+        let new_body = rewrite_ident(sym_body, new_name, old_name, qualified_old, ns_prefix);
+        format!("`{new_body}")
+    } else {
+        rewrite_ident(original, new_name, old_name, qualified_old, ns_prefix)
+    }
+}
+
+fn rewrite_ident(original: &str, new_name: &str, old_name: &str, qualified_old: &str, ns_prefix: &str) -> String {
+    if original == old_name {
+        new_name.to_string()
+    } else if original == qualified_old {
+        // Qualified form: keep namespace prefix, swap bare name.
+        format!("{ns_prefix}{new_name}")
+    } else {
+        // Fallback (shouldn't happen for valid locations).
+        new_name.to_string()
+    }
 }
 
 /// Match q's identifier shape: starts with a letter (or `.` for namespaced
@@ -180,6 +234,34 @@ mod tests {
         assert!(rename(&doc, pos, "1bad", &uri()).is_none());
         assert!(rename(&doc, pos, "with space", &uri()).is_none());
         assert!(rename(&doc, pos, "", &uri()).is_none());
+    }
+
+    #[test]
+    fn rename_preserves_backtick_on_symbol_refs() {
+        // `.cache.cache upsert row` — the symbol token must keep its backtick.
+        let src = "\\d .cache\ncache:1\nf:{`.cache.cache upsert (1;2)}";
+        let doc = Document::new(src.to_string(), 0);
+        let pos = doc.position_of(src.find("cache:1").unwrap());
+        let edit = rename(&doc, pos, "tbl", &uri()).expect("rename ok");
+        let edits = edit.changes.as_ref().and_then(|c| c.get(&uri())).expect("has edits");
+        // The symbol edit must produce `` `.cache.tbl ``, not just `tbl`.
+        let sym_edit = edits.iter().find(|e| e.new_text.starts_with('`'))
+            .expect("must have a symbol edit");
+        assert_eq!(sym_edit.new_text, "`.cache.tbl");
+    }
+
+    #[test]
+    fn rename_preserves_dotted_prefix_on_qualified_refs() {
+        // `.cache.cache` dotted-ident refs outside the namespace must
+        // become `.cache.newName`, not just `newName`.
+        let src = "\\d .cache\ncache:1\n\\d .\nshow .cache.cache";
+        let doc = Document::new(src.to_string(), 0);
+        let pos = doc.position_of(src.find("cache:1").unwrap());
+        let edit = rename(&doc, pos, "tbl", &uri()).expect("rename ok");
+        let edits = edit.changes.as_ref().and_then(|c| c.get(&uri())).expect("has edits");
+        let dotted_edit = edits.iter().find(|e| e.new_text.starts_with('.'))
+            .expect("must have a dotted edit");
+        assert_eq!(dotted_edit.new_text, ".cache.tbl");
     }
 
     #[test]
