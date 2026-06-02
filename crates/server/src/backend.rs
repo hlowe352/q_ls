@@ -94,7 +94,9 @@ impl QLanguageServer {
             }
             *guard = Some(root.clone());
         }
-        *self.config.write().await = Config::load(&root);
+        let (cfg, cfg_status) = Config::load(&root);
+        *self.config.write().await = cfg;
+        self.client.log_message(MessageType::INFO, cfg_status).await;
         self.client
             .log_message(
                 MessageType::INFO,
@@ -129,9 +131,6 @@ impl LanguageServer for QLanguageServer {
         // Upgrade to the nearest .git root so a client that sends a sub-folder
         // (or Neovim sending the file's parent dir) still gets the full repo.
         let root = client_root.and_then(|p| find_git_root(&p).or(Some(p)));
-        if let Some(ref r) = root {
-            *self.config.write().await = Config::load(r);
-        }
         *self.workspace_root.write().await = root;
 
         Ok(InitializeResult {
@@ -213,6 +212,9 @@ impl LanguageServer for QLanguageServer {
         // opened file and call try_start_indexing then.
         let root = self.workspace_root.read().await.clone();
         if let Some(root) = root {
+            let (cfg, cfg_status) = Config::load(&root);
+            *self.config.write().await = cfg;
+            self.client.log_message(MessageType::INFO, cfg_status).await;
             self.client
                 .log_message(
                     MessageType::INFO,
