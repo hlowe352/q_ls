@@ -421,4 +421,16 @@ mod tests {
         assert!(warnings.iter().any(|w| w.contains("`ghost`")),
             "truly undefined name must still warn: {warnings:?}");
     }
+
+    #[test]
+    fn unresolved_skips_tokens_in_trailing_comment_no_space() {
+        // `expr   /load a file` — `load`, `a`, `file` are inside a comment, not idents
+        let src = "loadf:loadf0[0b]   /load a file if it hasn't been loaded";
+        let warnings = unresolved_for(src);
+        let comment_words: Vec<_> = warnings.iter()
+            .filter(|w| w.contains("`a`") || w.contains("`file`") || w.contains("`load`"))
+            .collect();
+        assert!(comment_words.is_empty(),
+            "words in trailing comment must not be flagged: {warnings:?}");
+    }
 }
