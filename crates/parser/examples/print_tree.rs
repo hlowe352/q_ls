@@ -32,38 +32,32 @@ fn print_node(node: &SyntaxNode, indent: usize) {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let exprs: Vec<&str> = if args.len() > 1 {
-        args[1..].iter().map(|s| s.as_str()).collect()
-    } else {
-        vec![
-            "a+b*c",
-            "a:b:1",
-            "a+:1",
-            "select sum a by b from t",
-            "update a:1 from t",
-            "delete from t where a>0",
-            "f:{[x;y] x+y}",
-            "{x+y}[1;2]",
-            "(+')f",
-            "f/[x]",
-            "a where b",
-            "$[a;b;c]",
-            "do[3;a+:1]",
-            "t:([]a:1 2 3;b:4 5 6)",
-            "a:+/1 2 3",
-            "1 2!3 4",
-            "a lj b",
-            ":a",
-            "a _ b",
-            "(+) . (1 2;3 4)",
-        ]
-    };
 
-    for expr in exprs {
-        println!("\n=== {expr:?} ===");
-        let parse = q_parser::parse(expr);
+    if args.len() > 1 {
+        for path in &args[1..] {
+            let source = std::fs::read_to_string(path).unwrap_or_else(|e| {
+                eprintln!("error reading {path:?}: {e}");
+                std::process::exit(1);
+            });
+            println!("=== {path} ===");
+            let parse = q_parser::parse(&source);
+            if !parse.errors.is_empty() {
+                for err in &parse.errors {
+                    eprintln!("  ERROR: {}", err.message);
+                }
+            }
+            print_node(&parse.syntax(), 0);
+        }
+    } else {
+        // No args: read from stdin
+        use std::io::Read;
+        let mut source = String::new();
+        std::io::stdin().read_to_string(&mut source).unwrap();
+        let parse = q_parser::parse(&source);
         if !parse.errors.is_empty() {
-            println!("  ERRORS: {:?}", parse.errors);
+            for err in &parse.errors {
+                eprintln!("  ERROR: {}", err.message);
+            }
         }
         print_node(&parse.syntax(), 0);
     }
