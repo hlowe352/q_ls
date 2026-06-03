@@ -80,7 +80,7 @@ fn expr_bp(p: &mut Parser, min_bp: u8) {
             && !p.has_preceding_newline()
             && !(p.qsql_stop
                 && matches!(
-                    p.current_text().as_deref(),
+                    p.current_text(),
                     Some("from" | "by" | "where")
                 ))
             && !(p.qsql_comma_stop && p.current() == Some(SyntaxKind::Comma))
