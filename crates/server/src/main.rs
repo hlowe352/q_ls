@@ -1,11 +1,11 @@
 mod backend;
 mod builtins;
-mod config;
-mod document;
-mod diagnostics;
 mod completion;
-mod hover;
+mod config;
+mod diagnostics;
+mod document;
 mod goto_def;
+mod hover;
 mod line_index;
 mod references;
 mod rename;

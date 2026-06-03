@@ -61,8 +61,8 @@ fn expr_bp(p: &mut Parser, min_bp: u8) {
                 p.events.len() > before
             };
             let kind = match (decorated, had_rhs) {
-                (true, _)      => SyntaxKind::InfixModExpr,
-                (false, true)  => SyntaxKind::BinExpr,
+                (true, _) => SyntaxKind::InfixModExpr,
+                (false, true) => SyntaxKind::BinExpr,
                 (false, false) => SyntaxKind::InfixProjection,
             };
             lhs = m.complete(p, kind);
@@ -124,7 +124,8 @@ fn atom(p: &mut Parser) -> Option<CompletedMarker> {
         // Identifiers (with control word detection)
         SyntaxKind::Ident | SyntaxKind::DottedIdent => {
             // Control words: if[...], do[...], while[...]
-            if kind == SyntaxKind::Ident && p.nth(1) == Some(SyntaxKind::LBracket)
+            if kind == SyntaxKind::Ident
+                && p.nth(1) == Some(SyntaxKind::LBracket)
                 && let Some(text) = p.current_text()
             {
                 let ctrl_kind = match text {
@@ -143,7 +144,11 @@ fn atom(p: &mut Parser) -> Option<CompletedMarker> {
 
             let m = p.start();
             p.bump();
-            let node_kind = if bare_ns { SyntaxKind::Namespace } else { SyntaxKind::IdentExpr };
+            let node_kind = if bare_ns {
+                SyntaxKind::Namespace
+            } else {
+                SyntaxKind::IdentExpr
+            };
             Some(m.complete(p, node_kind))
         }
 
@@ -215,10 +220,7 @@ fn atom(p: &mut Parser) -> Option<CompletedMarker> {
             // - followed by adverb (e.g. `+/x` — let postfix handle it)
             // - followed by `[` (e.g. operator[args] — functional form handled by caller)
             // - at expression boundary (e.g. `1+;` — projection)
-            if !is_adverb(p)
-                && !at_expr_boundary(p)
-                && p.current() != Some(SyntaxKind::LBracket)
-            {
+            if !is_adverb(p) && !at_expr_boundary(p) && p.current() != Some(SyntaxKind::LBracket) {
                 expr_bp(p, 100); // high bp: bind tightly to next token
             }
             Some(m.complete(p, SyntaxKind::UnaryExpr))
@@ -364,7 +366,12 @@ fn parse_lambda(p: &mut Parser) -> Option<CompletedMarker> {
             // also allows integer literals as parameter "names" in some patterns.
             let is_param_name = matches!(
                 p.current(),
-                Some(SyntaxKind::Ident | SyntaxKind::Integer | SyntaxKind::Float | SyntaxKind::Symbol)
+                Some(
+                    SyntaxKind::Ident
+                        | SyntaxKind::Integer
+                        | SyntaxKind::Float
+                        | SyntaxKind::Symbol
+                )
             );
             if is_param_name {
                 p.bump();
@@ -498,10 +505,7 @@ fn at_expr_boundary(p: &Parser) -> bool {
         None => true,
         Some(k) => matches!(
             k,
-            SyntaxKind::Semi
-                | SyntaxKind::RBrace
-                | SyntaxKind::RBracket
-                | SyntaxKind::RParen
+            SyntaxKind::Semi | SyntaxKind::RBrace | SyntaxKind::RBracket | SyntaxKind::RParen
         ),
     }
 }
@@ -646,18 +650,22 @@ mod literal_tests {
     #[test]
     fn parse_temporal_literals_are_atoms() {
         for (src, kind_name) in [
-            ("0Nm",       "Month"),
-            ("0Ng",       "Guid"),
-            ("0Nn",       "Timespan"),
-            ("12:30",     "Minute"),
-            ("12:30:45",  "Second"),
-            ("0Nz",       "Datetime"),
-            ("0xABCD",    "ByteList"),
+            ("0Nm", "Month"),
+            ("0Ng", "Guid"),
+            ("0Nn", "Timespan"),
+            ("12:30", "Minute"),
+            ("12:30:45", "Second"),
+            ("0Nz", "Datetime"),
+            ("0xABCD", "ByteList"),
         ] {
             let parse = parse(src);
             let dump = format!("{:#?}", parse.syntax());
             assert!(dump.contains(kind_name), "expected {kind_name} in:\n{dump}");
-            assert!(parse.errors.is_empty(), "errors for {src}: {:?}", parse.errors);
+            assert!(
+                parse.errors.is_empty(),
+                "errors for {src}: {:?}",
+                parse.errors
+            );
         }
     }
 
@@ -666,7 +674,10 @@ mod literal_tests {
         let parse = parse("`:foo.csv");
         let dump = format!("{:#?}", parse.syntax());
         assert!(dump.contains("FileSymbolExpr"), "got:\n{dump}");
-        assert!(!dump.contains("LiteralExpr"), "should not be LiteralExpr:\n{dump}");
+        assert!(
+            !dump.contains("LiteralExpr"),
+            "should not be LiteralExpr:\n{dump}"
+        );
     }
 }
 
@@ -685,7 +696,10 @@ mod table_keys_tests {
         let parse = crate::parse("([] v:3 4)");
         let dump = format!("{:#?}", parse.syntax());
         assert!(dump.contains("TableExpr"), "got:\n{dump}");
-        assert!(!dump.contains("TableKeys"), "should not have TableKeys:\n{dump}");
+        assert!(
+            !dump.contains("TableKeys"),
+            "should not have TableKeys:\n{dump}"
+        );
     }
 }
 
@@ -704,7 +718,10 @@ mod namespace_tests {
     fn parse_dotted_member_remains_dotted() {
         let parse = parse(".q.func");
         let dump = format!("{:#?}", parse.syntax());
-        assert!(!dump.contains("Namespace"), "should not be Namespace:\n{dump}");
+        assert!(
+            !dump.contains("Namespace"),
+            "should not be Namespace:\n{dump}"
+        );
     }
 
     #[test]

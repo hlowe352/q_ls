@@ -18,7 +18,13 @@ impl Document {
         let parse = q_parser::parse(&text);
         let line_index = LineIndex::new(&text);
         let sym_table = SymTable::build(&parse.syntax());
-        Self { text, version, parse, line_index, sym_table }
+        Self {
+            text,
+            version,
+            parse,
+            line_index,
+            sym_table,
+        }
     }
 
     pub fn sym_table(&self) -> &SymTable {

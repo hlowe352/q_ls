@@ -1,15 +1,19 @@
-#[allow(clippy::wildcard_imports)]
-use tower_lsp_server::ls_types::*;
 use crate::builtins::lookup_doc;
 use crate::document::Document;
 use crate::workspace_index::WorkspaceIndex;
+#[allow(clippy::wildcard_imports)]
+use tower_lsp_server::ls_types::*;
 
 #[allow(dead_code)]
 pub fn hover(doc: &Document, pos: Position) -> Option<Hover> {
     hover_with_workspace(doc, pos, &WorkspaceIndex::default())
 }
 
-pub fn hover_with_workspace(doc: &Document, pos: Position, workspace: &WorkspaceIndex) -> Option<Hover> {
+pub fn hover_with_workspace(
+    doc: &Document,
+    pos: Position,
+    workspace: &WorkspaceIndex,
+) -> Option<Hover> {
     let offset = doc.offset_of(pos);
 
     // Try the word at cursor (handles bare idents and dotted idents).
@@ -101,17 +105,25 @@ fn cursor_in_table_expr(doc: &Document, offset: usize) -> bool {
 }
 
 fn get_word_at(text: &str, offset: usize) -> Option<String> {
-    if offset >= text.len() { return None; }
+    if offset >= text.len() {
+        return None;
+    }
     let bytes = text.as_bytes();
 
     // Include a leading backtick so `` `.cache.cache `` is returned as
     // `` `.cache.cache `` (stripping happens later in callers that need the name).
     let mut start = offset;
     let mut end = offset;
-    while start > 0 && is_word_char(bytes[start - 1]) { start -= 1; }
+    while start > 0 && is_word_char(bytes[start - 1]) {
+        start -= 1;
+    }
     // Back up one more if the char before start is a backtick.
-    if start > 0 && bytes[start - 1] == b'`' { start -= 1; }
-    while end < bytes.len() && is_word_char(bytes[end]) { end += 1; }
+    if start > 0 && bytes[start - 1] == b'`' {
+        start -= 1;
+    }
+    while end < bytes.len() && is_word_char(bytes[end]) {
+        end += 1;
+    }
     if start == end {
         // Maybe a single-char operator
         end = (offset + 1).min(bytes.len());
@@ -189,7 +201,10 @@ mod tests {
         let src = "\\d .cache\ncache:([id:`u#`long$()] size:`long$())\n\\d .";
         let cursor = src.find("id:`u").unwrap(); // hover on `id` col def
         let text = hover_text(src, cursor).unwrap_or_default();
-        assert!(!text.contains(".cache.id"), "table col falsely qualified; got: {text}");
+        assert!(
+            !text.contains(".cache.id"),
+            "table col falsely qualified; got: {text}"
+        );
     }
 
     #[test]
@@ -199,7 +214,10 @@ mod tests {
         let src = "\\d .cache\nid:0j\nadd:{[id] id+1}\n\\d .";
         let cursor = src.find("id+1").unwrap(); // ref to the param inside lambda
         let text = hover_text(src, cursor).unwrap_or_default();
-        assert!(!text.contains(".cache.id"), "param falsely qualified; got: {text}");
+        assert!(
+            !text.contains(".cache.id"),
+            "param falsely qualified; got: {text}"
+        );
     }
 
     #[test]
@@ -215,8 +233,7 @@ mod tests {
         use crate::workspace_index::WorkspaceIndex;
         // torq.q defines .proc.cp; cache.q references it
         let torq_src = "\\d .proc\n$[1b;[cp:{.z.p}];[cp:{.z.P}]];\n\\d .";
-        let torq_uri: tower_lsp_server::ls_types::Uri =
-            "file:///TorQ/torq.q".parse().unwrap();
+        let torq_uri: tower_lsp_server::ls_types::Uri = "file:///TorQ/torq.q".parse().unwrap();
         let mut idx = WorkspaceIndex::default();
         idx.index_file(torq_uri, Document::new(torq_src.to_string(), 0));
 
@@ -226,10 +243,15 @@ mod tests {
         let pos = cache_doc.position_of(offset);
 
         let result = hover_with_workspace(&cache_doc, pos, &idx);
-        let text = result.map(|h| match h.contents {
-            HoverContents::Markup(m) => m.value,
-            _ => String::new(),
-        }).unwrap_or_default();
-        assert!(text.contains(".proc.cp"), "expected .proc.cp in hover; got: {text}");
+        let text = result
+            .map(|h| match h.contents {
+                HoverContents::Markup(m) => m.value,
+                _ => String::new(),
+            })
+            .unwrap_or_default();
+        assert!(
+            text.contains(".proc.cp"),
+            "expected .proc.cp in hover; got: {text}"
+        );
     }
 }

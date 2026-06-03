@@ -11,7 +11,6 @@ pub enum Token {
     // -----------------------------------------------------------------------
     // Literals
     // -----------------------------------------------------------------------
-
     /// Boolean literal: `0b`, `1b`, `010101b`
     #[regex(r"[01]+b")]
     Boolean,
@@ -23,22 +22,22 @@ pub enum Token {
     ///
     /// Note: negative sign is NOT included here; the parser handles unary minus.
     /// Priority 3 keeps hex above the plain decimal regex (default priority 2).
-    #[regex(r"0x[0-9A-Fa-f]{1,3}", priority = 4)]  // hex (1-3 digits)
-    #[regex(r"0N[ijhp]", priority = 5)]        // typed nulls (guid/timespan/datetime/minute/second handled separately)
-    #[regex(r"0N", priority = 4)]             // bare long null `0N` (longer typed patterns take priority)
-    #[regex(r"0W[ijhp]", priority = 5)]        // typed infs
-    #[regex(r"[0-9]+[ijh]?")]                   // plain decimal, optional suffix
+    #[regex(r"0x[0-9A-Fa-f]{1,3}", priority = 4)] // hex (1-3 digits)
+    #[regex(r"0N[ijhp]", priority = 5)] // typed nulls (guid/timespan/datetime/minute/second handled separately)
+    #[regex(r"0N", priority = 4)] // bare long null `0N` (longer typed patterns take priority)
+    #[regex(r"0W[ijhp]", priority = 5)] // typed infs
+    #[regex(r"[0-9]+[ijh]?")] // plain decimal, optional suffix
     Integer,
 
     /// Float literal
     ///
     /// Covers: `3.14`, `3.14e10`, `3.14f`, `3.14e`, `0n`, `0w`, `0Nf`,
     ///         `0Wf`, `0Ne`, `0We`
-    #[regex(r"0[nw]", priority = 4)]            // generic float null/inf (lower-case)
-    #[regex(r"0N[fe]", priority = 5)]           // typed float nulls
-    #[regex(r"0W[fe]", priority = 5)]           // typed float infs
-    #[regex(r"[0-9]+\.[0-9]*([eE][0-9]+)?[fe]?")]  // decimal float
-    #[regex(r"[0-9]+[eE][0-9]+[fe]?")]         // scientific without dot
+    #[regex(r"0[nw]", priority = 4)] // generic float null/inf (lower-case)
+    #[regex(r"0N[fe]", priority = 5)] // typed float nulls
+    #[regex(r"0W[fe]", priority = 5)] // typed float infs
+    #[regex(r"[0-9]+\.[0-9]*([eE][0-9]+)?[fe]?")] // decimal float
+    #[regex(r"[0-9]+[eE][0-9]+[fe]?")] // scientific without dot
     Float,
 
     /// Timestamp literal: `2024.01.15D12:30:00.000000000`
@@ -104,7 +103,6 @@ pub enum Token {
     // -----------------------------------------------------------------------
     // Identifiers
     // -----------------------------------------------------------------------
-
     /// DSL escape line: `k)expr` or `p)expr`. Entire line is opaque.
     #[regex(r"[kp]\)[^\r\n]*", priority = 5)]
     DslLine,
@@ -120,34 +118,54 @@ pub enum Token {
     // -----------------------------------------------------------------------
     // Operators / verbs
     // -----------------------------------------------------------------------
-
-    #[token("+")]  Plus,
-    #[token("-")]  Minus,
-    #[token("*")]  Star,
-    #[token("%")]  Percent,
-    #[token("!")]  Bang,
-    #[token("&")]  Amp,
-    #[token("|")]  Pipe,
-    #[token("^")]  Caret,
-    #[token("#")]  Hash,
-    #[token("_")]  Underscore,
-    #[token("~")]  Tilde,
-    #[token("$")]  Dollar,
-    #[token("?")]  Query,
-    #[token("@")]  At,
-    #[token(",")]  Comma,
-    #[token("<>")]  NotEq,
-    #[token("<=")]  LtEq,
-    #[token(">=")]  GtEq,
-    #[token("=")]  Eq,
-    #[token("<")]  Lt,
-    #[token(">")]  Gt,
-    #[token(".")]  Dot,
+    #[token("+")]
+    Plus,
+    #[token("-")]
+    Minus,
+    #[token("*")]
+    Star,
+    #[token("%")]
+    Percent,
+    #[token("!")]
+    Bang,
+    #[token("&")]
+    Amp,
+    #[token("|")]
+    Pipe,
+    #[token("^")]
+    Caret,
+    #[token("#")]
+    Hash,
+    #[token("_")]
+    Underscore,
+    #[token("~")]
+    Tilde,
+    #[token("$")]
+    Dollar,
+    #[token("?")]
+    Query,
+    #[token("@")]
+    At,
+    #[token(",")]
+    Comma,
+    #[token("<>")]
+    NotEq,
+    #[token("<=")]
+    LtEq,
+    #[token(">=")]
+    GtEq,
+    #[token("=")]
+    Eq,
+    #[token("<")]
+    Lt,
+    #[token(">")]
+    Gt,
+    #[token(".")]
+    Dot,
 
     // -----------------------------------------------------------------------
     // Assignment / colon variants
     // -----------------------------------------------------------------------
-
     /// Compound assignment operators: `+:`, `-:`, `*:`, etc.
     /// Must come before individual operator + Colon.
     #[regex(r"[-+*%><~=_#$!|&?^,@]:", priority = 3)]
@@ -172,7 +190,6 @@ pub enum Token {
     // -----------------------------------------------------------------------
     // Adverbs (compound tokens — must be before their component tokens)
     // -----------------------------------------------------------------------
-
     /// Each-prior `':`
     #[token("':")]
     EachPrior,
@@ -192,19 +209,24 @@ pub enum Token {
     // -----------------------------------------------------------------------
     // Delimiters
     // -----------------------------------------------------------------------
-
-    #[token("(")]  LParen,
-    #[token(")")]  RParen,
-    #[token("[")]  LBracket,
-    #[token("]")]  RBracket,
-    #[token("{")]  LBrace,
-    #[token("}")]  RBrace,
-    #[token(";")]  Semi,
+    #[token("(")]
+    LParen,
+    #[token(")")]
+    RParen,
+    #[token("[")]
+    LBracket,
+    #[token("]")]
+    RBracket,
+    #[token("{")]
+    LBrace,
+    #[token("}")]
+    RBrace,
+    #[token(";")]
+    Semi,
 
     // -----------------------------------------------------------------------
     // Special / structural
     // -----------------------------------------------------------------------
-
     /// Newline — significant in q as a statement separator
     #[regex(r"\r?\n")]
     Newline,
@@ -212,9 +234,9 @@ pub enum Token {
     /// Line comment: `/ comment text` (slash followed by space or end-of-line)
     /// Also covers full-line comments that begin with `/` or `//`.
     /// The lexer emits the entire comment (including the leading `/`) as one token.
-    #[regex(r"//[^\r\n]*", priority = 8)]           // `//` style comment
-    #[regex(r"/[^\S\r\n][^\r\n]*", priority = 8)]   // `/ ` followed by rest of line
-    #[regex(r"/\r?\n", priority = 8)]               // bare `/` at end of line
+    #[regex(r"//[^\r\n]*", priority = 8)] // `//` style comment
+    #[regex(r"/[^\S\r\n][^\r\n]*", priority = 8)] // `/ ` followed by rest of line
+    #[regex(r"/\r?\n", priority = 8)] // bare `/` at end of line
     LineComment,
 
     /// Multi-line comment block. Opens with a line containing only `/` and
@@ -247,7 +269,6 @@ pub enum Token {
     // -----------------------------------------------------------------------
     // Error (unrecognized input)
     // -----------------------------------------------------------------------
-
     /// Catch-all for unrecognized input (logos 0.13+ uses the unit variant
     /// without `#[error]`; the `Err` side of the iterator carries this).
     Error,
@@ -707,9 +728,18 @@ mod tests {
 
     #[test]
     fn lex_file_symbol_split() {
-        assert_eq!(Token::lexer("`:data.csv").next(), Some(Ok(Token::FileSymbol)));
-        assert_eq!(Token::lexer("`:/abs/path").next(), Some(Ok(Token::FileSymbol)));
-        assert_eq!(Token::lexer("`:host:5001").next(), Some(Ok(Token::FileSymbol)));
+        assert_eq!(
+            Token::lexer("`:data.csv").next(),
+            Some(Ok(Token::FileSymbol))
+        );
+        assert_eq!(
+            Token::lexer("`:/abs/path").next(),
+            Some(Ok(Token::FileSymbol))
+        );
+        assert_eq!(
+            Token::lexer("`:host:5001").next(),
+            Some(Ok(Token::FileSymbol))
+        );
         assert_eq!(Token::lexer("`hello").next(), Some(Ok(Token::Symbol)));
         assert_eq!(Token::lexer("`").next(), Some(Ok(Token::Symbol)));
     }
@@ -724,20 +754,33 @@ mod tests {
     #[test]
     fn lex_compound_assign_plus() {
         let tokens: Vec<_> = Token::lexer("x+:1").map(|r| r.unwrap()).collect();
-        assert_eq!(tokens, vec![Token::Ident, Token::CompoundAssign, Token::Integer]);
+        assert_eq!(
+            tokens,
+            vec![Token::Ident, Token::CompoundAssign, Token::Integer]
+        );
     }
 
     #[test]
     fn lex_compound_assign_comma() {
         let tokens: Vec<_> = Token::lexer("x,:y").map(|r| r.unwrap()).collect();
-        assert_eq!(tokens, vec![Token::Ident, Token::CompoundAssign, Token::Ident]);
+        assert_eq!(
+            tokens,
+            vec![Token::Ident, Token::CompoundAssign, Token::Ident]
+        );
     }
 
     #[test]
     fn lex_compound_assign_all() {
-        for op in ["+:", "-:", "*:", "%:", ">:", "<:", "~:", "=:", "_:", "#:", "$:", "!:", "|:", "&:", "?:", "^:", ",:", "@:"] {
+        for op in [
+            "+:", "-:", "*:", "%:", ">:", "<:", "~:", "=:", "_:", "#:", "$:", "!:", "|:", "&:",
+            "?:", "^:", ",:", "@:",
+        ] {
             let mut lex = Token::lexer(op);
-            assert_eq!(lex.next(), Some(Ok(Token::CompoundAssign)), "failed for {op}");
+            assert_eq!(
+                lex.next(),
+                Some(Ok(Token::CompoundAssign)),
+                "failed for {op}"
+            );
         }
     }
 
@@ -848,7 +891,10 @@ mod tests {
 
     #[test]
     fn lex_timespan_literal() {
-        assert_eq!(Token::lexer("0D00:00:00.000000000").next(), Some(Ok(Token::Timespan)));
+        assert_eq!(
+            Token::lexer("0D00:00:00.000000000").next(),
+            Some(Ok(Token::Timespan))
+        );
         assert_eq!(Token::lexer("0Nn").next(), Some(Ok(Token::Timespan)));
         assert_eq!(Token::lexer("0Wn").next(), Some(Ok(Token::Timespan)));
         // bare days form: `1D`, `2D`, `0D`
@@ -885,7 +931,10 @@ mod tests {
     #[test]
     fn lex_byte_list() {
         assert_eq!(Token::lexer("0xABCD").next(), Some(Ok(Token::ByteList)));
-        assert_eq!(Token::lexer("0x0011223344").next(), Some(Ok(Token::ByteList)));
+        assert_eq!(
+            Token::lexer("0x0011223344").next(),
+            Some(Ok(Token::ByteList))
+        );
     }
 
     #[test]

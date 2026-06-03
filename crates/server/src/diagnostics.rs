@@ -1,12 +1,15 @@
-#[allow(clippy::wildcard_imports)]
-use tower_lsp_server::ls_types::*;
-use q_parser::{SyntaxKind, SyntaxNode};
+use crate::builtins::is_builtin;
 use crate::config::Config;
 use crate::document::Document;
-use crate::builtins::is_builtin;
 use crate::workspace_index::WorkspaceIndex;
+use q_parser::{SyntaxKind, SyntaxNode};
+#[allow(clippy::wildcard_imports)]
+use tower_lsp_server::ls_types::*;
 
-pub fn compute_diagnostics_with_workspace(doc: &Document, workspace: &WorkspaceIndex) -> Vec<Diagnostic> {
+pub fn compute_diagnostics_with_workspace(
+    doc: &Document,
+    workspace: &WorkspaceIndex,
+) -> Vec<Diagnostic> {
     compute_diagnostics_with_workspace_and_config(doc, workspace, &Config::default())
 }
 
@@ -15,20 +18,27 @@ pub fn compute_diagnostics_with_workspace_and_config(
     workspace: &WorkspaceIndex,
     config: &Config,
 ) -> Vec<Diagnostic> {
-    let mut out: Vec<Diagnostic> = doc.parse().errors.iter().map(|err| {
-        let start = doc.position_of(err.offset);
-        let end = doc.position_of(err.offset + err.len);
-        Diagnostic {
-            range: Range::new(start, end),
-            severity: Some(DiagnosticSeverity::ERROR),
-            source: Some("q-ls".into()),
-            message: err.message.clone(),
-            ..Default::default()
-        }
-    }).collect();
+    let mut out: Vec<Diagnostic> = doc
+        .parse()
+        .errors
+        .iter()
+        .map(|err| {
+            let start = doc.position_of(err.offset);
+            let end = doc.position_of(err.offset + err.len);
+            Diagnostic {
+                range: Range::new(start, end),
+                severity: Some(DiagnosticSeverity::ERROR),
+                source: Some("q-ls".into()),
+                message: err.message.clone(),
+                ..Default::default()
+            }
+        })
+        .collect();
 
     out.extend(unindented_close_warnings(doc));
-    out.extend(unresolved_reference_warnings_with_workspace(doc, workspace, config));
+    out.extend(unresolved_reference_warnings_with_workspace(
+        doc, workspace, config,
+    ));
     out
 }
 
@@ -48,9 +58,15 @@ fn unindented_close_warnings(doc: &Document) -> Vec<Diagnostic> {
     let root = doc.parse().syntax();
     let mut diagnostics = Vec::new();
 
-    for tok in root.descendants_with_tokens().filter_map(q_parser::SyntaxElement::into_token) {
+    for tok in root
+        .descendants_with_tokens()
+        .filter_map(q_parser::SyntaxElement::into_token)
+    {
         let kind = tok.kind();
-        if !matches!(kind, SyntaxKind::RBrace | SyntaxKind::RBracket | SyntaxKind::RParen) {
+        if !matches!(
+            kind,
+            SyntaxKind::RBrace | SyntaxKind::RBracket | SyntaxKind::RParen
+        ) {
             continue;
         }
         let off: usize = tok.text_range().start().into();
@@ -169,7 +185,11 @@ fn unresolved_reference_warnings_with_workspace(
 /// position. If it returns `None`, emit a warning.
 #[allow(dead_code)] // Used by test helper `unresolved_for`
 fn unresolved_reference_warnings(doc: &Document) -> Vec<Diagnostic> {
-    unresolved_reference_warnings_with_workspace(doc, &WorkspaceIndex::default(), &Config::default())
+    unresolved_reference_warnings_with_workspace(
+        doc,
+        &WorkspaceIndex::default(),
+        &Config::default(),
+    )
 }
 
 fn is_in_qsql(node: &SyntaxNode) -> bool {
@@ -186,11 +206,14 @@ fn is_in_qsql(node: &SyntaxNode) -> bool {
             SyntaxKind::ApplyExpr => n
                 .first_child()
                 .filter(|fc| fc.kind() == SyntaxKind::IdentExpr)
-                .is_some_and(|fc| fc
-                    .children_with_tokens()
-                    .filter_map(q_parser::SyntaxElement::into_token)
-                    .any(|t| t.kind() == SyntaxKind::Ident
-                        && matches!(t.text(), "select" | "exec" | "update" | "delete"))),
+                .is_some_and(|fc| {
+                    fc.children_with_tokens()
+                        .filter_map(q_parser::SyntaxElement::into_token)
+                        .any(|t| {
+                            t.kind() == SyntaxKind::Ident
+                                && matches!(t.text(), "select" | "exec" | "update" | "delete")
+                        })
+                }),
             _ => false,
         }
     })
@@ -203,7 +226,9 @@ fn is_in_param_list(node: &SyntaxNode) -> bool {
 /// True if this `IdentExpr` is the LHS of a `BinExpr` whose operator is
 /// `:` or `::` — i.e. this node *is* a definition, not a reference.
 fn is_assignment_lhs(node: &SyntaxNode) -> bool {
-    let Some(parent) = node.parent() else { return false; };
+    let Some(parent) = node.parent() else {
+        return false;
+    };
     if parent.kind() != SyntaxKind::BinExpr {
         return false;
     }
@@ -222,12 +247,18 @@ mod tests {
 
     fn warns_for(src: &str) -> Vec<String> {
         let doc = Document::new(src.to_string(), 0);
-        unindented_close_warnings(&doc).into_iter().map(|d| d.message).collect()
+        unindented_close_warnings(&doc)
+            .into_iter()
+            .map(|d| d.message)
+            .collect()
     }
 
     fn unresolved_for(src: &str) -> Vec<String> {
         let doc = Document::new(src.to_string(), 0);
-        unresolved_reference_warnings(&doc).into_iter().map(|d| d.message).collect()
+        unresolved_reference_warnings(&doc)
+            .into_iter()
+            .map(|d| d.message)
+            .collect()
     }
 
     #[test]
@@ -242,35 +273,50 @@ mod tests {
     fn warns_on_unindented_bracket_close() {
         let src = "f[1;\n2;\n3\n]\n";
         let warnings = warns_for(src);
-        assert!(warnings.iter().any(|w| w.contains("closing `]`")), "got: {warnings:?}");
+        assert!(
+            warnings.iter().any(|w| w.contains("closing `]`")),
+            "got: {warnings:?}"
+        );
     }
 
     #[test]
     fn warns_on_unindented_paren_close() {
         let src = "(1;\n2;\n3\n)\n";
         let warnings = warns_for(src);
-        assert!(warnings.iter().any(|w| w.contains("closing `)`")), "got: {warnings:?}");
+        assert!(
+            warnings.iter().any(|w| w.contains("closing `)`")),
+            "got: {warnings:?}"
+        );
     }
 
     #[test]
     fn no_warning_when_indented() {
         let src = "f:{[x]\n    x+1\n  }\n";
         let warnings = warns_for(src);
-        assert!(warnings.is_empty(), "expected no warnings, got: {warnings:?}");
+        assert!(
+            warnings.is_empty(),
+            "expected no warnings, got: {warnings:?}"
+        );
     }
 
     #[test]
     fn no_warning_for_single_line_scope() {
         let src = "{x+1}\n";
         let warnings = warns_for(src);
-        assert!(warnings.is_empty(), "expected no warnings, got: {warnings:?}");
+        assert!(
+            warnings.is_empty(),
+            "expected no warnings, got: {warnings:?}"
+        );
     }
 
     #[test]
     fn unresolved_flags_truly_undefined_name() {
         let src = "f:{[x] x+y}";
         let warnings = unresolved_for(src);
-        assert!(warnings.iter().any(|w| w.contains("`y`")), "got: {warnings:?}");
+        assert!(
+            warnings.iter().any(|w| w.contains("`y`")),
+            "got: {warnings:?}"
+        );
     }
 
     #[test]
@@ -301,8 +347,12 @@ mod tests {
         // `t` would normally be flagged as undefined, but it's the table arg
         // to `from` which is part of qSQL — currently we suppress all qSQL
         // refs. Adjust if/when qSQL gets tighter handling.
-        assert!(warnings.iter().all(|w| !w.contains("`sym`") && !w.contains("`px`")),
-            "qSQL columns must not be flagged: {warnings:?}");
+        assert!(
+            warnings
+                .iter()
+                .all(|w| !w.contains("`sym`") && !w.contains("`px`")),
+            "qSQL columns must not be flagged: {warnings:?}"
+        );
     }
 
     #[test]
@@ -311,16 +361,22 @@ mod tests {
         // Column names must still be suppressed.
         let src = "evict:{[r] select lastaccess,id,size from cache}";
         let warnings = unresolved_for(src);
-        assert!(warnings.iter().all(|w|
-            !w.contains("`lastaccess`") && !w.contains("`id`") && !w.contains("`size`")
-        ), "expr-level qSQL columns must not be flagged: {warnings:?}");
+        assert!(
+            warnings.iter().all(|w| !w.contains("`lastaccess`")
+                && !w.contains("`id`")
+                && !w.contains("`size`")),
+            "expr-level qSQL columns must not be flagged: {warnings:?}"
+        );
     }
 
     #[test]
     fn unresolved_skips_assignment_lhs() {
         let src = "newName: 42";
         let warnings = unresolved_for(src);
-        assert!(warnings.is_empty(), "assignment LHS is a def, got: {warnings:?}");
+        assert!(
+            warnings.is_empty(),
+            "assignment LHS is a def, got: {warnings:?}"
+        );
     }
 
     #[test]
@@ -334,7 +390,10 @@ mod tests {
     fn unresolved_flags_user_namespace_member_when_undefined() {
         let src = "use:.app.cfg";
         let warnings = unresolved_for(src);
-        assert!(warnings.iter().any(|w| w.contains("`.app.cfg`")), "got: {warnings:?}");
+        assert!(
+            warnings.iter().any(|w| w.contains("`.app.cfg`")),
+            "got: {warnings:?}"
+        );
     }
 
     #[test]
@@ -365,7 +424,10 @@ mod tests {
         let src = "\\d .foo\nval:42\n\\d .\nshow val";
         let warnings = unresolved_for(src);
         // `val` at root scope is not .foo.val, so `show val` should warn
-        assert!(warnings.iter().any(|w| w.contains("`val`")), "got: {warnings:?}");
+        assert!(
+            warnings.iter().any(|w| w.contains("`val`")),
+            "got: {warnings:?}"
+        );
     }
 
     #[test]
@@ -390,16 +452,22 @@ mod tests {
                 let src = std::fs::read_to_string(concat!(
                     env!("CARGO_MANIFEST_DIR"),
                     "/../parser/tests/data/real_q/dbmaint.q",
-                )).expect("dbmaint.q fixture");
+                ))
+                .expect("dbmaint.q fixture");
                 let warnings = unresolved_for(&src);
                 if !warnings.is_empty() {
-                    eprintln!("dbmaint.q produced {} unresolved-ref warnings:", warnings.len());
+                    eprintln!(
+                        "dbmaint.q produced {} unresolved-ref warnings:",
+                        warnings.len()
+                    );
                     for w in &warnings {
                         eprintln!("  {w}");
                     }
                 }
-                assert!(warnings.is_empty(),
-                    "regression: dbmaint.q now reports unresolved refs: {warnings:#?}");
+                assert!(
+                    warnings.is_empty(),
+                    "regression: dbmaint.q now reports unresolved refs: {warnings:#?}"
+                );
             })
             .unwrap()
             .join()
@@ -425,8 +493,10 @@ mod tests {
         );
 
         let warnings = unresolved_with_workspace_for("helper 42", &idx);
-        assert!(warnings.is_empty(),
-            "symbol defined in workspace must not warn: {warnings:?}");
+        assert!(
+            warnings.is_empty(),
+            "symbol defined in workspace must not warn: {warnings:?}"
+        );
     }
 
     #[test]
@@ -434,14 +504,16 @@ mod tests {
         use crate::workspace_index::WorkspaceIndex;
         let idx = WorkspaceIndex::default();
         let warnings = unresolved_with_workspace_for("ghost 42", &idx);
-        assert!(warnings.iter().any(|w| w.contains("`ghost`")),
-            "truly undefined name must still warn: {warnings:?}");
+        assert!(
+            warnings.iter().any(|w| w.contains("`ghost`")),
+            "truly undefined name must still warn: {warnings:?}"
+        );
     }
 
     #[test]
     fn suppress_unresolved_via_config() {
-        use crate::workspace_index::WorkspaceIndex;
         use crate::config::Config;
+        use crate::workspace_index::WorkspaceIndex;
         use std::collections::HashSet;
 
         let cfg = Config {
@@ -455,8 +527,8 @@ mod tests {
 
     #[test]
     fn unsuppressed_name_still_warns() {
-        use crate::workspace_index::WorkspaceIndex;
         use crate::config::Config;
+        use crate::workspace_index::WorkspaceIndex;
         use std::collections::HashSet;
 
         let cfg = Config {
@@ -465,8 +537,10 @@ mod tests {
         let doc = Document::new("ghost".to_string(), 0);
         let idx = WorkspaceIndex::default();
         let diags = compute_diagnostics_with_workspace_and_config(&doc, &idx, &cfg);
-        assert!(diags.iter().any(|d| d.message.contains("`ghost`")),
-            "non-suppressed name must still warn: {diags:?}");
+        assert!(
+            diags.iter().any(|d| d.message.contains("`ghost`")),
+            "non-suppressed name must still warn: {diags:?}"
+        );
     }
 
     #[test]
@@ -474,10 +548,13 @@ mod tests {
         // `expr   /load a file` — `load`, `a`, `file` are inside a comment, not idents
         let src = "loadf:loadf0[0b]   /load a file if it hasn't been loaded";
         let warnings = unresolved_for(src);
-        let comment_words: Vec<_> = warnings.iter()
+        let comment_words: Vec<_> = warnings
+            .iter()
             .filter(|w| w.contains("`a`") || w.contains("`file`") || w.contains("`load`"))
             .collect();
-        assert!(comment_words.is_empty(),
-            "words in trailing comment must not be flagged: {warnings:?}");
+        assert!(
+            comment_words.is_empty(),
+            "words in trailing comment must not be flagged: {warnings:?}"
+        );
     }
 }

@@ -9,9 +9,9 @@
 
 use std::collections::{HashMap, HashSet};
 
+use q_parser::SyntaxKind;
 #[allow(clippy::wildcard_imports)]
 use tower_lsp_server::ls_types::*;
-use q_parser::SyntaxKind;
 
 use crate::document::Document;
 use crate::workspace_index::WorkspaceIndex;
@@ -23,7 +23,14 @@ pub fn find_references(
     include_declaration: bool,
     uri: &Uri,
 ) -> Vec<Location> {
-    find_references_with_workspace(doc, pos, include_declaration, uri, &HashMap::new(), &WorkspaceIndex::default())
+    find_references_with_workspace(
+        doc,
+        pos,
+        include_declaration,
+        uri,
+        &HashMap::new(),
+        &WorkspaceIndex::default(),
+    )
 }
 
 pub fn find_references_with_workspace(
@@ -36,14 +43,15 @@ pub fn find_references_with_workspace(
 ) -> Vec<Location> {
     let cursor = doc.offset_of(pos);
     let table = doc.sym_table();
-    let Some((name, _, _)) = doc.ident_at(cursor) else { return Vec::new() };
+    let Some((name, _, _)) = doc.ident_at(cursor) else {
+        return Vec::new();
+    };
     // Copy the borrowed name so we can read the syntax tree without
     // holding a reference into `doc.text`.
     let name = name.to_string();
 
     // All def sites of `name` in the scope the cursor lives in.
-    let def_offsets: HashSet<usize> =
-        table.def_offsets_for(cursor, &name).into_iter().collect();
+    let def_offsets: HashSet<u32> = table.def_offsets_for(cursor, &name).into_iter().collect();
 
     // If no local def, check whether it's a workspace-known global. If so,
     // we can still do a cross-file scan — fall through with empty def_offsets.
@@ -54,14 +62,22 @@ pub fn find_references_with_workspace(
 
     // Qualified form of `name` (e.g. `.cache.cache` when name is `cache`
     // inside `\d .cache`).  Used to match backtick symbol tokens.
-    let qualified_name = table.qualified_for(cursor, &name)
+    let qualified_name = table
+        .qualified_for(cursor, &name)
         .map_or_else(|| name.clone(), |q| q.to_string());
 
     // Collect same-file refs via def-offset matching (only when we have local defs).
     let mut out = if def_offsets.is_empty() {
         Vec::new()
     } else {
-        collect_refs_in_doc(doc, &name, &qualified_name, &def_offsets, include_declaration, uri)
+        collect_refs_in_doc(
+            doc,
+            &name,
+            &qualified_name,
+            &def_offsets,
+            include_declaration,
+            uri,
+        )
     };
 
     // Cross-file scan when:
@@ -79,9 +95,9 @@ pub fn find_references_with_workspace(
     let cursor_on_global = def_offsets.is_empty() || {
         let g_name = table.global_def_offsets(&name);
         let g_qual = table.global_def_offsets(&qualified_name);
-        def_offsets.iter().any(|&off| {
-            g_name.contains(&(off as u32)) || g_qual.contains(&(off as u32))
-        })
+        def_offsets
+            .iter()
+            .any(|&off| g_name.contains(&off) || g_qual.contains(&off))
     };
 
     if cursor_on_global && (is_local_global || is_workspace_global) {
@@ -91,16 +107,19 @@ pub fn find_references_with_workspace(
         }
         // Scan all other docs: open docs (excluding current) + workspace background files.
         // O(total tokens × files) — add an inverted index to WorkspaceIndex if this becomes a bottleneck.
-        let open_others = all_open_docs
-            .iter()
-            .filter(|(u, _)| *u != uri);
+        let open_others = all_open_docs.iter().filter(|(u, _)| *u != uri);
         let workspace_only = workspace
             .files()
             .iter()
             .filter(|(u, _)| !all_open_docs.contains_key(*u));
 
         for (other_uri, other_doc) in open_others.chain(workspace_only) {
-            out.extend(collect_global_refs_in_doc(other_doc, &name, &qualified_name, other_uri));
+            out.extend(collect_global_refs_in_doc(
+                other_doc,
+                &name,
+                &qualified_name,
+                other_uri,
+            ));
         }
     }
 
@@ -111,7 +130,7 @@ fn collect_refs_in_doc(
     doc: &Document,
     name: &str,
     qualified_name: &str,
-    def_offsets: &HashSet<usize>,
+    def_offsets: &HashSet<u32>,
     include_declaration: bool,
     uri: &Uri,
 ) -> Vec<Location> {
@@ -124,7 +143,8 @@ fn collect_refs_in_doc(
         .filter_map(q_parser::SyntaxElement::into_token)
     {
         let tk = token.kind();
-        let off: usize = token.text_range().start().into();
+        let off_u32: u32 = token.text_range().start().into();
+        let off: usize = off_u32 as usize;
 
         if matches!(tk, SyntaxKind::Ident | SyntaxKind::DottedIdent) {
             let tok_text = token.text();
@@ -135,7 +155,11 @@ fn collect_refs_in_doc(
             // go-to-ref from `.cache.cache` also finds bare `cache` refs
             // inside `\d .cache`.  Correctness is still enforced by the
             // `resolve → def_offsets` check below.
-            let q = if qualified_name.starts_with('.') { qualified_name } else { name };
+            let q = if qualified_name.starts_with('.') {
+                qualified_name
+            } else {
+                name
+            };
             let bare_of_qualified = q.rsplit('.').next().unwrap_or("");
             let lookup_name: &str = if tok_text == name {
                 name
@@ -159,7 +183,7 @@ fn collect_refs_in_doc(
             let parent_kind = token.parent().map(|p| p.kind());
             let in_param_list = is_in_kind(&token, SyntaxKind::ParamList);
 
-            let is_decl = def_offsets.contains(&off);
+            let is_decl = def_offsets.contains(&off_u32);
             // Table constructor column defs (`id` in `([id:...])`) are not
             // variable references even though resolve() would find the global.
             if is_col_def_in_table(&token) {
@@ -167,7 +191,10 @@ fn collect_refs_in_doc(
             }
             let resolves_to_def = is_decl
                 || (!in_param_list
-                    && matches!(parent_kind, Some(SyntaxKind::IdentExpr | SyntaxKind::Namespace))
+                    && matches!(
+                        parent_kind,
+                        Some(SyntaxKind::IdentExpr | SyntaxKind::Namespace)
+                    )
                     && table
                         .resolve(off, lookup_name)
                         .is_some_and(|d| def_offsets.contains(&d)));
@@ -181,8 +208,10 @@ fn collect_refs_in_doc(
 
             let start = doc.position_of(off);
             let end = doc.position_of(off + tok_text.len());
-            out.push(Location { uri: uri.clone(), range: Range::new(start, end) });
-
+            out.push(Location {
+                uri: uri.clone(),
+                range: Range::new(start, end),
+            });
         } else if tk == SyntaxKind::Symbol {
             // Only treat backtick symbols as global table refs in in-place
             // modification contexts: `upsert`, `insert`, or qSQL
@@ -197,7 +226,10 @@ fn collect_refs_in_doc(
             }
             let start = doc.position_of(off);
             let end = doc.position_of(off + token.text().len());
-            out.push(Location { uri: uri.clone(), range: Range::new(start, end) });
+            out.push(Location {
+                uri: uri.clone(),
+                range: Range::new(start, end),
+            });
         }
     }
     out
@@ -240,7 +272,10 @@ fn collect_global_refs_in_doc(
         }
         let off: usize = token.text_range().start().into();
         let parent_kind = token.parent().map(|p| p.kind());
-        if !matches!(parent_kind, Some(SyntaxKind::IdentExpr | SyntaxKind::Namespace)) {
+        if !matches!(
+            parent_kind,
+            Some(SyntaxKind::IdentExpr | SyntaxKind::Namespace)
+        ) {
             continue;
         }
         // Accept the token if it either (a) resolves to a global in *this*
@@ -249,15 +284,17 @@ fn collect_global_refs_in_doc(
         let resolved_off = table.resolve(off, lookup);
         let passes = match resolved_off {
             None => true, // no local binding — treat as cross-file use
-            Some(r) => u32::try_from(r)
-                .is_ok_and(|r_u32| table.global_def_offsets(lookup).contains(&r_u32)),
+            Some(r) => table.global_def_offsets(lookup).contains(&r),
         };
         if !passes {
             continue;
         }
         let start = doc.position_of(off);
         let end = doc.position_of(off + tok_text.len());
-        out.push(Location { uri: uri.clone(), range: Range::new(start, end) });
+        out.push(Location {
+            uri: uri.clone(),
+            range: Range::new(start, end),
+        });
     }
     out
 }
@@ -289,20 +326,18 @@ fn is_in_qsql(token: &q_parser::SyntaxToken) -> bool {
             // valid as qSQL verbs, never as ordinary function names.
             SyntaxKind::ApplyExpr => {
                 if let Some(func) = node.first_child()
-                    && func.kind() == SyntaxKind::IdentExpr {
-                        let text = func
-                            .children_with_tokens()
-                            .filter_map(q_parser::SyntaxElement::into_token)
-                            .find(|t| t.kind() == SyntaxKind::Ident)
-                            .map(|t| t.text().to_string())
-                            .unwrap_or_default();
-                        if matches!(
-                            text.as_str(),
-                            "update" | "select" | "exec" | "delete"
-                        ) {
-                            return true;
-                        }
+                    && func.kind() == SyntaxKind::IdentExpr
+                {
+                    let text = func
+                        .children_with_tokens()
+                        .filter_map(q_parser::SyntaxElement::into_token)
+                        .find(|t| t.kind() == SyntaxKind::Ident)
+                        .map(|t| t.text().to_string())
+                        .unwrap_or_default();
+                    if matches!(text.as_str(), "update" | "select" | "exec" | "delete") {
+                        return true;
                     }
+                }
             }
             _ => {}
         }
@@ -324,12 +359,16 @@ fn is_in_qsql(token: &q_parser::SyntaxToken) -> bool {
 /// Excluded: dict/list indexing (`r`id`), assignment RHS (`x:`sym`),
 /// symbol lists, function arguments, etc.
 fn is_inplace_table_symbol(token: &q_parser::SyntaxToken) -> bool {
-    let Some(lit) = token.parent() else { return false };
+    let Some(lit) = token.parent() else {
+        return false;
+    };
     if lit.kind() != SyntaxKind::LiteralExpr {
         return false;
     }
 
-    let Some(parent) = lit.parent() else { return false };
+    let Some(parent) = lit.parent() else {
+        return false;
+    };
 
     match parent.kind() {
         // `` `.t upsert rows `` / `` `.t insert rows ``
@@ -339,20 +378,26 @@ fn is_inplace_table_symbol(token: &q_parser::SyntaxToken) -> bool {
                 && parent
                     .children_with_tokens()
                     .filter_map(q_parser::SyntaxElement::into_token)
-                    .any(|t| t.kind() == SyntaxKind::Ident
-                        && matches!(t.text(), "upsert" | "insert"))
+                    .any(|t| {
+                        t.kind() == SyntaxKind::Ident && matches!(t.text(), "upsert" | "insert")
+                    })
         }
 
         SyntaxKind::ApplyExpr => {
             if parent.first_child().as_ref() == Some(&lit) {
-                let Some(grandparent) = parent.parent() else { return false };
+                let Some(grandparent) = parent.parent() else {
+                    return false;
+                };
 
                 // Pattern A: LiteralExpr → ApplyExpr → DeleteExpr|UpdateExpr|SelectExpr
                 // (statement-level `delete from `.t` with no column list)
-                if matches!(grandparent.kind(),
-                    SyntaxKind::DeleteExpr | SyntaxKind::UpdateExpr
-                    | SyntaxKind::SelectExpr | SyntaxKind::ExecExpr)
-                {
+                if matches!(
+                    grandparent.kind(),
+                    SyntaxKind::DeleteExpr
+                        | SyntaxKind::UpdateExpr
+                        | SyntaxKind::SelectExpr
+                        | SyntaxKind::ExecExpr
+                ) {
                     return true;
                 }
 
@@ -375,16 +420,25 @@ fn is_inplace_table_symbol(token: &q_parser::SyntaxToken) -> bool {
 /// argument of a qSQL `from` clause.  Lets us skip the `is_in_qsql` guard
 /// for the table name while still filtering out column names.
 fn is_qsql_from_table_ident(token: &q_parser::SyntaxToken) -> bool {
-    let Some(ident_expr) = token.parent() else { return false };
-    if ident_expr.kind() != SyntaxKind::IdentExpr { return false; }
-    let Some(parent) = ident_expr.parent() else { return false };
+    let Some(ident_expr) = token.parent() else {
+        return false;
+    };
+    if ident_expr.kind() != SyntaxKind::IdentExpr {
+        return false;
+    }
+    let Some(parent) = ident_expr.parent() else {
+        return false;
+    };
 
     // Case 1: IdentExpr is a direct child of a qSQL statement node.
     // Occurs in `select from .t` (no column list, so parser places .t directly).
-    if matches!(parent.kind(),
-        SyntaxKind::SelectExpr | SyntaxKind::UpdateExpr
-        | SyntaxKind::DeleteExpr | SyntaxKind::ExecExpr)
-    {
+    if matches!(
+        parent.kind(),
+        SyntaxKind::SelectExpr
+            | SyntaxKind::UpdateExpr
+            | SyntaxKind::DeleteExpr
+            | SyntaxKind::ExecExpr
+    ) {
         return true;
     }
 
@@ -392,9 +446,10 @@ fn is_qsql_from_table_ident(token: &q_parser::SyntaxToken) -> bool {
     // IdentExpr is first child of ApplyExpr whose parent is ApplyExpr { from, … }.
     if parent.kind() == SyntaxKind::ApplyExpr
         && parent.first_child().as_ref() == Some(&ident_expr)
-        && let Some(grandparent) = parent.parent() {
-            return is_from_apply(&grandparent);
-        }
+        && let Some(grandparent) = parent.parent()
+    {
+        return is_from_apply(&grandparent);
+    }
 
     // Case 3: simple `from tbl` in an ApplyExpr chain (no table args, no where
     // clause). Parser emits ApplyExpr { IdentExpr("from"), IdentExpr("tbl") }.
@@ -410,12 +465,23 @@ fn is_qsql_from_table_ident(token: &q_parser::SyntaxToken) -> bool {
 /// a `TableExpr` — e.g. the `id` in `([id:`u#`long$()]...)`.
 /// These are column definitions, not references to globals.
 fn is_col_def_in_table(token: &q_parser::SyntaxToken) -> bool {
-    let Some(ident_expr) = token.parent() else { return false };
-    if ident_expr.kind() != SyntaxKind::IdentExpr { return false; }
-    let Some(bin) = ident_expr.parent() else { return false };
-    if bin.kind() != SyntaxKind::BinExpr { return false; }
-    if bin.first_child().as_ref() != Some(&ident_expr) { return false; }
-    let has_colon = bin.children_with_tokens()
+    let Some(ident_expr) = token.parent() else {
+        return false;
+    };
+    if ident_expr.kind() != SyntaxKind::IdentExpr {
+        return false;
+    }
+    let Some(bin) = ident_expr.parent() else {
+        return false;
+    };
+    if bin.kind() != SyntaxKind::BinExpr {
+        return false;
+    }
+    if bin.first_child().as_ref() != Some(&ident_expr) {
+        return false;
+    }
+    let has_colon = bin
+        .children_with_tokens()
         .filter_map(q_parser::SyntaxElement::into_token)
         .any(|t| matches!(t.kind(), SyntaxKind::Colon | SyntaxKind::ColonColon));
     has_colon && bin.ancestors().any(|n| n.kind() == SyntaxKind::TableExpr)
@@ -423,12 +489,16 @@ fn is_col_def_in_table(token: &q_parser::SyntaxToken) -> bool {
 
 /// True when `node` is an `ApplyExpr` whose first child is `IdentExpr("from")`.
 fn is_from_apply(node: &q_parser::SyntaxNode) -> bool {
-    if node.kind() != SyntaxKind::ApplyExpr { return false; }
+    if node.kind() != SyntaxKind::ApplyExpr {
+        return false;
+    }
     node.first_child()
         .filter(|fc| fc.kind() == SyntaxKind::IdentExpr)
-        .is_some_and(|fc| fc.children_with_tokens()
-            .filter_map(q_parser::SyntaxElement::into_token)
-            .any(|t| t.kind() == SyntaxKind::Ident && t.text() == "from"))
+        .is_some_and(|fc| {
+            fc.children_with_tokens()
+                .filter_map(q_parser::SyntaxElement::into_token)
+                .any(|t| t.kind() == SyntaxKind::Ident && t.text() == "from")
+        })
 }
 
 #[cfg(test)]
@@ -441,9 +511,7 @@ mod tests {
         let pos = doc.position_of(cursor);
         find_references(&doc, pos, include_decl, &uri)
             .into_iter()
-            .map(|loc| {
-                doc.offset_of(loc.range.start)
-            })
+            .map(|loc| doc.offset_of(loc.range.start))
             .collect()
     }
 
@@ -530,7 +598,10 @@ mod tests {
         let cursor = src.find("cache:1").unwrap();
         let r = refs(src, cursor, true);
         let sym_off = src.find("`.cache.cache").unwrap();
-        assert!(r.contains(&sym_off), "update-from symbol ref missing; got {r:?}");
+        assert!(
+            r.contains(&sym_off),
+            "update-from symbol ref missing; got {r:?}"
+        );
     }
 
     #[test]
@@ -540,7 +611,10 @@ mod tests {
         let cursor = src.find("cache:1").unwrap();
         let r = refs(src, cursor, true);
         let sym_off = src.find("`.cache.cache").unwrap();
-        assert!(r.contains(&sym_off), "lambda delete symbol ref missing; got {r:?}");
+        assert!(
+            r.contains(&sym_off),
+            "lambda delete symbol ref missing; got {r:?}"
+        );
     }
 
     #[test]
@@ -550,7 +624,10 @@ mod tests {
         let cursor = src.find("cache:1").unwrap();
         let r = refs(src, cursor, true);
         let tbl_off = src.rfind(".cache.cache").unwrap();
-        assert!(r.contains(&tbl_off), "select from table ref missing; got {r:?}");
+        assert!(
+            r.contains(&tbl_off),
+            "select from table ref missing; got {r:?}"
+        );
     }
 
     #[test]
@@ -569,10 +646,16 @@ mod tests {
             .collect();
         // Must find the bare `cache` def at line 2.
         let def_off = src.find("cache:1").unwrap();
-        assert!(r.contains(&def_off), "bare cache def not found from qualified cursor; got {r:?}");
+        assert!(
+            r.contains(&def_off),
+            "bare cache def not found from qualified cursor; got {r:?}"
+        );
         // Must find the bare `cache` use inside the lambda.
         let use_off = src.rfind("from cache").unwrap() + "from ".len();
-        assert!(r.contains(&use_off), "bare cache use inside lambda not found from qualified cursor; got {r:?}");
+        assert!(
+            r.contains(&use_off),
+            "bare cache use inside lambda not found from qualified cursor; got {r:?}"
+        );
     }
 
     #[test]
@@ -583,7 +666,10 @@ mod tests {
         let cursor = src.find("cache:1").unwrap();
         let r = refs(src, cursor, true);
         let tbl_off = src.rfind("from cache").unwrap() + "from ".len();
-        assert!(r.contains(&tbl_off), "exec from-table ref inside if missing; got {r:?}");
+        assert!(
+            r.contains(&tbl_off),
+            "exec from-table ref inside if missing; got {r:?}"
+        );
     }
 
     #[test]
@@ -593,7 +679,10 @@ mod tests {
         let cursor = src.find("cache:1").unwrap();
         let r = refs(src, cursor, true);
         let tbl_off = src.rfind("from cache").unwrap() + "from ".len();
-        assert!(r.contains(&tbl_off), "select from-table ref inside lambda missing; got {r:?}");
+        assert!(
+            r.contains(&tbl_off),
+            "select from-table ref inside lambda missing; got {r:?}"
+        );
     }
 
     #[test]
@@ -603,7 +692,10 @@ mod tests {
         let cursor = src.find("id:0j").unwrap();
         let r = refs(src, cursor, true);
         let qsql_off = src.find("date,id").unwrap() + "date,".len();
-        assert!(!r.contains(&qsql_off), "qsql column falsely included; got {r:?}");
+        assert!(
+            !r.contains(&qsql_off),
+            "qsql column falsely included; got {r:?}"
+        );
     }
 
     #[test]
@@ -614,7 +706,10 @@ mod tests {
         let cursor = src.find("id:0j").unwrap();
         let r = refs(src, cursor, true);
         let qsql_off = src.find("where id").unwrap() + "where ".len();
-        assert!(!r.contains(&qsql_off), "expr-level qsql col falsely included; got {r:?}");
+        assert!(
+            !r.contains(&qsql_off),
+            "expr-level qsql col falsely included; got {r:?}"
+        );
     }
 
     #[test]
@@ -624,7 +719,10 @@ mod tests {
         let cursor = src.find("id:0j").unwrap();
         let r = refs(src, cursor, true);
         let idx_off = src.find("r`id").unwrap() + 1; // offset of `id
-        assert!(!r.contains(&idx_off), "dict index falsely included; got {r:?}");
+        assert!(
+            !r.contains(&idx_off),
+            "dict index falsely included; got {r:?}"
+        );
     }
 
     #[test]
@@ -634,7 +732,10 @@ mod tests {
         let cursor = src.find("id:0j").unwrap();
         let r = refs(src, cursor, true);
         let sym_off = src.find(":`id").unwrap() + 1;
-        assert!(!r.contains(&sym_off), "rhs symbol falsely included; got {r:?}");
+        assert!(
+            !r.contains(&sym_off),
+            "rhs symbol falsely included; got {r:?}"
+        );
     }
 
     #[test]
@@ -645,7 +746,10 @@ mod tests {
         let r = refs(src, cursor, true);
         // col def offset
         let col_off = src.find("([id:").unwrap() + 2; // offset of `id` inside ([
-        assert!(!r.contains(&col_off), "table col def falsely included; got {r:?}");
+        assert!(
+            !r.contains(&col_off),
+            "table col def falsely included; got {r:?}"
+        );
         // the use site SHOULD be included
         let use_off = src.rfind("use:id").unwrap() + "use:".len();
         assert!(r.contains(&use_off), "use site missing; got {r:?}");
@@ -671,20 +775,30 @@ mod tests {
         let uri_b: Uri = "file:///b.q".parse().unwrap();
 
         let mut idx = WorkspaceIndex::default();
-        idx.index_file(uri_a.clone(), Document::new("sharedFn:{x+1}".to_string(), 0));
+        idx.index_file(
+            uri_a.clone(),
+            Document::new("sharedFn:{x+1}".to_string(), 0),
+        );
 
         let doc_b = Document::new("sharedFn 99".to_string(), 0);
         // cursor on `sharedFn` at offset 0
         let pos = doc_b.position_of(0);
 
-        let locs = find_references_with_workspace(
-            &doc_b, pos, true, &uri_b, &HashMap::new(), &idx,
-        );
+        let locs = find_references_with_workspace(&doc_b, pos, true, &uri_b, &HashMap::new(), &idx);
 
-        assert!(!locs.is_empty(), "must find references when def is in another file");
+        assert!(
+            !locs.is_empty(),
+            "must find references when def is in another file"
+        );
         let uris: Vec<_> = locs.iter().map(|l| &l.uri).collect();
-        assert!(uris.contains(&&uri_a), "must include def site in a.q: {locs:?}");
-        assert!(uris.contains(&&uri_b), "must include use site in b.q: {locs:?}");
+        assert!(
+            uris.contains(&&uri_a),
+            "must include def site in a.q: {locs:?}"
+        );
+        assert!(
+            uris.contains(&&uri_b),
+            "must include use site in b.q: {locs:?}"
+        );
     }
 
     #[test]
@@ -712,7 +826,10 @@ mod tests {
             &idx,
         );
         let b_locs: Vec<_> = locs.iter().filter(|l| l.uri == uri_b).collect();
-        assert!(!b_locs.is_empty(), "cross-file ref in b.q not found; got: {locs:?}");
+        assert!(
+            !b_locs.is_empty(),
+            "cross-file ref in b.q not found; got: {locs:?}"
+        );
     }
 
     #[test]
@@ -732,16 +849,23 @@ mod tests {
         let doc_a = Document::new(src_a.clone(), 0);
         // Cursor on the param declaration `x` in `{[x] ...}`
         let param_pos = doc_a.position_of(src_a.find("{[x]").unwrap() + 2);
-        let locs = find_references_with_workspace(&doc_a, param_pos, true, &uri_a, &HashMap::new(), &idx);
+        let locs =
+            find_references_with_workspace(&doc_a, param_pos, true, &uri_a, &HashMap::new(), &idx);
         let b_locs: Vec<_> = locs.iter().filter(|l| l.uri == uri_b).collect();
-        assert!(b_locs.is_empty(), "lambda param must not cross-file scan: {locs:?}");
+        assert!(
+            b_locs.is_empty(),
+            "lambda param must not cross-file scan: {locs:?}"
+        );
         // All returned refs must be inside the lambda body/param list
         let global_x_off = src_a.find("x:99").unwrap();
         let any_global = locs.iter().any(|l| {
             let off = doc_a.offset_of(l.range.start);
             off == global_x_off
         });
-        assert!(!any_global, "global x:99 must not appear in param refs: {locs:?}");
+        assert!(
+            !any_global,
+            "global x:99 must not appear in param refs: {locs:?}"
+        );
     }
 
     #[test]
@@ -763,7 +887,10 @@ mod tests {
         let x_pos = doc_a.position_of(src_a.find("x:42").unwrap());
         let locs = find_references_with_workspace(&doc_a, x_pos, true, &uri_a, &open_docs, &idx);
         let b_locs: Vec<_> = locs.iter().filter(|l| l.uri == uri_b).collect();
-        assert!(b_locs.is_empty(), "lambda local must not find cross-file refs: {locs:?}");
+        assert!(
+            b_locs.is_empty(),
+            "lambda local must not find cross-file refs: {locs:?}"
+        );
     }
 }
 
@@ -779,7 +906,8 @@ mod aoc_tests {
         let src = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../crates/parser/tests/data/real_q/aoc.q"
-        )).expect("aoc.q");
+        ))
+        .expect("aoc.q");
 
         let doc = Document::new(src.clone(), 0);
         let uri: Uri = "file:///aoc.q".parse().unwrap();
@@ -790,8 +918,16 @@ mod aoc_tests {
         let refs_from_def = find_references(&doc, doc.position_of(def_cursor), true, &uri);
         let refs_from_ref = find_references(&doc, doc.position_of(ref_cursor), true, &uri);
 
-        assert!(refs_from_def.len() >= 2, "from def: expected ≥2, got {}", refs_from_def.len());
-        assert!(refs_from_ref.len() >= 2, "from ref: expected ≥2, got {}", refs_from_ref.len());
+        assert!(
+            refs_from_def.len() >= 2,
+            "from def: expected ≥2, got {}",
+            refs_from_def.len()
+        );
+        assert!(
+            refs_from_ref.len() >= 2,
+            "from ref: expected ≥2, got {}",
+            refs_from_ref.len()
+        );
     }
 }
 
@@ -805,13 +941,16 @@ mod vscode_simulation {
         let src = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../crates/parser/tests/data/real_q/aoc.q"
-        )).expect("aoc.q");
+        ))
+        .expect("aoc.q");
         let doc = Document::new(src.clone(), 0);
         let uri: Uri = "file:///aoc.q".parse().unwrap();
         let def_cursor = src.find("minus:").unwrap();
         let refs = find_references(&doc, doc.position_of(def_cursor), false, &uri);
         eprintln!("include_decl=false from def: {} refs", refs.len());
-        for r in &refs { eprintln!("  {:?}", r.range); }
+        for r in &refs {
+            eprintln!("  {:?}", r.range);
+        }
         assert!(!refs.is_empty(), "expected ref site to be found, got 0");
     }
 
@@ -820,14 +959,17 @@ mod vscode_simulation {
         let src = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../crates/parser/tests/data/real_q/aoc.q"
-        )).expect("aoc.q");
+        ))
+        .expect("aoc.q");
         let doc = Document::new(src.clone(), 0);
         let uri: Uri = "file:///aoc.q".parse().unwrap();
         // cursor on `loc` in `loc: x[0]+...`
         let def_cursor = src.find("loc:").unwrap();
         let refs = find_references(&doc, doc.position_of(def_cursor), false, &uri);
         eprintln!("loc include_decl=false from def: {} refs", refs.len());
-        for r in &refs { eprintln!("  {:?}", r.range); }
+        for r in &refs {
+            eprintln!("  {:?}", r.range);
+        }
         assert!(!refs.is_empty(), "expected ref sites to be found, got 0");
     }
 }

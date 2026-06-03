@@ -1,7 +1,7 @@
-#[allow(clippy::wildcard_imports)]
-use tower_lsp_server::ls_types::*;
 use crate::document::Document;
 use crate::workspace_index::WorkspaceIndex;
+#[allow(clippy::wildcard_imports)]
+use tower_lsp_server::ls_types::*;
 
 #[allow(dead_code)]
 pub fn goto_definition(doc: &Document, pos: Position, uri: &Uri) -> Option<GotoDefinitionResponse> {
@@ -19,7 +19,7 @@ pub fn goto_definition_with_workspace(
 
     // 1. Try same-file resolution first.
     if let Some(def_offset) = doc.sym_table().resolve(offset, name) {
-        let def_pos = doc.position_of(def_offset);
+        let def_pos = doc.position_of(def_offset as usize);
         return Some(GotoDefinitionResponse::Scalar(Location {
             uri: uri.clone(),
             range: Range::new(def_pos, def_pos),
@@ -54,7 +54,7 @@ mod tests {
 
     fn def_offset(src: &str, cursor_byte: usize, name: &str) -> Option<usize> {
         let doc = Document::new(src.to_string(), 0);
-        doc.sym_table().resolve(cursor_byte, name)
+        doc.sym_table().resolve(cursor_byte, name).map(|o| o as usize)
     }
 
     #[test]
@@ -240,7 +240,8 @@ mod tests {
                 let src = std::fs::read_to_string(concat!(
                     env!("CARGO_MANIFEST_DIR"),
                     "/../parser/tests/data/real_q/dbmaint.q",
-                )).expect("dbmaint.q fixture");
+                ))
+                .expect("dbmaint.q fixture");
 
                 let body_marker = "newVal:fn ";
                 let cursor = src.find(body_marker).unwrap() + "newVal:".len();
@@ -248,9 +249,11 @@ mod tests {
                 let param_off = src[lambda_open..].find("fn]").unwrap() + lambda_open;
 
                 let off = def_offset(&src, cursor, "fn").expect("found");
-                assert_eq!(off, param_off,
+                assert_eq!(
+                    off, param_off,
                     "expected goto-def to land on fn1Col's `fn` parameter \
-                     at byte {param_off}, got {off}");
+                     at byte {param_off}, got {off}"
+                );
             })
             .unwrap()
             .join()

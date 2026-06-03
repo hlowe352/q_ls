@@ -4,10 +4,8 @@
 //! legend below, then emits the LSP delta-encoded
 //! `[deltaLine, deltaStart, length, type, modifiers]` quintuples.
 
-use tower_lsp_server::ls_types::{
-    SemanticToken, SemanticTokenModifier, SemanticTokenType,
-};
 use q_parser::{SyntaxKind, SyntaxToken};
+use tower_lsp_server::ls_types::{SemanticToken, SemanticTokenModifier, SemanticTokenType};
 
 use crate::builtins::is_builtin;
 use crate::document::Document;
@@ -16,15 +14,15 @@ use crate::document::Document;
 /// with `TYPE_*` consts below — `legend()` returns it for capability
 /// registration.
 pub const TYPES: &[SemanticTokenType] = &[
-    SemanticTokenType::FUNCTION,   // 0
-    SemanticTokenType::VARIABLE,   // 1
-    SemanticTokenType::PARAMETER,  // 2
-    SemanticTokenType::NAMESPACE,  // 3
-    SemanticTokenType::KEYWORD,    // 4
-    SemanticTokenType::STRING,     // 5
-    SemanticTokenType::NUMBER,     // 6
-    SemanticTokenType::COMMENT,    // 7
-    SemanticTokenType::OPERATOR,   // 8
+    SemanticTokenType::FUNCTION,  // 0
+    SemanticTokenType::VARIABLE,  // 1
+    SemanticTokenType::PARAMETER, // 2
+    SemanticTokenType::NAMESPACE, // 3
+    SemanticTokenType::KEYWORD,   // 4
+    SemanticTokenType::STRING,    // 5
+    SemanticTokenType::NUMBER,    // 6
+    SemanticTokenType::COMMENT,   // 7
+    SemanticTokenType::OPERATOR,  // 8
 ];
 
 const TYPE_FUNCTION: u32 = 0;
@@ -107,8 +105,6 @@ pub fn semantic_tokens(doc: &Document) -> Vec<SemanticToken> {
     out
 }
 
-
-
 /// Classify a single token. Returns `(type_index, modifiers_bitset)` or
 /// `None` if the token shouldn't be highlighted (whitespace, structural
 /// punctuation we leave to the editor's grammar).
@@ -121,17 +117,17 @@ fn classify_token(tok: &SyntaxToken) -> Option<(u32, u32)> {
 
         String | Symbol | FileSymbol => Some((TYPE_STRING, 0)),
 
-        Integer | Float | Timestamp | Date | Month | Guid | Timespan
-        | Datetime | Minute | Second | Time | ByteList => Some((TYPE_NUMBER, 0)),
+        Integer | Float | Timestamp | Date | Month | Guid | Timespan | Datetime | Minute
+        | Second | Time | ByteList => Some((TYPE_NUMBER, 0)),
 
         DslLine | SystemCmd | Exit => Some((TYPE_KEYWORD, 0)),
 
         // Operator tokens.
-        Colon | ColonColon | CompoundAssign | Plus | Minus | Star | Slash
-        | Backslash | Percent | Bang | Amp | Pipe | Caret | Hash
-        | Underscore | Tilde | Dollar | Query | At | Dot | Comma | Eq
-        | Lt | Gt | NotEq | LtEq | GtEq | Each | EachPrior | EachLeft
-        | EachRight => Some((TYPE_OPERATOR, 0)),
+        Colon | ColonColon | CompoundAssign | Plus | Minus | Star | Slash | Backslash | Percent
+        | Bang | Amp | Pipe | Caret | Hash | Underscore | Tilde | Dollar | Query | At | Dot
+        | Comma | Eq | Lt | Gt | NotEq | LtEq | GtEq | Each | EachPrior | EachLeft | EachRight => {
+            Some((TYPE_OPERATOR, 0))
+        }
 
         Ident | DottedIdent => Some(classify_ident(tok)),
 
@@ -170,7 +166,8 @@ fn classify_ident(tok: &SyntaxToken) -> (u32, u32) {
         .is_some_and(|gp| {
             gp.kind() == SyntaxKind::BinExpr
                 && gp.first_child().as_ref() == parent.as_ref()
-                && gp.children_with_tokens()
+                && gp
+                    .children_with_tokens()
                     .filter_map(q_parser::SyntaxElement::into_token)
                     .any(|t| matches!(t.kind(), SyntaxKind::Colon | SyntaxKind::ColonColon))
         });
@@ -206,7 +203,10 @@ mod tests {
         let toks = semantic_tokens(&doc);
         let first = &toks[0];
         assert_eq!(first.token_type, TYPE_VARIABLE);
-        assert_eq!(first.token_modifiers_bitset & MOD_DECLARATION, MOD_DECLARATION);
+        assert_eq!(
+            first.token_modifiers_bitset & MOD_DECLARATION,
+            MOD_DECLARATION
+        );
     }
 
     #[test]
@@ -223,7 +223,11 @@ mod tests {
         let mut comment_spans: Vec<(u32, u32, u32)> = Vec::new();
         for t in &toks {
             line += t.delta_line;
-            col = if t.delta_line == 0 { col + t.delta_start } else { t.delta_start };
+            col = if t.delta_line == 0 {
+                col + t.delta_start
+            } else {
+                t.delta_start
+            };
             if t.token_type == TYPE_COMMENT {
                 comment_spans.push((line, col, t.length));
             }
@@ -273,5 +277,4 @@ mod tests {
         assert_eq!(TYPES[TYPE_COMMENT as usize], SemanticTokenType::COMMENT);
         assert_eq!(TYPES[TYPE_OPERATOR as usize], SemanticTokenType::OPERATOR);
     }
-
 }

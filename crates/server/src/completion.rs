@@ -1,8 +1,8 @@
-#[allow(clippy::wildcard_imports)]
-use tower_lsp_server::ls_types::*;
 use crate::builtins::BUILTINS;
 use crate::document::Document;
 use crate::workspace_index::WorkspaceIndex;
+#[allow(clippy::wildcard_imports)]
+use tower_lsp_server::ls_types::*;
 
 fn get_prefix(text: &str, offset: usize) -> String {
     let before = &text[..offset.min(text.len())];
@@ -71,8 +71,8 @@ pub fn complete(doc: &Document, pos: Position) -> Vec<CompletionItem> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace_index::WorkspaceIndex;
     use crate::document::Document;
+    use crate::workspace_index::WorkspaceIndex;
 
     #[test]
     fn workspace_globals_appear_in_completion() {

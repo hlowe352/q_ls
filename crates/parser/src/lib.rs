@@ -21,12 +21,12 @@
 pub mod event;
 pub mod grammar;
 pub mod parser;
-pub mod syntax_kind;
 pub mod sink;
+pub mod syntax_kind;
 
-pub use syntax_kind::{QLang, SyntaxKind, SyntaxNode, SyntaxToken, SyntaxElement};
 pub use parser::ParseError;
 pub use rowan::{TextRange, TextSize};
+pub use syntax_kind::{QLang, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
 
 use rowan::GreenNode;
 
@@ -811,10 +811,17 @@ show q1b[];
 
     #[test]
     fn parse_compound_assign_various() {
-        for op in ["*:", "%:", ">:", "<:", "~:", "=:", "_:", "#:", "$:", "!:", "|:", "&:", "?:", "^:", "@:"] {
+        for op in [
+            "*:", "%:", ">:", "<:", "~:", "=:", "_:", "#:", "$:", "!:", "|:", "&:", "?:", "^:",
+            "@:",
+        ] {
             let source = format!("x{op}1");
             let parse = parse(&source);
-            assert!(parse.errors.is_empty(), "errors for {op}: {:?}", parse.errors);
+            assert!(
+                parse.errors.is_empty(),
+                "errors for {op}: {:?}",
+                parse.errors
+            );
         }
     }
 
@@ -876,7 +883,11 @@ show q1b[];
         for suffix in ["g", "m", "n", "p", "u", "v", "z"] {
             let source = format!("0W{suffix}");
             let parse = parse(&source);
-            assert!(parse.errors.is_empty(), "errors for 0W{suffix}: {:?}", parse.errors);
+            assert!(
+                parse.errors.is_empty(),
+                "errors for 0W{suffix}: {:?}",
+                parse.errors
+            );
         }
     }
 
@@ -954,8 +965,14 @@ show q1b[];
         let parse = parse("(3#p),fn");
         assert!(parse.errors.is_empty(), "errors: {:?}", parse.errors);
         let dump = format!("{:#?}", parse.syntax());
-        assert!(!dump.contains("DslLine"), "should not lex as DslLine:\n{dump}");
-        assert!(!dump.contains("DslStmt"), "should not parse as DslStmt:\n{dump}");
+        assert!(
+            !dump.contains("DslLine"),
+            "should not lex as DslLine:\n{dump}"
+        );
+        assert!(
+            !dump.contains("DslStmt"),
+            "should not parse as DslStmt:\n{dump}"
+        );
     }
 
     /// Regression: `k)` and `p)` at line start ARE the DSL escape.
@@ -977,7 +994,10 @@ show q1b[];
         let dump = format!("{:#?}", parse.syntax());
         // The whole thing should be a single statement (one ExprStmt).
         let count = dump.matches("ExprStmt").count();
-        assert_eq!(count, 1, "expected 1 stmt (continuation), got {count}:\n{dump}");
+        assert_eq!(
+            count, 1,
+            "expected 1 stmt (continuation), got {count}:\n{dump}"
+        );
     }
 
     /// Regression: a non-indented next line IS a new statement boundary.
