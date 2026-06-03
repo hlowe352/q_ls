@@ -75,6 +75,7 @@ fn expr_bp(p: &mut Parser, min_bp: u8) {
         // However, don't parse juxtaposition across a newline; that terminates the statement.
         // In qSQL column lists, also stop before clause keywords so `from`/`by`/`where`
         // end the column expression rather than being consumed as arguments.
+        // Also stop before `,` in comma-stop mode so it acts as a list separator.
         if can_start_expr(p)
             && !p.has_preceding_newline()
             && !(p.qsql_stop
@@ -82,6 +83,7 @@ fn expr_bp(p: &mut Parser, min_bp: u8) {
                     p.current_text().as_deref(),
                     Some("from" | "by" | "where")
                 ))
+            && !(p.qsql_comma_stop && p.current() == Some(SyntaxKind::Comma))
         {
             let (l_bp, r_bp) = (1u8, 0u8);
             if l_bp < min_bp {
@@ -132,6 +134,10 @@ fn atom(p: &mut Parser) -> Option<CompletedMarker> {
 
         // Identifiers (with control word detection)
         SyntaxKind::Ident | SyntaxKind::DottedIdent => {
+            // qSQL keywords in expression position: select/exec/update/delete
+            if kind == SyntaxKind::Ident && super::qsql::at_qsql_keyword(p) {
+                return Some(super::qsql::parse_qsql(p));
+            }
             // Control words: if[...], do[...], while[...]
             if kind == SyntaxKind::Ident
                 && p.nth(1) == Some(SyntaxKind::LBracket)
@@ -285,6 +291,10 @@ fn atom(p: &mut Parser) -> Option<CompletedMarker> {
 #[allow(clippy::unnecessary_wraps)]
 fn parse_progn(p: &mut Parser) -> Option<CompletedMarker> {
     let m = p.start();
+    let saved_stop = p.qsql_stop;
+    let saved_comma = p.qsql_comma_stop;
+    p.qsql_stop = false;
+    p.qsql_comma_stop = false;
     p.expect(SyntaxKind::LBracket);
     while !p.at(SyntaxKind::RBracket) && !p.at_end() {
         if p.at(SyntaxKind::Semi) {
@@ -297,17 +307,25 @@ fn parse_progn(p: &mut Parser) -> Option<CompletedMarker> {
         }
     }
     p.expect(SyntaxKind::RBracket);
+    p.qsql_stop = saved_stop;
+    p.qsql_comma_stop = saved_comma;
     Some(m.complete(p, SyntaxKind::PrognExpr))
 }
 
 #[allow(clippy::unnecessary_wraps)]
 fn parse_paren(p: &mut Parser) -> Option<CompletedMarker> {
     let m = p.start();
+    let saved_stop = p.qsql_stop;
+    let saved_comma = p.qsql_comma_stop;
+    p.qsql_stop = false;
+    p.qsql_comma_stop = false;
     p.bump(); // (
 
     // Empty list: ()
     if p.at(SyntaxKind::RParen) {
         p.bump();
+        p.qsql_stop = saved_stop;
+        p.qsql_comma_stop = saved_comma;
         return Some(m.complete(p, SyntaxKind::ListExpr));
     }
 
@@ -330,13 +348,15 @@ fn parse_paren(p: &mut Parser) -> Option<CompletedMarker> {
             }
         }
         p.expect(SyntaxKind::RParen);
+        p.qsql_stop = saved_stop;
+        p.qsql_comma_stop = saved_comma;
         return Some(m.complete(p, SyntaxKind::TableExpr));
     }
 
     // First entry (expression or assignment)
     parse_list_entry(p);
 
-    if p.at(SyntaxKind::Semi) {
+    let result = if p.at(SyntaxKind::Semi) {
         // List: (expr; expr; ...)
         while p.eat(SyntaxKind::Semi) {
             if !p.at(SyntaxKind::RParen) {
@@ -344,12 +364,15 @@ fn parse_paren(p: &mut Parser) -> Option<CompletedMarker> {
             }
         }
         p.expect(SyntaxKind::RParen);
-        Some(m.complete(p, SyntaxKind::ListExpr))
+        m.complete(p, SyntaxKind::ListExpr)
     } else {
         // Simple paren: (expr)
         p.expect(SyntaxKind::RParen);
-        Some(m.complete(p, SyntaxKind::ParenExpr))
-    }
+        m.complete(p, SyntaxKind::ParenExpr)
+    };
+    p.qsql_stop = saved_stop;
+    p.qsql_comma_stop = saved_comma;
+    Some(result)
 }
 
 /// Parse a control word: if[...], do[...], while[...]
@@ -364,6 +387,10 @@ fn parse_control_word(p: &mut Parser, kind: SyntaxKind) -> Option<CompletedMarke
 #[allow(clippy::unnecessary_wraps)]
 fn parse_lambda(p: &mut Parser) -> Option<CompletedMarker> {
     let m = p.start();
+    let saved_stop = p.qsql_stop;
+    let saved_comma = p.qsql_comma_stop;
+    p.qsql_stop = false;
+    p.qsql_comma_stop = false;
     p.bump(); // {
 
     // Optional parameter list: [x;y;z] or [x:type;y:type;z]
@@ -411,6 +438,8 @@ fn parse_lambda(p: &mut Parser) -> Option<CompletedMarker> {
         }
     }
     p.expect(SyntaxKind::RBrace);
+    p.qsql_stop = saved_stop;
+    p.qsql_comma_stop = saved_comma;
     Some(m.complete(p, SyntaxKind::Lambda))
 }
 
@@ -437,6 +466,10 @@ fn parse_list_entry(p: &mut Parser) {
 /// Arguments can be expressions or assignments (e.g. `$[x:cond;true;false]`).
 pub fn parse_arg_list(p: &mut Parser) {
     let m = p.start();
+    let saved_stop = p.qsql_stop;
+    let saved_comma = p.qsql_comma_stop;
+    p.qsql_stop = false;
+    p.qsql_comma_stop = false;
     p.expect(SyntaxKind::LBracket);
     while !p.at(SyntaxKind::RBracket) && !p.at_end() {
         // Allow empty args (trailing semicolons like $[cond;true;])
@@ -450,6 +483,8 @@ pub fn parse_arg_list(p: &mut Parser) {
         }
     }
     p.expect(SyntaxKind::RBracket);
+    p.qsql_stop = saved_stop;
+    p.qsql_comma_stop = saved_comma;
     m.complete(p, SyntaxKind::ArgList);
 }
 
@@ -461,6 +496,10 @@ fn parse_arg_entry(p: &mut Parser) {
 /// Returns the current token if it is a binary (dyadic) operator.
 fn binary_op(p: &Parser) -> Option<SyntaxKind> {
     let kind = p.current()?;
+    // In qSQL column-list / where-clause context, comma is a separator, not enlist dyad.
+    if p.qsql_comma_stop && kind == SyntaxKind::Comma {
+        return None;
+    }
     // Operator followed by `[` is functional form (op[args]), not dyadic.
     // e.g. `@[tab;col;:;val]` is amend, `$[cond;t;f]` is conditional.
     if p.nth(1) == Some(SyntaxKind::LBracket) {

@@ -1,5 +1,5 @@
 use super::expressions;
-use crate::parser::Parser;
+use crate::parser::{CompletedMarker, Parser};
 use crate::syntax_kind::SyntaxKind;
 
 /// Check if current token is a qSQL keyword.
@@ -18,7 +18,7 @@ pub fn at_qsql_keyword(p: &Parser) -> bool {
 ///
 /// Panics if called when the current token is not a qSQL keyword (i.e.,
 /// when [`at_qsql_keyword`] would return `false`).
-pub fn parse_qsql(p: &mut Parser) {
+pub fn parse_qsql(p: &mut Parser) -> CompletedMarker {
     let text = p.current_text().unwrap();
     match text {
         "select" => parse_select(p),
@@ -29,7 +29,7 @@ pub fn parse_qsql(p: &mut Parser) {
     }
 }
 
-fn parse_select(p: &mut Parser) {
+fn parse_select(p: &mut Parser) -> CompletedMarker {
     let m = p.start();
     p.bump(); // "select"
 
@@ -85,10 +85,10 @@ fn parse_select(p: &mut Parser) {
         wm.complete(p, SyntaxKind::WhereClause);
     }
 
-    m.complete(p, SyntaxKind::SelectExpr);
+    m.complete(p, SyntaxKind::SelectExpr)
 }
 
-fn parse_exec(p: &mut Parser) {
+fn parse_exec(p: &mut Parser) -> CompletedMarker {
     let m = p.start();
     p.bump(); // "exec"
 
@@ -122,10 +122,10 @@ fn parse_exec(p: &mut Parser) {
         wm.complete(p, SyntaxKind::WhereClause);
     }
 
-    m.complete(p, SyntaxKind::ExecExpr);
+    m.complete(p, SyntaxKind::ExecExpr)
 }
 
-fn parse_update(p: &mut Parser) {
+fn parse_update(p: &mut Parser) -> CompletedMarker {
     let m = p.start();
     p.bump(); // "update"
 
@@ -147,10 +147,10 @@ fn parse_update(p: &mut Parser) {
         wm.complete(p, SyntaxKind::WhereClause);
     }
 
-    m.complete(p, SyntaxKind::UpdateExpr);
+    m.complete(p, SyntaxKind::UpdateExpr)
 }
 
-fn parse_delete(p: &mut Parser) {
+fn parse_delete(p: &mut Parser) -> CompletedMarker {
     let m = p.start();
     p.bump(); // "delete"
 
@@ -172,14 +172,16 @@ fn parse_delete(p: &mut Parser) {
         wm.complete(p, SyntaxKind::WhereClause);
     }
 
-    m.complete(p, SyntaxKind::DeleteExpr);
+    m.complete(p, SyntaxKind::DeleteExpr)
 }
 
 /// Parse comma-separated column expressions, stopping at qSQL keywords.
 fn parse_column_list(p: &mut Parser) {
     let m = p.start();
-    let saved = p.qsql_stop;
+    let saved_stop = p.qsql_stop;
+    let saved_comma = p.qsql_comma_stop;
     p.qsql_stop = true;
+    p.qsql_comma_stop = true;
     loop {
         if at_kw(p, "from") || at_kw(p, "by") || at_kw(p, "where") || p.at_end() || at_stmt_end(p) {
             break;
@@ -189,12 +191,15 @@ fn parse_column_list(p: &mut Parser) {
             break;
         }
     }
-    p.qsql_stop = saved;
+    p.qsql_stop = saved_stop;
+    p.qsql_comma_stop = saved_comma;
     m.complete(p, SyntaxKind::ColumnList);
 }
 
 /// Parse comma-separated where conditions.
 fn parse_where_list(p: &mut Parser) {
+    let saved = p.qsql_comma_stop;
+    p.qsql_comma_stop = true;
     loop {
         if p.at_end() || at_stmt_end(p) {
             break;
@@ -204,6 +209,7 @@ fn parse_where_list(p: &mut Parser) {
             break;
         }
     }
+    p.qsql_comma_stop = saved;
 }
 
 /// Check if current token is a specific contextual keyword.
@@ -320,5 +326,78 @@ mod tests {
         assert!(p.errors.is_empty(), "unexpected errors: {:?}", p.errors);
         assert!(dump.contains("WhereClause"), "no WhereClause:\n{dump}");
         assert!(dump.contains("DeleteExpr"), "got:\n{dump}");
+    }
+
+    // Bug 1 regression: qSQL in expression position.
+
+    #[test]
+    fn select_as_rhs_of_assign() {
+        let p = parse("t:select a from t");
+        let dump = format!("{:#?}", p.syntax());
+        assert!(p.errors.is_empty(), "unexpected errors: {:?}", p.errors);
+        assert!(dump.contains("SelectExpr"), "no SelectExpr:\n{dump}");
+        assert!(dump.contains("BinExpr"), "no BinExpr:\n{dump}");
+    }
+
+    #[test]
+    fn select_inside_parens() {
+        let p = parse("0!select a from t");
+        let dump = format!("{:#?}", p.syntax());
+        assert!(p.errors.is_empty(), "unexpected errors: {:?}", p.errors);
+        assert!(dump.contains("SelectExpr"), "no SelectExpr:\n{dump}");
+    }
+
+    #[test]
+    fn nested_select_in_from() {
+        let p = parse("select a from (select b from t)");
+        let dump = format!("{:#?}", p.syntax());
+        assert!(p.errors.is_empty(), "unexpected errors: {:?}", p.errors);
+        // Both outer and inner select should produce SelectExpr nodes.
+        let count = dump.matches("SelectExpr").count();
+        assert!(count >= 2, "expected >=2 SelectExpr, got {count}:\n{dump}");
+    }
+
+    // Bug 2 regression: comma in column list parsed as separator, not enlist.
+
+    #[test]
+    fn column_list_comma_is_separator() {
+        use crate::syntax_kind::SyntaxKind;
+        let p = parse("select a:b+c,d:e*f from t");
+        assert!(p.errors.is_empty(), "unexpected errors: {:?}", p.errors);
+        let root = p.syntax();
+        let col_list = root
+            .descendants()
+            .find(|n| n.kind() == SyntaxKind::ColumnList)
+            .expect("ColumnList not found");
+        // Two node children (the column expressions — parse_column_list wraps
+        // no ExprStmt, so we count all child nodes).
+        let col_count = col_list.children().count();
+        assert_eq!(col_count, 2, "expected 2 columns, got {col_count}:\n{}", format!("{col_list:#?}"));
+    }
+
+    #[test]
+    fn column_list_paren_comma_still_works() {
+        // Comma inside parens within a column list must remain the enlist dyad.
+        let p = parse("select a:x, b:(x,y) from t");
+        let dump = format!("{:#?}", p.syntax());
+        assert!(p.errors.is_empty(), "unexpected errors: {:?}", p.errors);
+        assert!(dump.contains("SelectExpr"), "no SelectExpr:\n{dump}");
+    }
+
+    // Bug 3 regression: comma in where clause parsed as separator, not enlist.
+
+    #[test]
+    fn where_clause_comma_is_separator() {
+        use crate::syntax_kind::SyntaxKind;
+        let p = parse("select a from t where d>0,e<1");
+        assert!(p.errors.is_empty(), "unexpected errors: {:?}", p.errors);
+        let root = p.syntax();
+        let where_clause = root
+            .descendants()
+            .find(|n| n.kind() == SyntaxKind::WhereClause)
+            .expect("WhereClause not found");
+        // Two node children (the condition expressions).
+        let cond_count = where_clause.children().count();
+        assert_eq!(cond_count, 2, "expected 2 conditions, got {cond_count}:\n{}", format!("{where_clause:#?}"));
     }
 }

@@ -39,15 +39,7 @@ pub fn statement(p: &mut Parser) {
         return;
     }
 
-    // qSQL
-    if qsql::at_qsql_keyword(p) {
-        let m = p.start();
-        qsql::parse_qsql(p);
-        m.complete(p, SyntaxKind::ExprStmt);
-        return;
-    }
-
-    // Expression (assignments like `x:42` are parsed as BinExpr(x, :, 42))
+    // Expression (assignments like `x:42` and qSQL are parsed via expr())
     let m = p.start();
     expressions::expr(p);
     m.complete(p, SyntaxKind::ExprStmt);
