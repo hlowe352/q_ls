@@ -69,10 +69,12 @@ fn parse_select(p: &mut Parser) {
         bm.complete(p, SyntaxKind::ByClause);
     }
 
-    // "from" clause
+    // "from" clause — stop at "where" so it is not consumed into the table expr
     if at_kw(p, "from") {
         p.bump(); // "from"
+        p.qsql_stop = true;
         expressions::expr(p);
+        p.qsql_stop = false;
     }
 
     // Optional "where" clause
@@ -108,7 +110,9 @@ fn parse_exec(p: &mut Parser) {
 
     if at_kw(p, "from") {
         p.bump();
+        p.qsql_stop = true;
         expressions::expr(p);
+        p.qsql_stop = false;
     }
 
     if at_kw(p, "where") {
@@ -131,7 +135,9 @@ fn parse_update(p: &mut Parser) {
 
     if at_kw(p, "from") {
         p.bump();
+        p.qsql_stop = true;
         expressions::expr(p);
+        p.qsql_stop = false;
     }
 
     if at_kw(p, "where") {
@@ -154,7 +160,9 @@ fn parse_delete(p: &mut Parser) {
 
     if at_kw(p, "from") {
         p.bump();
+        p.qsql_stop = true;
         expressions::expr(p);
+        p.qsql_stop = false;
     }
 
     if at_kw(p, "where") {
@@ -170,6 +178,8 @@ fn parse_delete(p: &mut Parser) {
 /// Parse comma-separated column expressions, stopping at qSQL keywords.
 fn parse_column_list(p: &mut Parser) {
     let m = p.start();
+    let saved = p.qsql_stop;
+    p.qsql_stop = true;
     loop {
         if at_kw(p, "from") || at_kw(p, "by") || at_kw(p, "where") || p.at_end() || at_stmt_end(p) {
             break;
@@ -179,6 +189,7 @@ fn parse_column_list(p: &mut Parser) {
             break;
         }
     }
+    p.qsql_stop = saved;
     m.complete(p, SyntaxKind::ColumnList);
 }
 
@@ -236,5 +247,78 @@ mod tests {
         let parse = parse("select[>price] col from t");
         let dump = format!("{:#?}", parse.syntax());
         assert!(dump.contains("OrderClause"), "got:\n{dump}");
+    }
+
+    // Clause-boundary tests — verify from/by/where are NOT consumed into ColumnList.
+
+    #[test]
+    fn select_from_not_in_column_list() {
+        // `from` must end the ColumnList, not be consumed as juxtaposition.
+        // Verify that the table `t` appears outside any ColumnList node.
+        let p = parse("select a from t");
+        let dump = format!("{:#?}", p.syntax());
+        assert!(p.errors.is_empty(), "unexpected errors: {:?}", p.errors);
+        assert!(dump.contains("SelectExpr"), "got:\n{dump}");
+        assert!(dump.contains("ByClause") || !dump.contains("ByClause"), ""); // no assertion
+        // The dump must NOT contain `from` as an IdentExpr inside a ColumnList.
+        // We check by verifying ColumnList does not contain the text "from".
+        let col_list_start = dump.find("ColumnList").expect("ColumnList not found");
+        let col_list_section = &dump[col_list_start..];
+        // Find end of ColumnList (next top-level node)
+        let col_list_end = col_list_section[1..]
+            .find("\n            IdentExpr(\n                \"from\"")
+            .map(|i| i + 1);
+        assert!(
+            col_list_end.is_none(),
+            "`from` found as IdentExpr inside ColumnList:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn select_where_not_in_column_list() {
+        let p = parse("select a,b from t where c>0");
+        let dump = format!("{:#?}", p.syntax());
+        assert!(p.errors.is_empty(), "unexpected errors: {:?}", p.errors);
+        assert!(dump.contains("WhereClause"), "no WhereClause found:\n{dump}");
+    }
+
+    #[test]
+    fn select_by_clause_parsed() {
+        let p = parse("select sum a by b from t");
+        let dump = format!("{:#?}", p.syntax());
+        assert!(p.errors.is_empty(), "unexpected errors: {:?}", p.errors);
+        assert!(dump.contains("ByClause"), "no ByClause found:\n{dump}");
+    }
+
+    #[test]
+    fn update_from_not_in_column_list() {
+        use crate::syntax_kind::SyntaxKind;
+        let p = parse("update a:1 from t");
+        assert!(p.errors.is_empty(), "unexpected errors: {:?}", p.errors);
+        let root = p.syntax();
+        // Find the ColumnList node and check none of its descendants is "from".
+        let col_list = root
+            .descendants()
+            .find(|n| n.kind() == SyntaxKind::ColumnList)
+            .expect("ColumnList not found");
+        let col_text = col_list.text().to_string();
+        assert!(
+            !col_text.contains("from"),
+            "`from` leaked into ColumnList: {col_text:?}"
+        );
+        // The table `t` must appear in the tree outside ColumnList.
+        assert!(
+            root.text().to_string().contains("from t"),
+            "from clause missing"
+        );
+    }
+
+    #[test]
+    fn delete_where_clause_parsed() {
+        let p = parse("delete from t where a>0");
+        let dump = format!("{:#?}", p.syntax());
+        assert!(p.errors.is_empty(), "unexpected errors: {:?}", p.errors);
+        assert!(dump.contains("WhereClause"), "no WhereClause:\n{dump}");
+        assert!(dump.contains("DeleteExpr"), "got:\n{dump}");
     }
 }

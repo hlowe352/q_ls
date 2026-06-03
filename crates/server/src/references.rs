@@ -371,6 +371,13 @@ fn is_inplace_table_symbol(token: &q_parser::SyntaxToken) -> bool {
     };
 
     match parent.kind() {
+        // After qSQL parse fix, the from-table LiteralExpr is a direct child of
+        // the qSQL statement node (no longer wrapped in an ApplyExpr chain).
+        SyntaxKind::DeleteExpr
+        | SyntaxKind::UpdateExpr
+        | SyntaxKind::SelectExpr
+        | SyntaxKind::ExecExpr => true,
+
         // `` `.t upsert rows `` / `` `.t insert rows ``
         // CST: BinExpr { LiteralExpr(sym), Ident("upsert"|"insert"), … }
         SyntaxKind::BinExpr => {

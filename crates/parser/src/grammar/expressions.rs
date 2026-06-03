@@ -73,7 +73,16 @@ fn expr_bp(p: &mut Parser, min_bp: u8) {
         // If the next token can start an expression (atom), treat it as
         // applying `lhs` to the next expression.
         // However, don't parse juxtaposition across a newline; that terminates the statement.
-        if can_start_expr(p) && !p.has_preceding_newline() {
+        // In qSQL column lists, also stop before clause keywords so `from`/`by`/`where`
+        // end the column expression rather than being consumed as arguments.
+        if can_start_expr(p)
+            && !p.has_preceding_newline()
+            && !(p.qsql_stop
+                && matches!(
+                    p.current_text().as_deref(),
+                    Some("from" | "by" | "where")
+                ))
+        {
             let (l_bp, r_bp) = (1u8, 0u8);
             if l_bp < min_bp {
                 break;
