@@ -1,7 +1,7 @@
+use crate::document::Document;
+use q_parser::{SyntaxKind, SyntaxNode, SyntaxToken};
 #[allow(clippy::wildcard_imports)]
 use tower_lsp_server::ls_types::*;
-use q_parser::{SyntaxKind, SyntaxNode, SyntaxToken};
-use crate::document::Document;
 
 pub fn document_symbols(doc: &Document) -> Vec<DocumentSymbol> {
     let root = doc.parse().syntax();
@@ -34,7 +34,10 @@ fn symbol_for_assign(doc: &Document, bin: &SyntaxNode) -> Option<DocumentSymbol>
 
     let sel_range = {
         let r = name_tok.text_range();
-        Range::new(doc.position_of(r.start().into()), doc.position_of(r.end().into()))
+        Range::new(
+            doc.position_of(r.start().into()),
+            doc.position_of(r.end().into()),
+        )
     };
 
     let lambda = find_rhs_lambda(bin);
@@ -95,9 +98,7 @@ fn peel_to_lambda(node: SyntaxNode) -> Option<SyntaxNode> {
             SyntaxKind::Lambda => return Some(cur),
             // ParenExpr wraps its inner expression in an ExprStmt — peel
             // both. AdverbExpr is a thin wrapper around its operand.
-            SyntaxKind::ParenExpr
-            | SyntaxKind::ExprStmt
-            | SyntaxKind::AdverbExpr => {
+            SyntaxKind::ParenExpr | SyntaxKind::ExprStmt | SyntaxKind::AdverbExpr => {
                 let next = cur.children().next()?;
                 cur = next;
             }
@@ -165,8 +166,11 @@ mod tests {
         let doc = Document::new("f:({x+1})".to_string(), 0);
         let syms = document_symbols(&doc);
         let f = syms.iter().find(|s| s.name == "f").expect("f present");
-        assert!(matches!(f.kind, SymbolKind::FUNCTION),
-            "paren-wrapped lambda RHS should still be FUNCTION, got {:?}", f.kind);
+        assert!(
+            matches!(f.kind, SymbolKind::FUNCTION),
+            "paren-wrapped lambda RHS should still be FUNCTION, got {:?}",
+            f.kind
+        );
     }
 
     #[test]
@@ -180,7 +184,10 @@ mod tests {
             "f should be VARIABLE (lambda is just an arg), got {:?}",
             f.kind
         );
-        assert!(f.children.is_none(), "f shouldn't carry the arg-lambda's locals");
+        assert!(
+            f.children.is_none(),
+            "f shouldn't carry the arg-lambda's locals"
+        );
     }
 
     #[test]

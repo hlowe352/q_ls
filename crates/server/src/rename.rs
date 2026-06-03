@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use tower_lsp_server::ls_types::{
-    PrepareRenameResponse, Position, Range, TextEdit, Uri, WorkspaceEdit,
+    Position, PrepareRenameResponse, Range, TextEdit, Uri, WorkspaceEdit,
 };
 
 use crate::builtins::is_builtin;
@@ -35,13 +35,15 @@ pub fn prepare_rename(doc: &Document, pos: Position) -> Option<PrepareRenameResp
 ///
 /// This is a single-file convenience wrapper around [`rename_with_workspace`].
 #[allow(dead_code)]
-pub fn rename(
-    doc: &Document,
-    pos: Position,
-    new_name: &str,
-    uri: &Uri,
-) -> Option<WorkspaceEdit> {
-    rename_with_workspace(doc, pos, new_name, uri, &HashMap::new(), &WorkspaceIndex::default())
+pub fn rename(doc: &Document, pos: Position, new_name: &str, uri: &Uri) -> Option<WorkspaceEdit> {
+    rename_with_workspace(
+        doc,
+        pos,
+        new_name,
+        uri,
+        &HashMap::new(),
+        &WorkspaceIndex::default(),
+    )
 }
 
 /// Build the `WorkspaceEdit` for renaming the symbol at `pos` to `new_name`,
@@ -67,7 +69,8 @@ pub fn rename_with_workspace(
     }
 
     // Qualified form (e.g. `.cache.cache` when cursor is on `cache` inside `\d .cache`).
-    let qualified_old = doc.sym_table()
+    let qualified_old = doc
+        .sym_table()
         .qualified_for(cursor, old_name)
         .map_or_else(|| old_name.to_string(), |q| q.to_string());
     // Namespace prefix: `.cache.` for `.cache.cache`, empty for bare names.
@@ -83,27 +86,39 @@ pub fn rename_with_workspace(
 
     // Build a lookup for original document text: current doc + open docs + workspace.
     let get_doc = |u: &Uri| -> Option<&Document> {
-        if u == uri { return Some(doc); }
-        if let Some(d) = open_docs.get(u) { return Some(d); }
+        if u == uri {
+            return Some(doc);
+        }
+        if let Some(d) = open_docs.get(u) {
+            return Some(d);
+        }
         workspace.files().get(u)
     };
 
     // Group locations by file URI, computing the right new_text per token shape.
     let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
     for loc in locations {
-        let new_text = get_doc(&loc.uri).and_then(|d| {
-            let start = d.offset_of(loc.range.start);
-            let end   = d.offset_of(loc.range.end);
-            d.text().get(start..end)
-        }).map_or_else(
-            || new_name.to_string(),
-            |original| rewrite_token(original, new_name, old_name, &qualified_old, &ns_prefix),
-        );
-        changes.entry(loc.uri).or_default()
-            .push(TextEdit { range: loc.range, new_text });
+        let new_text = get_doc(&loc.uri)
+            .and_then(|d| {
+                let start = d.offset_of(loc.range.start);
+                let end = d.offset_of(loc.range.end);
+                d.text().get(start..end)
+            })
+            .map_or_else(
+                || new_name.to_string(),
+                |original| rewrite_token(original, new_name, old_name, &qualified_old, &ns_prefix),
+            );
+        changes.entry(loc.uri).or_default().push(TextEdit {
+            range: loc.range,
+            new_text,
+        });
     }
 
-    Some(WorkspaceEdit { changes: Some(changes), document_changes: None, change_annotations: None })
+    Some(WorkspaceEdit {
+        changes: Some(changes),
+        document_changes: None,
+        change_annotations: None,
+    })
 }
 
 /// Given the original token text and the new bare name, produce the
@@ -115,7 +130,13 @@ pub fn rename_with_workspace(
 /// | `.cache.cache`       | `.cache.newName`      |
 /// | `` `.cache.cache ``  | `` `.cache.newName `` |
 /// | `` `cache ``         | `` `newName ``        |
-fn rewrite_token(original: &str, new_name: &str, old_name: &str, qualified_old: &str, ns_prefix: &str) -> String {
+fn rewrite_token(
+    original: &str,
+    new_name: &str,
+    old_name: &str,
+    qualified_old: &str,
+    ns_prefix: &str,
+) -> String {
     if let Some(sym_body) = original.strip_prefix('`') {
         // Symbol token — preserve the leading backtick.
         let new_body = rewrite_ident(sym_body, new_name, old_name, qualified_old, ns_prefix);
@@ -125,7 +146,13 @@ fn rewrite_token(original: &str, new_name: &str, old_name: &str, qualified_old: 
     }
 }
 
-fn rewrite_ident(original: &str, new_name: &str, old_name: &str, qualified_old: &str, ns_prefix: &str) -> String {
+fn rewrite_ident(
+    original: &str,
+    new_name: &str,
+    old_name: &str,
+    qualified_old: &str,
+    ns_prefix: &str,
+) -> String {
     if original == old_name {
         new_name.to_string()
     } else if original == qualified_old {
@@ -243,9 +270,15 @@ mod tests {
         let doc = Document::new(src.to_string(), 0);
         let pos = doc.position_of(src.find("cache:1").unwrap());
         let edit = rename(&doc, pos, "tbl", &uri()).expect("rename ok");
-        let edits = edit.changes.as_ref().and_then(|c| c.get(&uri())).expect("has edits");
+        let edits = edit
+            .changes
+            .as_ref()
+            .and_then(|c| c.get(&uri()))
+            .expect("has edits");
         // The symbol edit must produce `` `.cache.tbl ``, not just `tbl`.
-        let sym_edit = edits.iter().find(|e| e.new_text.starts_with('`'))
+        let sym_edit = edits
+            .iter()
+            .find(|e| e.new_text.starts_with('`'))
             .expect("must have a symbol edit");
         assert_eq!(sym_edit.new_text, "`.cache.tbl");
     }
@@ -258,8 +291,14 @@ mod tests {
         let doc = Document::new(src.to_string(), 0);
         let pos = doc.position_of(src.find("cache:1").unwrap());
         let edit = rename(&doc, pos, "tbl", &uri()).expect("rename ok");
-        let edits = edit.changes.as_ref().and_then(|c| c.get(&uri())).expect("has edits");
-        let dotted_edit = edits.iter().find(|e| e.new_text.starts_with('.'))
+        let edits = edit
+            .changes
+            .as_ref()
+            .and_then(|c| c.get(&uri()))
+            .expect("has edits");
+        let dotted_edit = edits
+            .iter()
+            .find(|e| e.new_text.starts_with('.'))
             .expect("must have a dotted edit");
         assert_eq!(dotted_edit.new_text, ".cache.tbl");
     }
@@ -286,7 +325,10 @@ mod tests {
         let doc_a = Document::new("sharedFn:{x+1}".to_string(), 0);
 
         let mut idx = WorkspaceIndex::default();
-        idx.index_file(uri_a.clone(), Document::new("sharedFn:{x+1}".to_string(), 0));
+        idx.index_file(
+            uri_a.clone(),
+            Document::new("sharedFn:{x+1}".to_string(), 0),
+        );
 
         let mut open_docs = HashMap::new();
         open_docs.insert(uri_b.clone(), Document::new("sharedFn 99".to_string(), 0));
@@ -314,7 +356,10 @@ mod tests {
         let doc_b = Document::new("sharedFn 99".to_string(), 0);
 
         let mut idx = WorkspaceIndex::default();
-        idx.index_file(uri_a.clone(), Document::new("sharedFn:{x+1}".to_string(), 0));
+        idx.index_file(
+            uri_a.clone(),
+            Document::new("sharedFn:{x+1}".to_string(), 0),
+        );
 
         let pos = doc_b.position_of(0); // cursor on `sharedFn` use in b.q
         let edit = rename_with_workspace(&doc_b, pos, "newFn", &uri_b, &HashMap::new(), &idx)

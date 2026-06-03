@@ -27,7 +27,10 @@ impl LineIndex {
                 starts.push((i + 1) as u32);
             }
         }
-        Self { starts, len: text.len() as u32 }
+        Self {
+            starts,
+            len: text.len() as u32,
+        }
     }
 
     /// Convert an LSP Position (UTF-16) to a UTF-8 byte offset, clamping to

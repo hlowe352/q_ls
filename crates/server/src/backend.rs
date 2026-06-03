@@ -34,7 +34,8 @@ impl QLanguageServer {
     async fn on_change(&self, uri: Uri, doc: &Document) {
         let idx = self.workspace_index.read().await;
         let cfg = self.config.read().await;
-        let diagnostics = crate::diagnostics::compute_diagnostics_with_workspace_and_config(doc, &idx, &cfg);
+        let diagnostics =
+            crate::diagnostics::compute_diagnostics_with_workspace_and_config(doc, &idx, &cfg);
         self.client
             .publish_diagnostics(uri, diagnostics, Some(doc.version()))
             .await;
@@ -66,8 +67,13 @@ impl QLanguageServer {
                     let index = idx.read().await;
                     let config = cfg.read().await;
                     for (uri, doc) in open.iter() {
-                        let diags = crate::diagnostics::compute_diagnostics_with_workspace_and_config(doc, &index, &config);
-                        client.publish_diagnostics(uri.clone(), diags, Some(doc.version())).await;
+                        let diags =
+                            crate::diagnostics::compute_diagnostics_with_workspace_and_config(
+                                doc, &index, &config,
+                            );
+                        client
+                            .publish_diagnostics(uri.clone(), diags, Some(doc.version()))
+                            .await;
                     }
                 }
                 Err(e) => {
@@ -158,15 +164,20 @@ impl LanguageServer for QLanguageServer {
                     work_done_progress_options: WorkDoneProgressOptions::default(),
                 })),
                 semantic_tokens_provider: Some(
-                    SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
-                        work_done_progress_options: WorkDoneProgressOptions::default(),
-                        legend: {
-                            let (token_types, token_modifiers) = crate::semantic::legend();
-                            SemanticTokensLegend { token_types, token_modifiers }
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(
+                        SemanticTokensOptions {
+                            work_done_progress_options: WorkDoneProgressOptions::default(),
+                            legend: {
+                                let (token_types, token_modifiers) = crate::semantic::legend();
+                                SemanticTokensLegend {
+                                    token_types,
+                                    token_modifiers,
+                                }
+                            },
+                            range: Some(false),
+                            full: Some(SemanticTokensFullOptions::Bool(true)),
                         },
-                        range: Some(false),
-                        full: Some(SemanticTokensFullOptions::Bool(true)),
-                    }),
+                    ),
                 ),
                 workspace: Some(WorkspaceServerCapabilities {
                     workspace_folders: Some(WorkspaceFoldersServerCapabilities {
@@ -190,7 +201,9 @@ impl LanguageServer for QLanguageServer {
     }
 
     async fn initialized(&self, _: InitializedParams) {
-        self.client.log_message(MessageType::INFO, "q-ls initialized").await;
+        self.client
+            .log_message(MessageType::INFO, "q-ls initialized")
+            .await;
 
         let registration = Registration {
             id: "watch-q-files".to_string(),
@@ -250,18 +263,19 @@ impl LanguageServer for QLanguageServer {
         // Fallback: client sent no root in InitializeParams. Walk up from the
         // opened file to find .git and index the whole repo from there.
         if self.workspace_root.read().await.is_none()
-            && let Some(file_path) = uri.to_file_path().map(Cow::into_owned) {
-                if let Some(git_root) = find_git_root(&file_path) {
-                    self.try_start_indexing(git_root).await;
-                } else {
-                    self.client
-                        .log_message(
-                            MessageType::WARNING,
-                            "q-ls: no .git root found — cross-file features unavailable",
-                        )
-                        .await;
-                }
+            && let Some(file_path) = uri.to_file_path().map(Cow::into_owned)
+        {
+            if let Some(git_root) = find_git_root(&file_path) {
+                self.try_start_indexing(git_root).await;
+            } else {
+                self.client
+                    .log_message(
+                        MessageType::WARNING,
+                        "q-ls: no .git root found — cross-file features unavailable",
+                    )
+                    .await;
             }
+        }
 
         {
             let mut idx = self.workspace_index.write().await;
@@ -278,7 +292,9 @@ impl LanguageServer for QLanguageServer {
 
         let (text, version) = {
             let mut docs = self.documents.write().await;
-            let Some(doc) = docs.get_mut(&uri) else { return };
+            let Some(doc) = docs.get_mut(&uri) else {
+                return;
+            };
             doc.apply_changes(params.content_changes, params.text_document.version);
             (doc.text().to_string(), doc.version())
         };
@@ -295,7 +311,10 @@ impl LanguageServer for QLanguageServer {
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
-        self.documents.write().await.remove(&params.text_document.uri);
+        self.documents
+            .write()
+            .await
+            .remove(&params.text_document.uri);
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
@@ -312,8 +331,12 @@ impl LanguageServer for QLanguageServer {
             let uri = change.uri;
             match change.typ {
                 FileChangeType::CREATED | FileChangeType::CHANGED => {
-                    let Some(path) = uri.to_file_path() else { continue };
-                    let Ok(text) = std::fs::read_to_string(&path) else { continue };
+                    let Some(path) = uri.to_file_path() else {
+                        continue;
+                    };
+                    let Ok(text) = std::fs::read_to_string(&path) else {
+                        continue;
+                    };
                     let mut idx = self.workspace_index.write().await;
                     idx.index_file(uri, Document::new(text, 0));
                 }
@@ -331,7 +354,9 @@ impl LanguageServer for QLanguageServer {
         let pos = params.text_document_position.position;
         let docs = self.documents.read().await;
         let idx = self.workspace_index.read().await;
-        let Some(doc) = docs.get(uri) else { return Ok(None) };
+        let Some(doc) = docs.get(uri) else {
+            return Ok(None);
+        };
         let items = crate::completion::complete_with_workspace(doc, pos, &idx);
         Ok(Some(CompletionResponse::Array(items)))
     }
@@ -341,17 +366,30 @@ impl LanguageServer for QLanguageServer {
         let pos = params.text_document_position_params.position;
         let docs = self.documents.read().await;
         let idx = self.workspace_index.read().await;
-        let Some(doc) = docs.get(uri) else { return Ok(None) };
+        let Some(doc) = docs.get(uri) else {
+            return Ok(None);
+        };
         Ok(crate::hover::hover_with_workspace(doc, pos, &idx))
     }
 
-    async fn goto_definition(&self, params: GotoDefinitionParams) -> Result<Option<GotoDefinitionResponse>> {
-        let uri = params.text_document_position_params.text_document.uri.clone();
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .clone();
         let pos = params.text_document_position_params.position;
         let docs = self.documents.read().await;
         let idx = self.workspace_index.read().await;
-        let Some(doc) = docs.get(&uri) else { return Ok(None) };
-        Ok(crate::goto_def::goto_definition_with_workspace(doc, pos, &uri, &idx))
+        let Some(doc) = docs.get(&uri) else {
+            return Ok(None);
+        };
+        Ok(crate::goto_def::goto_definition_with_workspace(
+            doc, pos, &uri, &idx,
+        ))
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
@@ -360,9 +398,16 @@ impl LanguageServer for QLanguageServer {
         let include_declaration = params.context.include_declaration;
         let docs = self.documents.read().await;
         let idx = self.workspace_index.read().await;
-        let Some(doc) = docs.get(&uri) else { return Ok(None) };
+        let Some(doc) = docs.get(&uri) else {
+            return Ok(None);
+        };
         let locs = crate::references::find_references_with_workspace(
-            doc, pos, include_declaration, &uri, &docs, &idx,
+            doc,
+            pos,
+            include_declaration,
+            &uri,
+            &docs,
+            &idx,
         );
         Ok(Some(locs))
     }
@@ -374,7 +419,9 @@ impl LanguageServer for QLanguageServer {
         let uri = &params.text_document.uri;
         let pos = params.position;
         let docs = self.documents.read().await;
-        let Some(doc) = docs.get(uri) else { return Ok(None) };
+        let Some(doc) = docs.get(uri) else {
+            return Ok(None);
+        };
         Ok(crate::rename::prepare_rename(doc, pos))
     }
 
@@ -383,8 +430,17 @@ impl LanguageServer for QLanguageServer {
         let pos = params.text_document_position.position;
         let docs = self.documents.read().await;
         let idx = self.workspace_index.read().await;
-        let Some(doc) = docs.get(&uri) else { return Ok(None) };
-        Ok(crate::rename::rename_with_workspace(doc, pos, &params.new_name, &uri, &docs, &idx))
+        let Some(doc) = docs.get(&uri) else {
+            return Ok(None);
+        };
+        Ok(crate::rename::rename_with_workspace(
+            doc,
+            pos,
+            &params.new_name,
+            &uri,
+            &docs,
+            &idx,
+        ))
     }
 
     async fn semantic_tokens_full(
@@ -393,7 +449,9 @@ impl LanguageServer for QLanguageServer {
     ) -> Result<Option<SemanticTokensResult>> {
         let uri = &params.text_document.uri;
         let docs = self.documents.read().await;
-        let Some(doc) = docs.get(uri) else { return Ok(None) };
+        let Some(doc) = docs.get(uri) else {
+            return Ok(None);
+        };
         let data = crate::semantic::semantic_tokens(doc);
         Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
             result_id: None,
@@ -401,10 +459,15 @@ impl LanguageServer for QLanguageServer {
         })))
     }
 
-    async fn document_symbol(&self, params: DocumentSymbolParams) -> Result<Option<DocumentSymbolResponse>> {
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> Result<Option<DocumentSymbolResponse>> {
         let uri = &params.text_document.uri;
         let docs = self.documents.read().await;
-        let Some(doc) = docs.get(uri) else { return Ok(None) };
+        let Some(doc) = docs.get(uri) else {
+            return Ok(None);
+        };
         let symbols = crate::symbols::document_symbols(doc);
         Ok(Some(DocumentSymbolResponse::Nested(symbols)))
     }
@@ -446,7 +509,9 @@ fn collect_recursive(dir: &std::path::Path, out: &mut Vec<(Uri, Document)>) {
             let Ok(text) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            let Ok(abs) = path.canonicalize() else { continue };
+            let Ok(abs) = path.canonicalize() else {
+                continue;
+            };
             let Ok(uri) = path_to_uri(&abs) else {
                 continue;
             };

@@ -1,14 +1,15 @@
+use super::expressions;
 use crate::parser::Parser;
 use crate::syntax_kind::SyntaxKind;
-use super::expressions;
 
 /// Check if current token is a qSQL keyword.
 #[must_use]
 pub fn at_qsql_keyword(p: &Parser) -> bool {
-    p.at(SyntaxKind::Ident) && matches!(
-        p.current_text(),
-        Some("select" | "exec" | "update" | "delete")
-    )
+    p.at(SyntaxKind::Ident)
+        && matches!(
+            p.current_text(),
+            Some("select" | "exec" | "update" | "delete")
+        )
 }
 
 /// Parse a qSQL expression. Called when `at_qsql_keyword()` is true.
@@ -43,9 +44,7 @@ fn parse_select(p: &mut Parser) {
                 expressions::expr(p);
             }
         }
-        if p.eat(SyntaxKind::Semi)
-            && (p.at(SyntaxKind::Lt) || p.at(SyntaxKind::Gt))
-        {
+        if p.eat(SyntaxKind::Semi) && (p.at(SyntaxKind::Lt) || p.at(SyntaxKind::Gt)) {
             parse_order(p);
         }
         p.expect(SyntaxKind::RBracket);

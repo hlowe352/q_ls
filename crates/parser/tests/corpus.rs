@@ -2,7 +2,7 @@
 //! AND every real-world q fixture must parse without producing
 //! `SyntaxKind::Error` tokens.
 
-use q_parser::{parse, SyntaxKind, SyntaxNode};
+use q_parser::{SyntaxKind, SyntaxNode, parse};
 
 fn collect_errors(src: &str, node: &SyntaxNode) -> Vec<String> {
     let mut out = Vec::new();
@@ -14,10 +14,9 @@ fn collect_errors(src: &str, node: &SyntaxNode) -> Vec<String> {
             let col = off - src[..off].rfind('\n').map_or(0, |i| i + 1);
             // Avoid `{elem:?}` — the rowan Debug impl recurses into children
             // and overflows the default test-thread stack on deeply nested trees.
-            let snippet: String = elem.as_token().map_or_else(
-                String::new,
-                |t| t.text().to_string(),
-            );
+            let snippet: String = elem
+                .as_token()
+                .map_or_else(String::new, |t| t.text().to_string());
             out.push(format!("line {line}:{col} Error {snippet:?}"));
         }
     }
@@ -50,9 +49,13 @@ fn run_corpus(dir_name: &str, label: &str) {
             failures.push(format!("{name}: {}", errs.join("; ")));
         }
     }
-    assert!(failures.is_empty(),
+    assert!(
+        failures.is_empty(),
         "{label}: {}/{} files failed:\n{}",
-        failures.len(), total, failures.join("\n"));
+        failures.len(),
+        total,
+        failures.join("\n")
+    );
 }
 
 #[test]

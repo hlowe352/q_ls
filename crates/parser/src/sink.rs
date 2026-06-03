@@ -24,7 +24,8 @@ impl Sink {
     pub fn finish(mut self) -> (GreenNode, Vec<ParseError>) {
         // Indices of Start events that have already been emitted as part of a
         // forward_parent chain (so we skip them when we reach them normally).
-        let mut already_started: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut already_started: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
 
         // We need to iterate by index because we need to walk forward_parent
         // chains which are stored by absolute index.
@@ -32,7 +33,10 @@ impl Sink {
         let mut i = 0;
         while i < len {
             match &self.events[i] {
-                Event::Start { kind, forward_parent } => {
+                Event::Start {
+                    kind,
+                    forward_parent,
+                } => {
                     if already_started.contains(&i) {
                         // Already emitted as part of a chain started from a
                         // child that had a forward_parent pointing here.

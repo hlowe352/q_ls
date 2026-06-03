@@ -92,27 +92,26 @@ impl SymTable {
                     .descendants_with_tokens()
                     .filter_map(q_parser::SyntaxElement::into_token)
                     .find(|t| t.kind() == SyntaxKind::SystemCmd)
-                    && let Some(ns) = parse_d_directive(cmd_tok.text()) {
-                        let off: u32 = cmd_tok.text_range().start().into();
-                        active_ns = ns.clone();
-                        t.ns_changes.push((off, ns));
-                    }
-            } else if kind == SyntaxKind::ApplyExpr
-                && let Some(ns) = parse_system_d_call(&node) {
-                    let off: u32 = node.text_range().start().into();
+                    && let Some(ns) = parse_d_directive(cmd_tok.text())
+                {
+                    let off: u32 = cmd_tok.text_range().start().into();
                     active_ns = ns.clone();
                     t.ns_changes.push((off, ns));
                 }
+            } else if kind == SyntaxKind::ApplyExpr
+                && let Some(ns) = parse_system_d_call(&node)
+            {
+                let off: u32 = node.text_range().start().into();
+                active_ns = ns.clone();
+                t.ns_changes.push((off, ns));
+            }
 
             if kind == SyntaxKind::Lambda {
                 let scope_idx = t.lambdas.len();
                 let parent = scope_stack.last().copied();
-                let has_param_list =
-                    node.children().any(|c| c.kind() == SyntaxKind::ParamList);
+                let has_param_list = node.children().any(|c| c.kind() == SyntaxKind::ParamList);
                 let mut params = Vec::new();
-                if let Some(plist) =
-                    node.children().find(|c| c.kind() == SyntaxKind::ParamList)
-                {
+                if let Some(plist) = node.children().find(|c| c.kind() == SyntaxKind::ParamList) {
                     for tok in plist
                         .children_with_tokens()
                         .filter_map(q_parser::SyntaxElement::into_token)
@@ -149,7 +148,8 @@ impl SymTable {
         //       the compound-assign amends that global — don't create a local.
         //   (b) Only the FIRST compound-assign per (scope, name) introduces the
         //       local binding; subsequent ones amend the already-created local.
-        let mut seen_local: std::collections::HashSet<(usize, SmolStr)> = std::collections::HashSet::new();
+        let mut seen_local: std::collections::HashSet<(usize, SmolStr)> =
+            std::collections::HashSet::new();
         for (scope_idx, name, off, ns) in deferred_compound {
             // Check both bare name and namespace-qualified form.
             let qualified = if !ns.is_empty() && !name.starts_with('.') {
@@ -185,8 +185,12 @@ impl SymTable {
         let Some(op) = bin
             .children_with_tokens()
             .filter_map(q_parser::SyntaxElement::into_token)
-            .find(|t| matches!(t.kind(),
-                SyntaxKind::Colon | SyntaxKind::ColonColon | SyntaxKind::CompoundAssign))
+            .find(|t| {
+                matches!(
+                    t.kind(),
+                    SyntaxKind::Colon | SyntaxKind::ColonColon | SyntaxKind::CompoundAssign
+                )
+            })
         else {
             return;
         };
@@ -258,7 +262,11 @@ impl SymTable {
     pub fn active_ns_at(&self, offset: usize) -> &str {
         let off = offset as u32;
         let i = self.ns_changes.partition_point(|(o, _)| *o <= off);
-        if i == 0 { "" } else { self.ns_changes[i - 1].1.as_str() }
+        if i == 0 {
+            ""
+        } else {
+            self.ns_changes[i - 1].1.as_str()
+        }
     }
 
     /// Find the innermost lambda whose range contains `cursor`, or `None`
@@ -295,7 +303,12 @@ impl SymTable {
             let scope = &self.lambdas[idx];
 
             // Explicit params.
-            if let Some(off) = scope.params.iter().find(|(n, _)| n == name).map(|(_, o)| *o) {
+            if let Some(off) = scope
+                .params
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, o)| *o)
+            {
                 return Some(off as usize);
             }
 
@@ -395,7 +408,8 @@ impl SymTable {
         let ns = self.active_ns_at(cursor);
         if !ns.is_empty() && !name.starts_with('.') {
             let qualified = format!("{ns}.{name}");
-            let namespaced: Vec<usize> = self.globals
+            let namespaced: Vec<usize> = self
+                .globals
                 .get(qualified.as_str())
                 .map_or_else(Vec::new, |v| v.iter().map(|&o| o as usize).collect());
             if !namespaced.is_empty() {
@@ -562,7 +576,10 @@ mod tests {
         assert!(
             !st.global_def_offsets(".proc.cp").is_empty(),
             ".proc.cp not in globals. found: {:?}",
-            entries.iter().filter(|k| k.contains("proc")).collect::<Vec<_>>()
+            entries
+                .iter()
+                .filter(|k| k.contains("proc"))
+                .collect::<Vec<_>>()
         );
     }
 
@@ -574,8 +591,7 @@ mod tests {
         use tower_lsp_server::ls_types::GotoDefinitionResponse;
 
         let torq_src = "\\d .proc\n$[1b;[cp:{.z.p}];[cp:{.z.P}]];\n\\d .";
-        let torq_uri: tower_lsp_server::ls_types::Uri =
-            "file:///TorQ/torq.q".parse().unwrap();
+        let torq_uri: tower_lsp_server::ls_types::Uri = "file:///TorQ/torq.q".parse().unwrap();
         let mut idx = WorkspaceIndex::default();
         idx.index_file(torq_uri.clone(), Document::new(torq_src.to_string(), 0));
 
@@ -585,15 +601,12 @@ mod tests {
             "file:///TorQ/code/common/cache.q".parse().unwrap();
         let cache_doc = Document::new(cache_src.to_string(), 0);
 
-        let offset = cache_src.find(".proc.cp").expect("fixture must contain .proc.cp");
+        let offset = cache_src
+            .find(".proc.cp")
+            .expect("fixture must contain .proc.cp");
         let pos = cache_doc.position_of(offset);
 
-        let result = goto_definition_with_workspace(
-            &cache_doc,
-            pos,
-            &cache_uri,
-            &idx,
-        );
+        let result = goto_definition_with_workspace(&cache_doc, pos, &cache_uri, &idx);
         match result {
             Some(GotoDefinitionResponse::Array(locs)) => {
                 assert!(!locs.is_empty(), "expected at least one location");
@@ -616,7 +629,10 @@ mod tests {
         let table = doc.sym_table();
         let a_use_off = src.rfind("; a}").unwrap() + 2; // the bare `a` at end
         let resolved = table.resolve(a_use_off, "a");
-        assert!(resolved.is_some(), "a introduced by `,: ` must resolve inside lambda");
+        assert!(
+            resolved.is_some(),
+            "a introduced by `,: ` must resolve inside lambda"
+        );
     }
 
     #[test]
@@ -630,8 +646,10 @@ mod tests {
         let first_def_off = src.find("a,:1").unwrap();
         let a_use_off = src.rfind("; a}").unwrap() + 2;
         let resolved = table.resolve(a_use_off, "a").expect("a must resolve");
-        assert_eq!(resolved, first_def_off,
-            "must point to first `,: `, not the second one");
+        assert_eq!(
+            resolved, first_def_off,
+            "must point to first `,: `, not the second one"
+        );
     }
 
     #[test]

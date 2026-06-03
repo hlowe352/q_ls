@@ -182,17 +182,8 @@ pub const BUILTINS: &[(&str, &str)] = &[
 /// Reserved names from `.Q.res` that aren't surfaced in completion/hover.
 /// Sorted; binary-searched alongside [`BUILTINS`] by [`is_builtin`].
 const EXTRA_RESERVED: &[&str] = &[
-    "asin", "asof",
-    "bin", "binr",
-    "dsave",
-    "ema",
-    "ic", "ij3", "ijf",
-    "ljf",
-    "rload", "rsave",
-    "setenv",
-    "ujf",
-    "wj1",
-    "year",
+    "asin", "asof", "bin", "binr", "dsave", "ema", "ic", "ij3", "ijf", "ljf", "rload", "rsave",
+    "setenv", "ujf", "wj1", "year",
 ];
 
 /// Top-level namespace prefixes that are q built-ins. A reference like
@@ -249,8 +240,10 @@ mod tests {
 
     #[test]
     fn recognises_documented() {
-        for n in ["each", "count", "select", "from", "where", "by", "string",
-                  "key", "keys", "cols", "type", "raze", "enlist", "if"] {
+        for n in [
+            "each", "count", "select", "from", "where", "by", "string", "key", "keys", "cols",
+            "type", "raze", "enlist", "if",
+        ] {
             assert!(is_builtin(n), "{n} should be builtin");
         }
     }
