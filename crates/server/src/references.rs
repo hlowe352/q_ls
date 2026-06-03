@@ -51,7 +51,7 @@ pub fn find_references_with_workspace(
     let name = name.to_string();
 
     // All def sites of `name` in the scope the cursor lives in.
-    let def_offsets: HashSet<usize> = table.def_offsets_for(cursor, &name).into_iter().collect();
+    let def_offsets: HashSet<u32> = table.def_offsets_for(cursor, &name).into_iter().collect();
 
     // If no local def, check whether it's a workspace-known global. If so,
     // we can still do a cross-file scan — fall through with empty def_offsets.
@@ -97,7 +97,7 @@ pub fn find_references_with_workspace(
         let g_qual = table.global_def_offsets(&qualified_name);
         def_offsets
             .iter()
-            .any(|&off| g_name.contains(&(off as u32)) || g_qual.contains(&(off as u32)))
+            .any(|&off| g_name.contains(&off) || g_qual.contains(&off))
     };
 
     if cursor_on_global && (is_local_global || is_workspace_global) {
@@ -130,7 +130,7 @@ fn collect_refs_in_doc(
     doc: &Document,
     name: &str,
     qualified_name: &str,
-    def_offsets: &HashSet<usize>,
+    def_offsets: &HashSet<u32>,
     include_declaration: bool,
     uri: &Uri,
 ) -> Vec<Location> {
@@ -143,7 +143,8 @@ fn collect_refs_in_doc(
         .filter_map(q_parser::SyntaxElement::into_token)
     {
         let tk = token.kind();
-        let off: usize = token.text_range().start().into();
+        let off_u32: u32 = token.text_range().start().into();
+        let off: usize = off_u32 as usize;
 
         if matches!(tk, SyntaxKind::Ident | SyntaxKind::DottedIdent) {
             let tok_text = token.text();
@@ -182,12 +183,13 @@ fn collect_refs_in_doc(
             let parent_kind = token.parent().map(|p| p.kind());
             let in_param_list = is_in_kind(&token, SyntaxKind::ParamList);
 
-            let is_decl = def_offsets.contains(&off);
+            let is_decl = def_offsets.contains(&off_u32);
             // Table constructor column defs (`id` in `([id:...])`) are not
             // variable references even though resolve() would find the global.
             if is_col_def_in_table(&token) {
                 continue;
             }
+            #[allow(clippy::cast_possible_truncation)] // resolve() returns rowan offset, always u32
             let resolves_to_def = is_decl
                 || (!in_param_list
                     && matches!(
@@ -196,7 +198,7 @@ fn collect_refs_in_doc(
                     )
                     && table
                         .resolve(off, lookup_name)
-                        .is_some_and(|d| def_offsets.contains(&d)));
+                        .is_some_and(|d| def_offsets.contains(&(d as u32))));
 
             if !resolves_to_def {
                 continue;

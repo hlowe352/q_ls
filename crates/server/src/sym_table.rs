@@ -370,27 +370,27 @@ impl SymTable {
     /// rebindings of the same name (`a:1; a:2; a`) are treated as one
     /// symbol, not several. Returns an empty vec if `name` has no visible
     /// def at `cursor`.
-    pub fn def_offsets_for(&self, cursor: usize, name: &str) -> Vec<usize> {
+    pub fn def_offsets_for(&self, cursor: usize, name: &str) -> Vec<u32> {
         // Walk the lambda chain looking for the scope that owns `name`.
         let mut current = self.innermost_lambda(cursor);
         while let Some(idx) = current {
             let scope = &self.lambdas[idx];
 
-            let params: Vec<usize> = scope
+            let params: Vec<u32> = scope
                 .params
                 .iter()
                 .filter(|(n, _)| n == name)
-                .map(|(_, o)| *o as usize)
+                .map(|(_, o)| *o)
                 .collect();
             if !params.is_empty() {
                 return params;
             }
 
-            let locals: Vec<usize> = scope
+            let locals: Vec<u32> = scope
                 .locals
                 .iter()
                 .filter(|(n, _)| n == name)
-                .map(|(_, o)| *o as usize)
+                .map(|(_, o)| *o)
                 .collect();
             if !locals.is_empty() {
                 return locals;
@@ -408,17 +408,17 @@ impl SymTable {
         let ns = self.active_ns_at(cursor);
         if !ns.is_empty() && !name.starts_with('.') {
             let qualified = format!("{ns}.{name}");
-            let namespaced: Vec<usize> = self
+            let namespaced: Vec<u32> = self
                 .globals
                 .get(qualified.as_str())
-                .map_or_else(Vec::new, |v| v.iter().map(|&o| o as usize).collect());
+                .map_or_else(Vec::new, |v| v.to_vec());
             if !namespaced.is_empty() {
                 return namespaced;
             }
         }
         self.globals
             .get(name)
-            .map(|v| v.iter().map(|&o| o as usize).collect())
+            .map(|v| v.to_vec())
             .unwrap_or_default()
     }
 
