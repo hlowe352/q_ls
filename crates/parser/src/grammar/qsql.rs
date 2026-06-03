@@ -285,7 +285,10 @@ mod tests {
         let p = parse("select a,b from t where c>0");
         let dump = format!("{:#?}", p.syntax());
         assert!(p.errors.is_empty(), "unexpected errors: {:?}", p.errors);
-        assert!(dump.contains("WhereClause"), "no WhereClause found:\n{dump}");
+        assert!(
+            dump.contains("WhereClause"),
+            "no WhereClause found:\n{dump}"
+        );
     }
 
     #[test]
@@ -372,7 +375,12 @@ mod tests {
         // Two node children (the column expressions — parse_column_list wraps
         // no ExprStmt, so we count all child nodes).
         let col_count = col_list.children().count();
-        assert_eq!(col_count, 2, "expected 2 columns, got {col_count}:\n{}", format!("{col_list:#?}"));
+        assert_eq!(
+            col_count,
+            2,
+            "expected 2 columns, got {col_count}:\n{}",
+            format!("{col_list:#?}")
+        );
     }
 
     #[test]
@@ -398,6 +406,11 @@ mod tests {
             .expect("WhereClause not found");
         // Two node children (the condition expressions).
         let cond_count = where_clause.children().count();
-        assert_eq!(cond_count, 2, "expected 2 conditions, got {cond_count}:\n{}", format!("{where_clause:#?}"));
+        assert_eq!(
+            cond_count,
+            2,
+            "expected 2 conditions, got {cond_count}:\n{}",
+            format!("{where_clause:#?}")
+        );
     }
 }

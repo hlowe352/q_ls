@@ -7,7 +7,12 @@ fn print_node(node: &SyntaxNode, indent: usize) {
     // Leaf-equivalent: single token child with same span — print inline
     let tokens: Vec<_> = node
         .children_with_tokens()
-        .filter(|e| !matches!(e.kind(), SyntaxKind::Whitespace | SyntaxKind::LineComment | SyntaxKind::CommentBlock))
+        .filter(|e| {
+            !matches!(
+                e.kind(),
+                SyntaxKind::Whitespace | SyntaxKind::LineComment | SyntaxKind::CommentBlock
+            )
+        })
         .collect();
     if tokens.len() == 1 {
         if let SyntaxElement::Token(t) = &tokens[0] {
@@ -22,7 +27,10 @@ fn print_node(node: &SyntaxNode, indent: usize) {
         match child {
             SyntaxElement::Node(n) => print_node(&n, indent + 1),
             SyntaxElement::Token(t) => {
-                if !matches!(t.kind(), SyntaxKind::Whitespace | SyntaxKind::LineComment | SyntaxKind::CommentBlock) {
+                if !matches!(
+                    t.kind(),
+                    SyntaxKind::Whitespace | SyntaxKind::LineComment | SyntaxKind::CommentBlock
+                ) {
                     println!("{pad}  {:?} {:?}", t.kind(), t.text());
                 }
             }

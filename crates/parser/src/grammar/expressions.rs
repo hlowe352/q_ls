@@ -78,11 +78,7 @@ fn expr_bp(p: &mut Parser, min_bp: u8) {
         // Also stop before `,` in comma-stop mode so it acts as a list separator.
         if can_start_expr(p)
             && !p.has_preceding_newline()
-            && !(p.qsql_stop
-                && matches!(
-                    p.current_text(),
-                    Some("from" | "by" | "where")
-                ))
+            && !(p.qsql_stop && matches!(p.current_text(), Some("from" | "by" | "where")))
             && !(p.qsql_comma_stop && p.current() == Some(SyntaxKind::Comma))
         {
             let (l_bp, r_bp) = (1u8, 0u8);
