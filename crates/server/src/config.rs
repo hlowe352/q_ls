@@ -31,7 +31,7 @@ impl Config {
                 } else {
                     let mut names: Vec<&str> =
                         cfg.suppress_unresolved.iter().map(String::as_str).collect();
-                    names.sort();
+                    names.sort_unstable();
                     format!(
                         "q-ls: loaded {} (suppress_unresolved: {})",
                         path.display(),

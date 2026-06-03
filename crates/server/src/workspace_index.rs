@@ -55,7 +55,7 @@ impl WorkspaceIndex {
     }
 
     pub fn all_idents(&self) -> impl Iterator<Item = &str> {
-        self.globals.keys().map(|s| s.as_str())
+        self.globals.keys().map(smol_str::SmolStr::as_str)
     }
 }
 
