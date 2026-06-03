@@ -1,5 +1,6 @@
 mod backend;
 mod builtins;
+mod config;
 mod document;
 mod diagnostics;
 mod completion;

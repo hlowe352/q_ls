@@ -157,6 +157,23 @@ fn normalize_slash_comments(tokens: &mut Vec<LexedToken>) {
             // i stays at i; we continue scanning from the token after our new LineComment
         }
 
+        // Case 3: Slash preceded by whitespace (trailing comment on a code line).
+        // e.g. `loadf:loadf0[0b]   /load a file` — the `/load` part is a comment.
+        // (Case 1 handles line-start slashes; this covers mid-line trailing comments.)
+        else if tokens[i].kind == SyntaxKind::Slash
+            && i > 0
+            && tokens[i - 1].kind == SyntaxKind::Whitespace
+        {
+            let mut text = String::from(tokens[i].text.as_str());
+            let mut end = i + 1;
+            while end < tokens.len() && tokens[end].kind != SyntaxKind::Newline {
+                text.push_str(&tokens[end].text);
+                end += 1;
+            }
+            let new_tok = LexedToken { kind: SyntaxKind::LineComment, text: SmolStr::from(text) };
+            tokens.splice(i..end, [new_tok]);
+        }
+
         // Case 2: Backslash at line start — terminal comment block.
         else if tokens[i].kind == SyntaxKind::Backslash && is_at_line_start(tokens, i) {
             // Find the closing `/` at line start, or EOF.

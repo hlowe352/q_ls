@@ -240,6 +240,15 @@ mod tests {
     }
 
     #[test]
+    fn parse_trailing_comment_no_space_after_slash() {
+        // `expr   /comment` — slash with no space after it is a trailing comment
+        let src = "loadf:loadf0[0b]   /load a file if it hasn't been loaded\nreloadf:loadf0[1b]";
+        let parse = parse(src);
+        assert!(parse.errors.is_empty(), "errors: {:?}", parse.errors);
+        assert_eq!(parse.syntax().text().to_string(), src);
+    }
+
+    #[test]
     fn parse_scan_with_seed() {
         let parse = parse("{x+y}\\[0;1 2 3]");
         assert!(parse.errors.is_empty(), "errors: {:?}", parse.errors);

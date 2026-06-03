@@ -25,6 +25,7 @@ pub enum Token {
     /// Priority 3 keeps hex above the plain decimal regex (default priority 2).
     #[regex(r"0x[0-9A-Fa-f]{1,3}", priority = 4)]  // hex (1-3 digits)
     #[regex(r"0N[ijhp]", priority = 5)]        // typed nulls (guid/timespan/datetime/minute/second handled separately)
+    #[regex(r"0N", priority = 4)]             // bare long null `0N` (longer typed patterns take priority)
     #[regex(r"0W[ijhp]", priority = 5)]        // typed infs
     #[regex(r"[0-9]+[ijh]?")]                   // plain decimal, optional suffix
     Integer,
@@ -58,9 +59,10 @@ pub enum Token {
     #[regex(r"0[NW]g", priority = 6)]
     Guid,
 
-    /// Timespan literal: `0D00:00:00.000000000`, `0Nn`, `0Wn`
+    /// Timespan literal: `1D`, `0D00:00:00.000000000`, `0Nn`, `0Wn`
     #[regex(r"0[NW]n", priority = 6)]
     #[regex(r"[0-9]+D[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?", priority = 6)]
+    #[regex(r"[0-9]+D", priority = 5)]
     Timespan,
 
     /// Datetime literal: `0Nz`, `0Wz`
@@ -769,6 +771,17 @@ mod tests {
     }
 
     #[test]
+    fn lex_bare_long_null() {
+        // `0N` without a suffix is the long null (integer type)
+        assert_eq!(Token::lexer("0N").next(), Some(Ok(Token::Integer)));
+        // Ensure typed nulls still work (longer match wins)
+        assert_eq!(Token::lexer("0Ni").next(), Some(Ok(Token::Integer)));
+        assert_eq!(Token::lexer("0Nj").next(), Some(Ok(Token::Integer)));
+        assert_eq!(Token::lexer("0Nn").next(), Some(Ok(Token::Timespan)));
+        assert_eq!(Token::lexer("0Nd").next(), Some(Ok(Token::Date)));
+    }
+
+    #[test]
     fn lex_timespan_null() {
         let mut lex = Token::lexer("0Nn");
         assert_eq!(lex.next(), Some(Ok(Token::Timespan)));
@@ -838,6 +851,10 @@ mod tests {
         assert_eq!(Token::lexer("0D00:00:00.000000000").next(), Some(Ok(Token::Timespan)));
         assert_eq!(Token::lexer("0Nn").next(), Some(Ok(Token::Timespan)));
         assert_eq!(Token::lexer("0Wn").next(), Some(Ok(Token::Timespan)));
+        // bare days form: `1D`, `2D`, `0D`
+        assert_eq!(Token::lexer("1D").next(), Some(Ok(Token::Timespan)));
+        assert_eq!(Token::lexer("2D").next(), Some(Ok(Token::Timespan)));
+        assert_eq!(Token::lexer("0D").next(), Some(Ok(Token::Timespan)));
     }
 
     #[test]

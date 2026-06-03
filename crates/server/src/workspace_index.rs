@@ -180,4 +180,42 @@ mod tests {
         assert!(bad.is_empty(),
             "workspace-defined symbol must not produce unresolved warning: {diags:?}");
     }
+
+    #[test]
+    fn cross_file_rename_end_to_end() {
+        use crate::rename::rename_with_workspace;
+        use std::collections::HashMap;
+        use tower_lsp_server::ls_types::Position;
+
+        let uri_a: Uri = "file:///a.q".parse().unwrap();
+        let uri_b: Uri = "file:///b.q".parse().unwrap();
+
+        let src_a = "sharedFn:{x+1}";
+        let doc_a = doc(src_a);
+        let doc_b_src = "sharedFn 99";
+
+        let mut idx = WorkspaceIndex::default();
+        idx.index_file(uri_a.clone(), doc(src_a));
+
+        let mut open_docs = HashMap::new();
+        open_docs.insert(uri_b.clone(), doc(doc_b_src));
+
+        let edit = rename_with_workspace(
+            &doc_a,
+            Position::new(0, 0),
+            "renamed",
+            &uri_a,
+            &open_docs,
+            &idx,
+        ).expect("cross-file rename must succeed");
+
+        let changes = edit.changes.as_ref().expect("must have changes");
+        assert!(changes.contains_key(&uri_a), "must rewrite a.q: {changes:?}");
+        assert!(changes.contains_key(&uri_b), "must rewrite b.q: {changes:?}");
+        for edits in changes.values() {
+            for e in edits {
+                assert_eq!(e.new_text, "renamed");
+            }
+        }
+    }
 }

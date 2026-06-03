@@ -8,6 +8,7 @@ use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
 use tower_lsp_server::{Client, LanguageServer};
 
+use crate::config::Config;
 use crate::document::Document;
 use crate::workspace_index::WorkspaceIndex;
 
@@ -16,6 +17,7 @@ pub struct QLanguageServer {
     documents: Arc<RwLock<HashMap<Uri, Document>>>,
     workspace_index: Arc<RwLock<WorkspaceIndex>>,
     workspace_root: Arc<RwLock<Option<PathBuf>>>,
+    config: Arc<RwLock<Config>>,
 }
 
 impl QLanguageServer {
@@ -25,12 +27,14 @@ impl QLanguageServer {
             documents: Arc::new(RwLock::new(HashMap::new())),
             workspace_index: Arc::new(RwLock::new(WorkspaceIndex::default())),
             workspace_root: Arc::new(RwLock::new(None)),
+            config: Arc::new(RwLock::new(Config::default())),
         }
     }
 
     async fn on_change(&self, uri: Uri, doc: &Document) {
         let idx = self.workspace_index.read().await;
-        let diagnostics = crate::diagnostics::compute_diagnostics_with_workspace(doc, &idx);
+        let cfg = self.config.read().await;
+        let diagnostics = crate::diagnostics::compute_diagnostics_with_workspace_and_config(doc, &idx, &cfg);
         self.client
             .publish_diagnostics(uri, diagnostics, Some(doc.version()))
             .await;
@@ -40,6 +44,7 @@ impl QLanguageServer {
         root: PathBuf,
         idx: Arc<RwLock<WorkspaceIndex>>,
         docs: Arc<RwLock<HashMap<Uri, Document>>>,
+        cfg: Arc<RwLock<Config>>,
         client: Client,
     ) {
         tokio::spawn(async move {
@@ -59,8 +64,9 @@ impl QLanguageServer {
                     // full workspace index is available.
                     let open = docs.read().await;
                     let index = idx.read().await;
+                    let config = cfg.read().await;
                     for (uri, doc) in open.iter() {
-                        let diags = crate::diagnostics::compute_diagnostics_with_workspace(doc, &index);
+                        let diags = crate::diagnostics::compute_diagnostics_with_workspace_and_config(doc, &index, &config);
                         client.publish_diagnostics(uri.clone(), diags, Some(doc.version())).await;
                     }
                 }
@@ -88,6 +94,9 @@ impl QLanguageServer {
             }
             *guard = Some(root.clone());
         }
+        let (cfg, cfg_status) = Config::load(&root);
+        *self.config.write().await = cfg;
+        self.client.log_message(MessageType::INFO, cfg_status).await;
         self.client
             .log_message(
                 MessageType::INFO,
@@ -98,6 +107,7 @@ impl QLanguageServer {
             root,
             Arc::clone(&self.workspace_index),
             Arc::clone(&self.documents),
+            Arc::clone(&self.config),
             self.client.clone(),
         );
         true
@@ -202,6 +212,9 @@ impl LanguageServer for QLanguageServer {
         // opened file and call try_start_indexing then.
         let root = self.workspace_root.read().await.clone();
         if let Some(root) = root {
+            let (cfg, cfg_status) = Config::load(&root);
+            *self.config.write().await = cfg;
+            self.client.log_message(MessageType::INFO, cfg_status).await;
             self.client
                 .log_message(
                     MessageType::INFO,
@@ -212,6 +225,7 @@ impl LanguageServer for QLanguageServer {
                 root,
                 Arc::clone(&self.workspace_index),
                 Arc::clone(&self.documents),
+                Arc::clone(&self.config),
                 self.client.clone(),
             );
         } else {
@@ -368,8 +382,9 @@ impl LanguageServer for QLanguageServer {
         let uri = params.text_document_position.text_document.uri.clone();
         let pos = params.text_document_position.position;
         let docs = self.documents.read().await;
+        let idx = self.workspace_index.read().await;
         let Some(doc) = docs.get(&uri) else { return Ok(None) };
-        Ok(crate::rename::rename(doc, pos, &params.new_name, &uri))
+        Ok(crate::rename::rename_with_workspace(doc, pos, &params.new_name, &uri, &docs, &idx))
     }
 
     async fn semantic_tokens_full(

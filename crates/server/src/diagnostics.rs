@@ -1,11 +1,20 @@
 #[allow(clippy::wildcard_imports)]
 use tower_lsp_server::ls_types::*;
 use q_parser::{SyntaxKind, SyntaxNode};
+use crate::config::Config;
 use crate::document::Document;
 use crate::builtins::is_builtin;
 use crate::workspace_index::WorkspaceIndex;
 
 pub fn compute_diagnostics_with_workspace(doc: &Document, workspace: &WorkspaceIndex) -> Vec<Diagnostic> {
+    compute_diagnostics_with_workspace_and_config(doc, workspace, &Config::default())
+}
+
+pub fn compute_diagnostics_with_workspace_and_config(
+    doc: &Document,
+    workspace: &WorkspaceIndex,
+    config: &Config,
+) -> Vec<Diagnostic> {
     let mut out: Vec<Diagnostic> = doc.parse().errors.iter().map(|err| {
         let start = doc.position_of(err.offset);
         let end = doc.position_of(err.offset + err.len);
@@ -19,7 +28,7 @@ pub fn compute_diagnostics_with_workspace(doc: &Document, workspace: &WorkspaceI
     }).collect();
 
     out.extend(unindented_close_warnings(doc));
-    out.extend(unresolved_reference_warnings_with_workspace(doc, workspace));
+    out.extend(unresolved_reference_warnings_with_workspace(doc, workspace, config));
     out
 }
 
@@ -92,7 +101,11 @@ fn unindented_close_warnings(doc: &Document) -> Vec<Diagnostic> {
 /// For everything else, calls `SymTable::resolve` at the token's
 /// position. If it returns `None`, checks `WorkspaceIndex::resolve_global`.
 /// Only emits a warning if neither resolves the reference.
-fn unresolved_reference_warnings_with_workspace(doc: &Document, workspace: &WorkspaceIndex) -> Vec<Diagnostic> {
+fn unresolved_reference_warnings_with_workspace(
+    doc: &Document,
+    workspace: &WorkspaceIndex,
+    config: &Config,
+) -> Vec<Diagnostic> {
     let root = doc.parse().syntax();
     let table = doc.sym_table();
     let mut diagnostics = Vec::new();
@@ -113,6 +126,9 @@ fn unresolved_reference_warnings_with_workspace(doc: &Document, workspace: &Work
         };
         let name = token.text();
         if is_builtin(name) {
+            continue;
+        }
+        if config.suppress_unresolved.contains(name) {
             continue;
         }
         let off: usize = token.text_range().start().into();
@@ -153,17 +169,31 @@ fn unresolved_reference_warnings_with_workspace(doc: &Document, workspace: &Work
 /// position. If it returns `None`, emit a warning.
 #[allow(dead_code)] // Used by test helper `unresolved_for`
 fn unresolved_reference_warnings(doc: &Document) -> Vec<Diagnostic> {
-    unresolved_reference_warnings_with_workspace(doc, &WorkspaceIndex::default())
+    unresolved_reference_warnings_with_workspace(doc, &WorkspaceIndex::default(), &Config::default())
 }
 
 fn is_in_qsql(node: &SyntaxNode) -> bool {
-    node.ancestors().any(|n| matches!(
-        n.kind(),
-        SyntaxKind::SelectExpr
+    node.ancestors().any(|n| {
+        match n.kind() {
+            // Statement-level qSQL nodes.
+            SyntaxKind::SelectExpr
             | SyntaxKind::UpdateExpr
             | SyntaxKind::ExecExpr
-            | SyntaxKind::DeleteExpr
-    ))
+            | SyntaxKind::DeleteExpr => true,
+            // Expression-level qSQL: inside lambdas or $[…] the parser emits
+            // ApplyExpr chains.  Detect `select`/`exec`/`update`/`delete` in
+            // the function position.
+            SyntaxKind::ApplyExpr => n
+                .first_child()
+                .filter(|fc| fc.kind() == SyntaxKind::IdentExpr)
+                .is_some_and(|fc| fc
+                    .children_with_tokens()
+                    .filter_map(q_parser::SyntaxElement::into_token)
+                    .any(|t| t.kind() == SyntaxKind::Ident
+                        && matches!(t.text(), "select" | "exec" | "update" | "delete"))),
+            _ => false,
+        }
+    })
 }
 
 fn is_in_param_list(node: &SyntaxNode) -> bool {
@@ -276,6 +306,17 @@ mod tests {
     }
 
     #[test]
+    fn unresolved_skips_expr_level_qsql_columns() {
+        // Inside a lambda, qSQL is parsed as ApplyExpr chains (not SelectExpr etc.).
+        // Column names must still be suppressed.
+        let src = "evict:{[r] select lastaccess,id,size from cache}";
+        let warnings = unresolved_for(src);
+        assert!(warnings.iter().all(|w|
+            !w.contains("`lastaccess`") && !w.contains("`id`") && !w.contains("`size`")
+        ), "expr-level qSQL columns must not be flagged: {warnings:?}");
+    }
+
+    #[test]
     fn unresolved_skips_assignment_lhs() {
         let src = "newName: 42";
         let warnings = unresolved_for(src);
@@ -367,7 +408,7 @@ mod tests {
 
     fn unresolved_with_workspace_for(src: &str, workspace: &WorkspaceIndex) -> Vec<String> {
         let doc = Document::new(src.to_string(), 0);
-        unresolved_reference_warnings_with_workspace(&doc, workspace)
+        unresolved_reference_warnings_with_workspace(&doc, workspace, &Config::default())
             .into_iter()
             .map(|d| d.message)
             .collect()
@@ -395,5 +436,48 @@ mod tests {
         let warnings = unresolved_with_workspace_for("ghost 42", &idx);
         assert!(warnings.iter().any(|w| w.contains("`ghost`")),
             "truly undefined name must still warn: {warnings:?}");
+    }
+
+    #[test]
+    fn suppress_unresolved_via_config() {
+        use crate::workspace_index::WorkspaceIndex;
+        use crate::config::Config;
+        use std::collections::HashSet;
+
+        let cfg = Config {
+            suppress_unresolved: HashSet::from(["proctype".to_string(), "procname".to_string()]),
+        };
+        let doc = Document::new("proctype".to_string(), 0);
+        let idx = WorkspaceIndex::default();
+        let diags = compute_diagnostics_with_workspace_and_config(&doc, &idx, &cfg);
+        assert!(diags.is_empty(), "suppressed name must not warn: {diags:?}");
+    }
+
+    #[test]
+    fn unsuppressed_name_still_warns() {
+        use crate::workspace_index::WorkspaceIndex;
+        use crate::config::Config;
+        use std::collections::HashSet;
+
+        let cfg = Config {
+            suppress_unresolved: HashSet::from(["proctype".to_string()]),
+        };
+        let doc = Document::new("ghost".to_string(), 0);
+        let idx = WorkspaceIndex::default();
+        let diags = compute_diagnostics_with_workspace_and_config(&doc, &idx, &cfg);
+        assert!(diags.iter().any(|d| d.message.contains("`ghost`")),
+            "non-suppressed name must still warn: {diags:?}");
+    }
+
+    #[test]
+    fn unresolved_skips_tokens_in_trailing_comment_no_space() {
+        // `expr   /load a file` — `load`, `a`, `file` are inside a comment, not idents
+        let src = "loadf:loadf0[0b]   /load a file if it hasn't been loaded";
+        let warnings = unresolved_for(src);
+        let comment_words: Vec<_> = warnings.iter()
+            .filter(|w| w.contains("`a`") || w.contains("`file`") || w.contains("`load`"))
+            .collect();
+        assert!(comment_words.is_empty(),
+            "words in trailing comment must not be flagged: {warnings:?}");
     }
 }
