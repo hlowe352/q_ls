@@ -189,7 +189,6 @@ fn collect_refs_in_doc(
             if is_col_def_in_table(&token) {
                 continue;
             }
-            #[allow(clippy::cast_possible_truncation)] // resolve() returns rowan offset, always u32
             let resolves_to_def = is_decl
                 || (!in_param_list
                     && matches!(
@@ -198,7 +197,7 @@ fn collect_refs_in_doc(
                     )
                     && table
                         .resolve(off, lookup_name)
-                        .is_some_and(|d| def_offsets.contains(&(d as u32))));
+                        .is_some_and(|d| def_offsets.contains(&d)));
 
             if !resolves_to_def {
                 continue;
@@ -285,8 +284,7 @@ fn collect_global_refs_in_doc(
         let resolved_off = table.resolve(off, lookup);
         let passes = match resolved_off {
             None => true, // no local binding — treat as cross-file use
-            Some(r) => u32::try_from(r)
-                .is_ok_and(|r_u32| table.global_def_offsets(lookup).contains(&r_u32)),
+            Some(r) => table.global_def_offsets(lookup).contains(&r),
         };
         if !passes {
             continue;

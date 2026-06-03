@@ -296,7 +296,7 @@ impl SymTable {
     }
 
     /// Resolve `name` against the lexical scope at byte `cursor`.
-    pub fn resolve(&self, cursor: usize, name: &str) -> Option<usize> {
+    pub fn resolve(&self, cursor: usize, name: &str) -> Option<u32> {
         // Climb lambda chain.
         let mut current = self.innermost_lambda(cursor);
         while let Some(idx) = current {
@@ -309,7 +309,7 @@ impl SymTable {
                 .find(|(n, _)| n == name)
                 .map(|(_, o)| *o)
             {
-                return Some(off as usize);
+                return Some(off);
             }
 
             // Local `name:` (last before cursor; else first after — covers
@@ -327,7 +327,7 @@ impl SymTable {
                 }
             }
             if let Some(o) = before.or(after) {
-                return Some(o as usize);
+                return Some(o);
             }
 
             // Implicit x/y/z: only when the lambda has no `[...]` list.
@@ -352,7 +352,7 @@ impl SymTable {
         self.resolve_global(cursor, name)
     }
 
-    fn resolve_global(&self, cursor: usize, name: &str) -> Option<usize> {
+    fn resolve_global(&self, cursor: usize, name: &str) -> Option<u32> {
         let list = self.globals.get(name)?;
         let mut last_overall: Option<u32> = None;
         let mut before: Option<u32> = None;
@@ -362,7 +362,7 @@ impl SymTable {
                 before = Some(o);
             }
         }
-        before.or(last_overall).map(|o| o as usize)
+        before.or(last_overall)
     }
 
     /// All offsets that bind `name` in the same scope as the def the cursor
@@ -647,7 +647,7 @@ mod tests {
         let a_use_off = src.rfind("; a}").unwrap() + 2;
         let resolved = table.resolve(a_use_off, "a").expect("a must resolve");
         assert_eq!(
-            resolved, first_def_off,
+            resolved as usize, first_def_off,
             "must point to first `,: `, not the second one"
         );
     }

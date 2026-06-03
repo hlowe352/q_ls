@@ -19,7 +19,7 @@ pub fn goto_definition_with_workspace(
 
     // 1. Try same-file resolution first.
     if let Some(def_offset) = doc.sym_table().resolve(offset, name) {
-        let def_pos = doc.position_of(def_offset);
+        let def_pos = doc.position_of(def_offset as usize);
         return Some(GotoDefinitionResponse::Scalar(Location {
             uri: uri.clone(),
             range: Range::new(def_pos, def_pos),
@@ -54,7 +54,7 @@ mod tests {
 
     fn def_offset(src: &str, cursor_byte: usize, name: &str) -> Option<usize> {
         let doc = Document::new(src.to_string(), 0);
-        doc.sym_table().resolve(cursor_byte, name)
+        doc.sym_table().resolve(cursor_byte, name).map(|o| o as usize)
     }
 
     #[test]
