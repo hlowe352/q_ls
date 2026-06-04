@@ -383,6 +383,14 @@ pub struct Parser {
     nt_cursor: usize,
     pub(crate) events: Vec<Event>,
     errors: Vec<ParseError>,
+    /// When `true`, the juxtaposition rule in `expr_bp` stops before
+    /// `from`, `by`, and `where` so qSQL clause boundaries are respected.
+    /// Set by `parse_column_list`; never propagates into bracket/paren sub-expressions.
+    pub(crate) qsql_stop: bool,
+    /// When `true`, comma is not treated as a binary operator or juxtaposition
+    /// start in `expr_bp`. Used in column lists and where clauses so commas
+    /// act as separators rather than the enlist dyad.
+    pub(crate) qsql_comma_stop: bool,
 }
 
 impl Parser {
@@ -461,6 +469,8 @@ impl Parser {
             nt_cursor: 0,
             events: Vec::new(),
             errors: Vec::new(),
+            qsql_stop: false,
+            qsql_comma_stop: false,
         }
     }
 

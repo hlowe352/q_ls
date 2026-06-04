@@ -1011,3 +1011,111 @@ show q1b[];
         assert_eq!(count, 2, "expected 2 stmts, got {count}:\n{dump}");
     }
 }
+
+#[cfg(test)]
+mod parse_coverage {
+    use super::*;
+    use syntax_kind::SyntaxKind;
+
+    const EXPRS: &[&str] = &[
+        "a+:1",
+        "a,:1 2 3",
+        ".ns.a:1",
+        "a::1",
+        "select from t",
+        "select a,b from t where c>0",
+        "select sum a by b from t",
+        "update a:1 from t",
+        "delete from t where a>0",
+        "exec a from t",
+        "t:([]a:1 2 3;b:4 5 6)",
+        "t:([k:1 2 3]v:4 5 6)",
+        "1 2 3+4 5 6",
+        "2#0N",
+        "a[0;1]",
+        "a where b",
+        "`a`b`c",
+        "$[a;b;c]",
+        "@[f;x;g]",
+        ".[f;x;g]",
+        "{x+y}[1;2]",
+        "(a;b;c)",
+        "0b",
+        "0x0A",
+        "2000.01.01",
+        "12:00:00.000",
+        "1e10",
+        "1 2!3 4",
+        "if[a;b]",
+        "do[3;a+:1]",
+        "while[a>0;a-:1]",
+        "not a",
+        "a lj b",
+        "a asof b",
+        "a bin b",
+        "a cross b",
+        "a ij b",
+        "a uj b",
+        "(+')f",
+        "f/[x]",
+        "f\\[x]",
+        "a:b:c:1",
+        "([]a:1 2)",
+        "flip `a`b!(1 2;3 4)",
+        "a:enlist 1",
+        "count each t",
+        "raze (1 2;3 4)",
+        "{x*x} each 1 2 3",
+        "a+b*c-d%e",
+        "f:{[x;y] x+y}",
+        "f[1;2]",
+        "a:b:1",
+        "`sym",
+        "10?`4",
+        "a:+/1 2 3",
+        "(+) . (1 2;3 4)",
+        "a binr b",
+        "a _ b",
+        ":a",
+        "a pj b",
+    ];
+
+    fn has_error(node: &SyntaxNode) -> bool {
+        node.descendants_with_tokens().any(|e| {
+            e.as_node().is_some_and(|n| n.kind() == SyntaxKind::Error)
+                || e.as_token().is_some_and(|t| t.kind() == SyntaxKind::Error)
+        })
+    }
+
+    #[test]
+    fn no_error_nodes() {
+        let mut failures = Vec::new();
+        for &expr in EXPRS {
+            let p = parse(expr);
+            if has_error(&p.syntax()) {
+                failures.push(expr);
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "ERROR nodes found in:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    #[test]
+    fn no_parse_errors() {
+        let mut failures = Vec::new();
+        for &expr in EXPRS {
+            let p = parse(expr);
+            if !p.errors.is_empty() {
+                failures.push(format!("{expr:?}: {:?}", p.errors));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "Parse errors found:\n{}",
+            failures.join("\n")
+        );
+    }
+}

@@ -371,6 +371,13 @@ fn is_inplace_table_symbol(token: &q_parser::SyntaxToken) -> bool {
     };
 
     match parent.kind() {
+        // After qSQL parse fix, the from-table LiteralExpr is a direct child of
+        // the qSQL statement node (no longer wrapped in an ApplyExpr chain).
+        SyntaxKind::DeleteExpr
+        | SyntaxKind::UpdateExpr
+        | SyntaxKind::SelectExpr
+        | SyntaxKind::ExecExpr => true,
+
         // `` `.t upsert rows `` / `` `.t insert rows ``
         // CST: BinExpr { LiteralExpr(sym), Ident("upsert"|"insert"), … }
         SyntaxKind::BinExpr => {
@@ -916,7 +923,7 @@ mod aoc_tests {
         let ref_cursor = src.find("not minus").expect("(not minus)") + "not ".len();
 
         let refs_from_def = find_references(&doc, doc.position_of(def_cursor), true, &uri);
-        let refs_from_ref = find_references(&doc, doc.position_of(ref_cursor), true, &uri);
+        let refs_from_usage = find_references(&doc, doc.position_of(ref_cursor), true, &uri);
 
         assert!(
             refs_from_def.len() >= 2,
@@ -924,9 +931,9 @@ mod aoc_tests {
             refs_from_def.len()
         );
         assert!(
-            refs_from_ref.len() >= 2,
+            refs_from_usage.len() >= 2,
             "from ref: expected ≥2, got {}",
-            refs_from_ref.len()
+            refs_from_usage.len()
         );
     }
 }

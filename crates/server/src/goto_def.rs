@@ -54,7 +54,9 @@ mod tests {
 
     fn def_offset(src: &str, cursor_byte: usize, name: &str) -> Option<usize> {
         let doc = Document::new(src.to_string(), 0);
-        doc.sym_table().resolve(cursor_byte, name).map(|o| o as usize)
+        doc.sym_table()
+            .resolve(cursor_byte, name)
+            .map(|o| o as usize)
     }
 
     #[test]
@@ -217,7 +219,7 @@ mod tests {
             GotoDefinitionResponse::Scalar(loc) => {
                 assert_eq!(loc.uri, uri_a);
             }
-            _ => panic!("unexpected response variant"),
+            GotoDefinitionResponse::Link(_) => panic!("unexpected response variant"),
         }
     }
 
