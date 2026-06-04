@@ -416,9 +416,7 @@ impl SymTable {
                 return namespaced;
             }
         }
-        self.globals
-            .get(name).cloned()
-            .unwrap_or_default()
+        self.globals.get(name).cloned().unwrap_or_default()
     }
 
     /// If `name` at `cursor` resolves via namespace fallback AND that resolution

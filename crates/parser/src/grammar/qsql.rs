@@ -375,7 +375,10 @@ mod tests {
         // Two node children (the column expressions — parse_column_list wraps
         // no ExprStmt, so we count all child nodes).
         let col_count = col_list.children().count();
-        assert_eq!(col_count, 2, "expected 2 columns, got {col_count}:\n{col_list:#?}");
+        assert_eq!(
+            col_count, 2,
+            "expected 2 columns, got {col_count}:\n{col_list:#?}"
+        );
     }
 
     #[test]
@@ -401,6 +404,9 @@ mod tests {
             .expect("WhereClause not found");
         // Two node children (the condition expressions).
         let cond_count = where_clause.children().count();
-        assert_eq!(cond_count, 2, "expected 2 conditions, got {cond_count}:\n{where_clause:#?}");
+        assert_eq!(
+            cond_count, 2,
+            "expected 2 conditions, got {cond_count}:\n{where_clause:#?}"
+        );
     }
 }
