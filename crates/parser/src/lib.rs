@@ -1082,9 +1082,9 @@ mod parse_coverage {
 
     fn has_error(node: &SyntaxNode) -> bool {
         node.descendants_with_tokens().any(|e| {
-            e.as_node().map_or(false, |n| n.kind() == SyntaxKind::Error)
+            e.as_node().is_some_and(|n| n.kind() == SyntaxKind::Error)
                 || e.as_token()
-                    .map_or(false, |t| t.kind() == SyntaxKind::Error)
+                    .is_some_and(|t| t.kind() == SyntaxKind::Error)
         })
     }
 
@@ -1097,9 +1097,7 @@ mod parse_coverage {
                 failures.push(expr);
             }
         }
-        if !failures.is_empty() {
-            panic!("ERROR nodes found in:\n{}", failures.join("\n"));
-        }
+        assert!(failures.is_empty(), "ERROR nodes found in:\n{}", failures.join("\n"));
     }
 
     #[test]
@@ -1111,8 +1109,6 @@ mod parse_coverage {
                 failures.push(format!("{expr:?}: {:?}", p.errors));
             }
         }
-        if !failures.is_empty() {
-            panic!("Parse errors found:\n{}", failures.join("\n"));
-        }
+        assert!(failures.is_empty(), "Parse errors found:\n{}", failures.join("\n"));
     }
 }

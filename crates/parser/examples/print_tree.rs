@@ -14,12 +14,11 @@ fn print_node(node: &SyntaxNode, indent: usize) {
             )
         })
         .collect();
-    if tokens.len() == 1 {
-        if let SyntaxElement::Token(t) = &tokens[0] {
+    if tokens.len() == 1
+        && let SyntaxElement::Token(t) = &tokens[0] {
             println!("{pad}{kind:?} {:?}", t.text());
             return;
         }
-    }
     // Non-trivial text — print node kind then children
     let preview: String = text.chars().take(40).collect();
     println!("{pad}{kind:?} ({preview:?})");

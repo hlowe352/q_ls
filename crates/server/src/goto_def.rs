@@ -219,7 +219,7 @@ mod tests {
             GotoDefinitionResponse::Scalar(loc) => {
                 assert_eq!(loc.uri, uri_a);
             }
-            _ => panic!("unexpected response variant"),
+            GotoDefinitionResponse::Link(_) => panic!("unexpected response variant"),
         }
     }
 

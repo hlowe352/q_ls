@@ -411,14 +411,13 @@ impl SymTable {
             let namespaced: Vec<u32> = self
                 .globals
                 .get(qualified.as_str())
-                .map_or_else(Vec::new, |v| v.to_vec());
+                .map_or_else(Vec::new, std::clone::Clone::clone);
             if !namespaced.is_empty() {
                 return namespaced;
             }
         }
         self.globals
-            .get(name)
-            .map(|v| v.to_vec())
+            .get(name).cloned()
             .unwrap_or_default()
     }
 
