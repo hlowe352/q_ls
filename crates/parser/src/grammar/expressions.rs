@@ -70,8 +70,7 @@ fn expr_bp(p: &mut Parser, min_bp: u8) {
         }
 
         // Juxtaposition: `f x` — implicit function application.
-        if can_juxtapose(p)
-        {
+        if can_juxtapose(p) {
             let (l_bp, r_bp) = (1u8, 0u8);
             if l_bp < min_bp {
                 break;
@@ -550,9 +549,7 @@ fn can_juxtapose(p: &Parser) -> bool {
     if !can_start_expr(p) || p.has_preceding_newline() {
         return false;
     }
-    if p.qsql_stop
-        && matches!(p.current_text(), Some("from" | "by" | "where"))
-    {
+    if p.qsql_stop && matches!(p.current_text(), Some("from" | "by" | "where")) {
         return false;
     }
     if p.qsql_comma_stop && p.current() == Some(SyntaxKind::Comma) {
