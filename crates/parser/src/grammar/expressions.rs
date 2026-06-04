@@ -70,16 +70,7 @@ fn expr_bp(p: &mut Parser, min_bp: u8) {
         }
 
         // Juxtaposition: `f x` — implicit function application.
-        // If the next token can start an expression (atom), treat it as
-        // applying `lhs` to the next expression.
-        // However, don't parse juxtaposition across a newline; that terminates the statement.
-        // In qSQL column lists, also stop before clause keywords so `from`/`by`/`where`
-        // end the column expression rather than being consumed as arguments.
-        // Also stop before `,` in comma-stop mode so it acts as a list separator.
-        if can_start_expr(p)
-            && !p.has_preceding_newline()
-            && !(p.qsql_stop && matches!(p.current_text(), Some("from" | "by" | "where")))
-            && !(p.qsql_comma_stop && p.current() == Some(SyntaxKind::Comma))
+        if can_juxtapose(p)
         {
             let (l_bp, r_bp) = (1u8, 0u8);
             if l_bp < min_bp {
@@ -552,6 +543,22 @@ fn at_expr_boundary(p: &Parser) -> bool {
             SyntaxKind::Semi | SyntaxKind::RBrace | SyntaxKind::RBracket | SyntaxKind::RParen
         ),
     }
+}
+
+/// Returns `true` if juxtaposition (`f x`) should be parsed at the current position.
+fn can_juxtapose(p: &Parser) -> bool {
+    if !can_start_expr(p) || p.has_preceding_newline() {
+        return false;
+    }
+    if p.qsql_stop
+        && matches!(p.current_text(), Some("from" | "by" | "where"))
+    {
+        return false;
+    }
+    if p.qsql_comma_stop && p.current() == Some(SyntaxKind::Comma) {
+        return false;
+    }
+    true
 }
 
 /// Returns `true` if the current token can start an expression (for juxtaposition).
