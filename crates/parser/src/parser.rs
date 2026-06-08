@@ -370,8 +370,8 @@ fn split_misplaced_dsl_lines(tokens: &mut Vec<LexedToken>) {
     }
 }
 
-/// Merge `Minus` tokens that are immediately followed (no whitespace between)
-/// by a numeric literal into a single negative literal token.
+/// Merge `Minus` tokens followed by a numeric literal into a single negative
+/// literal token.
 ///
 /// The preceding token determines whether `-` is a negative sign or a binary
 /// subtraction operator:
@@ -379,6 +379,10 @@ fn split_misplaced_dsl_lines(tokens: &mut Vec<LexedToken>) {
 ///   semicolon the `-` is a negative sign and is merged with the digit.
 /// - After any other token (identifier, number, closing delimiter) the `-` is
 ///   a subtraction operator and is left alone.
+///
+/// The gap between `-` and the number is checked implicitly: the lexer emits
+/// whitespace as explicit `Whitespace` tokens, so if any gap exists
+/// `tokens[i + 1]` will be `Whitespace`, failing the `Integer | Float` check.
 fn merge_negative_literals(tokens: &mut Vec<LexedToken>) {
     let mut i = 0;
     while i + 1 < tokens.len() {
@@ -386,7 +390,7 @@ fn merge_negative_literals(tokens: &mut Vec<LexedToken>) {
             i += 1;
             continue;
         }
-        // The following token must be a numeric literal with no gap.
+        // Whitespace between `-` and the number would appear as an explicit Whitespace token here.
         let next_kind = tokens[i + 1].kind;
         if !matches!(next_kind, SyntaxKind::Integer | SyntaxKind::Float) {
             i += 1;
