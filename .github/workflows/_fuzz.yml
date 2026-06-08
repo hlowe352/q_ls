@@ -37,19 +37,16 @@ jobs:
             crates/parser/fuzz
 
       - name: install cargo-fuzz
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-fuzz
+        # Use cargo install without --locked so rustix (a cargo-fuzz dep) can
+        # be resolved to a version compatible with current nightly. The
+        # rust-cache step above caches ~/.cargo/bin between runs.
+        run: cargo install cargo-fuzz
 
       - name: fuzz parse target
         working-directory: crates/parser
         env:
           MAX_TIME: ${{ inputs.max_total_time }}
-        # taiki-e/install-action ships a musl-linked cargo-fuzz binary that
-        # defaults its build to x86_64-unknown-linux-musl. ASan is
-        # incompatible with statically linked libc, so force the gnu target
-        # so the fuzzer links against glibc.
-        run: cargo fuzz run --target x86_64-unknown-linux-gnu parse tests/data/real_q -- -max_total_time=$MAX_TIME -timeout=10
+        run: cargo fuzz run parse tests/data/real_q -- -max_total_time=$MAX_TIME -timeout=10
 
       - name: upload crashes
         if: failure()

@@ -38,6 +38,8 @@ pub enum Token {
     #[regex(r"0W[fe]", priority = 5)] // typed float infs
     #[regex(r"[0-9]+\.[0-9]*([eE][0-9]+)?[fe]?")] // decimal float
     #[regex(r"[0-9]+[eE][0-9]+[fe]?")] // scientific without dot
+    #[regex(r"[0-9]+f")] // integer-form float: `3f`, `100f`
+    #[regex(r"[0-9]+e")] // integer-form real: `3e`, `100e` (longest-match ensures `3e10` still hits scientific)
     Float,
 
     /// Timestamp literal: `2024.01.15D12:30:00.000000000`
@@ -348,6 +350,31 @@ mod tests {
     fn lex_float_suffix() {
         let mut lex = Token::lexer("3.14f");
         assert_eq!(lex.next(), Some(Ok(Token::Float)));
+    }
+
+    // Integer-form typed float/real: `3f` → float, `3e` → real.
+    // These appear as list suffixes, e.g. `1 2 3f` or `10 20 30e`.
+    #[test]
+    fn lex_integer_form_float() {
+        assert_eq!(Token::lexer("3f").next(), Some(Ok(Token::Float)));
+        assert_eq!(Token::lexer("0f").next(), Some(Ok(Token::Float)));
+        assert_eq!(Token::lexer("100f").next(), Some(Ok(Token::Float)));
+    }
+
+    #[test]
+    fn lex_integer_form_real() {
+        assert_eq!(Token::lexer("3e").next(), Some(Ok(Token::Float)));
+        assert_eq!(Token::lexer("0e").next(), Some(Ok(Token::Float)));
+        assert_eq!(Token::lexer("100e").next(), Some(Ok(Token::Float)));
+    }
+
+    // `3e10` must remain scientific notation (not `3e` + `10`).
+    #[test]
+    fn lex_scientific_beats_real_suffix() {
+        let mut lex = Token::lexer("3e10");
+        assert_eq!(lex.next(), Some(Ok(Token::Float)));
+        assert_eq!(lex.slice(), "3e10");
+        assert_eq!(lex.next(), None);
     }
 
     #[test]
