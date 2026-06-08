@@ -39,28 +39,13 @@ macro_rules! ok {
     };
 }
 
-macro_rules! err {
-    ($cat:literal, $src:literal) => {
-        check($cat, $src, true)
-    };
-}
-
 fn main() {
     let mut pass = 0usize;
     let mut fail = 0usize;
-    let mut note = 0usize;
 
     macro_rules! run {
         (ok $cat:literal $src:literal) => {{
             if ok!($cat, $src) { pass += 1; } else { fail += 1; }
-        }};
-        (err $cat:literal $src:literal) => {{
-            let p = parse($src);
-            if p.errors.is_empty() && !has_error_node(&p.syntax()) {
-                println!("NOTE [{}] expected error but parsed clean: {:?}", $cat, $src);
-                note += 1;
-            }
-            pass += 1; // errors are expected
         }};
     }
 
@@ -662,9 +647,8 @@ fn main() {
     // -----------------------------------------------------------------------
     // Summary
     // -----------------------------------------------------------------------
-    let _ = note;
     println!("\n========================================");
-    println!("PASS: {pass}  FAIL: {fail}  NOTE: {note}");
+    println!("PASS: {pass}  FAIL: {fail}");
     println!("========================================");
 
     if fail > 0 {
