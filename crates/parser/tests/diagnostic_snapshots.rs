@@ -1,4 +1,4 @@
-//! Snapshot tests for parser diagnostics — errors that produce ParseError entries
+//! Snapshot tests for parser diagnostics — errors that produce `ParseError` entries
 //! rather than silently mis-parsing.
 
 use q_parser::parse;

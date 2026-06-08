@@ -1,5 +1,5 @@
 //! Broad parser exploration: run many q expressions, report unexpected errors.
-//! Usage: cargo run -p q-parser --example explore_broad
+//! Usage: `cargo run -p q-parser --example explore_broad`
 
 use q_parser::{SyntaxKind, SyntaxNode, parse};
 
@@ -39,6 +39,7 @@ macro_rules! ok {
     };
 }
 
+#[allow(clippy::too_many_lines)]
 fn main() {
     let mut pass = 0usize;
     let mut fail = 0usize;
@@ -633,11 +634,11 @@ fn main() {
     // -----------------------------------------------------------------------
     // Complex real-world function
     // -----------------------------------------------------------------------
-    run!(ok "realworld" r#"checkTab:{[db;tname]
+    run!(ok "realworld" r"checkTab:{[db;tname]
     if[tname in key db; :1b];
     paths: .Q.dd[db;tname];
     1b
-  }"#);
+  }");
     run!(ok "realworld" "f:{[x;y]\n    r: x+y;\n    if[r>100; '\"overflow\"];\n    r\n  }");
     run!(ok "realworld" "t:([] sym:`a`b`c; price:1.1 2.2 3.3; size:100 200 300)");
     run!(ok "realworld" "select avg price by sym from t where size>100");
