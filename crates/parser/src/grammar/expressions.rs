@@ -81,6 +81,20 @@ fn expr_bp(p: &mut Parser, min_bp: u8) {
             continue;
         }
 
+        // A SystemCmd token on the same line as an expression (e.g. `f\x`) is
+        // most likely a mistyped scan adverb — the user probably meant `(f\) x`
+        // or `f\[x]`. kdb+ only allows system commands at line start.
+        // If there's a preceding newline it belongs to the next statement; break
+        // so root() can call statement() for it.
+        if p.current() == Some(SyntaxKind::SystemCmd) && !p.has_preceding_newline() {
+            let text = p.current_text().unwrap_or("\\...").to_string();
+            p.error(format!(
+                "unexpected `{text}`; did you mean a scan adverb? \
+                 Use `(f\\) x` or `f\\[x]` for scan-apply"
+            ));
+            continue;
+        }
+
         break;
     }
 }
@@ -263,6 +277,14 @@ fn atom(p: &mut Parser) -> Option<CompletedMarker> {
                 SyntaxKind::UnaryExpr
             };
             Some(m.complete(p, kind))
+        }
+
+        SyntaxKind::SystemCmd => {
+            p.error(format!(
+                "system command `{}` must appear at the start of a line",
+                p.current_text().unwrap_or("\\...")
+            ));
+            None
         }
 
         _ => {
