@@ -125,7 +125,16 @@ fn atom(p: &mut Parser) -> Option<CompletedMarker> {
             // (`1 2 3`). Emit the leading trivia BEFORE opening the VectorExpr
             // node so its text range starts at the first digit, not at any
             // preceding whitespace.
-            if p.nth(1).is_some_and(is_scalar_literal_kind) && !p.has_newline_after_current() {
+            // Guard on `kind` is required: `String` shares this match arm but is
+            // NOT a scalar literal kind, so without the guard a String followed by
+            // an Integer (e.g. `"a" 32`) would enter VectorExpr, `eat_trivia()`,
+            // exit the while-loop immediately (String fails `is_scalar_literal`),
+            // and return Some(empty VectorExpr) WITHOUT advancing — causing the
+            // caller to recurse on the same String token indefinitely.
+            if is_scalar_literal_kind(kind)
+                && p.nth(1).is_some_and(is_scalar_literal_kind)
+                && !p.has_newline_after_current()
+            {
                 p.eat_trivia();
                 let m = p.start();
                 while is_scalar_literal(p) && !p.has_preceding_newline() {

@@ -14,6 +14,20 @@ fn errors(src: &str) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
+// Regression: String followed by Integer must not trigger VectorExpr
+// ---------------------------------------------------------------------------
+
+#[test]
+fn string_followed_by_integer_does_not_stack_overflow() {
+    // `String` is in the same match arm as scalar literals but is NOT a scalar
+    // literal kind — without the `is_scalar_literal_kind(kind)` guard on the
+    // VectorExpr entry, `"a" 32` would cause infinite recursion.
+    let p = parse(r#"f["a" 32 "b"]"#);
+    // Must terminate (no stack overflow); errors are fine.
+    let _ = p;
+}
+
+// ---------------------------------------------------------------------------
 // SystemCmd must appear at line start
 // ---------------------------------------------------------------------------
 
