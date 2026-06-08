@@ -120,6 +120,21 @@ fn atom(p: &mut Parser) -> Option<CompletedMarker> {
         | SyntaxKind::Time
         | SyntaxKind::Timestamp
         | SyntaxKind::ByteList => {
+            // If the next non-trivia token is also a scalar literal with no
+            // newline between, we're at the start of a space-separated vector
+            // (`1 2 3`). Emit the leading trivia BEFORE opening the VectorExpr
+            // node so its text range starts at the first digit, not at any
+            // preceding whitespace.
+            if p.nth(1).is_some_and(is_scalar_literal_kind) && !p.has_newline_after_current() {
+                p.eat_trivia();
+                let m = p.start();
+                while is_scalar_literal(p) && !p.has_preceding_newline() {
+                    let em = p.start();
+                    p.bump();
+                    em.complete(p, SyntaxKind::LiteralExpr);
+                }
+                return Some(m.complete(p, SyntaxKind::VectorExpr));
+            }
             let m = p.start();
             p.bump();
             Some(m.complete(p, SyntaxKind::LiteralExpr))
@@ -647,6 +662,32 @@ fn can_start_expr(p: &Parser) -> bool {
                 | SyntaxKind::Backslash
         )
     )
+}
+
+/// Returns `true` if `kind` is a scalar literal that can appear in a
+/// space-separated vector (`1 2 3`, `` `a `b `c ``, `0b 1b`, etc.).
+fn is_scalar_literal_kind(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::Integer
+            | SyntaxKind::Float
+            | SyntaxKind::Boolean
+            | SyntaxKind::Symbol
+            | SyntaxKind::Date
+            | SyntaxKind::Month
+            | SyntaxKind::Guid
+            | SyntaxKind::Timespan
+            | SyntaxKind::Datetime
+            | SyntaxKind::Minute
+            | SyntaxKind::Second
+            | SyntaxKind::Time
+            | SyntaxKind::Timestamp
+            | SyntaxKind::ByteList
+    )
+}
+
+fn is_scalar_literal(p: &Parser) -> bool {
+    p.current().is_some_and(is_scalar_literal_kind)
 }
 
 /// Returns `true` if the current token is an adverb / iterator.

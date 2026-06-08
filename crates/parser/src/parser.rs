@@ -370,6 +370,53 @@ fn split_misplaced_dsl_lines(tokens: &mut Vec<LexedToken>) {
     }
 }
 
+/// Merge `Minus` tokens that are immediately followed (no whitespace between)
+/// by a numeric literal into a single negative literal token.
+///
+/// The preceding token determines whether `-` is a negative sign or a binary
+/// subtraction operator:
+/// - After whitespace, a newline, an opening delimiter (`(`, `[`, `{`), or a
+///   semicolon the `-` is a negative sign and is merged with the digit.
+/// - After any other token (identifier, number, closing delimiter) the `-` is
+///   a subtraction operator and is left alone.
+fn merge_negative_literals(tokens: &mut Vec<LexedToken>) {
+    let mut i = 0;
+    while i + 1 < tokens.len() {
+        if tokens[i].kind != SyntaxKind::Minus {
+            i += 1;
+            continue;
+        }
+        // The following token must be a numeric literal with no gap.
+        let next_kind = tokens[i + 1].kind;
+        if !matches!(next_kind, SyntaxKind::Integer | SyntaxKind::Float) {
+            i += 1;
+            continue;
+        }
+        // Check preceding context.
+        let preceded_by_ws_or_delim = if i == 0 {
+            true
+        } else {
+            matches!(
+                tokens[i - 1].kind,
+                SyntaxKind::Whitespace
+                    | SyntaxKind::Newline
+                    | SyntaxKind::LParen
+                    | SyntaxKind::LBracket
+                    | SyntaxKind::LBrace
+                    | SyntaxKind::Semi
+            )
+        };
+        if !preceded_by_ws_or_delim {
+            i += 1;
+            continue;
+        }
+        // Merge: replace the two tokens with one negative literal.
+        let merged_text = SmolStr::new(format!("-{}", tokens[i + 1].text));
+        tokens.splice(i..=i + 1, std::iter::once(LexedToken { kind: next_kind, text: merged_text }));
+        i += 1;
+    }
+}
+
 pub struct Parser {
     tokens: Vec<LexedToken>,
     pos: usize,
@@ -455,6 +502,11 @@ impl Parser {
         // `p)`) must be split back into Ident + RParen + rest.
         split_misplaced_dsl_lines(&mut tokens);
 
+        // Post-process step 4: merge adjacent minus + numeric into a single
+        // negative literal token (`-23`, `-1.5`) when the context indicates a
+        // negative sign rather than binary subtraction.
+        merge_negative_literals(&mut tokens);
+
         let nt: Vec<usize> = tokens
             .iter()
             .enumerate()
@@ -497,6 +549,20 @@ impl Parser {
     /// `nt_cursor` is kept in sync by `bump` / `error`.
     fn non_trivia_idx(&self, n: usize) -> Option<usize> {
         self.nt.get(self.nt_cursor + n).copied()
+    }
+
+    /// Returns `true` if there is a newline in the trivia that lies between
+    /// the current non-trivia token and the next one.  Used to decide whether
+    /// two adjacent scalar literals belong to the same vector.
+    #[must_use]
+    pub fn has_newline_after_current(&self) -> bool {
+        let Some(cur) = self.non_trivia_idx(0) else {
+            return false;
+        };
+        let next_end = self.non_trivia_idx(1).unwrap_or(self.tokens.len());
+        self.tokens[cur + 1..next_end]
+            .iter()
+            .any(|t| t.kind == SyntaxKind::Newline)
     }
 
     /// Peek at the current (non-trivia) token kind.

@@ -110,6 +110,8 @@ pub enum SyntaxKind {
     ParenExpr,
     /// `(expr;expr;...)` — list literal.
     ListExpr,
+    /// `1 2 3` — space-separated homogeneous scalar vector.
+    VectorExpr,
     /// `$[cond;true;false]` — conditional expression.
     CondExpr,
     /// Identifier reference.
