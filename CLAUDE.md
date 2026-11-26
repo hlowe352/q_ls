@@ -29,4 +29,9 @@ cargo run -p q-parser --example print_tree -- file.q         # inspect parse tre
 
 **Contextual qSQL keywords** — `select`, `exec`, `update`, `delete`, `from`, `by`, `where` are plain `Ident` tokens. Detection is always `p.current_text() == Some("keyword")`. There are no reserved-word token variants.
 
-**Parser state flags** — `qsql_stop` and `qsql_comma_stop` on `Parser` control juxtaposition and comma parsing in qSQL clause context. Both flags must be saved and restored whenever entering a bracketed sub-expression (`parse_paren`, `parse_lambda`, `parse_arg_list`, `parse_progn`) so they do not leak into nested expressions.
+**Parser state flags** — `qsql_stop` and `qsql_comma_stop` on `Parser` control juxtaposition and comma parsing in qSQL clause context. Only change them through `with_qsql_flags` (grammar/expressions.rs), which restores the previous values; bracketed sub-parsers (`parse_paren`, `parse_lambda`, `parse_bracketed`) run with both cleared so flags never leak into nested expressions.
+
+# Tests
+
+- Table-driven: add parser inputs to `CLEAN` (crates/parser/tests/corpus.rs), CST shapes to `SNAPSHOTS`/`SHAPES` (tests/snapshots.rs), lexer cases to `CASES` (lexer/src/token.rs).
+- Server test helpers: `workspace_index::tests::{uri, doc, index}` and `goto_def::tests::locations`.

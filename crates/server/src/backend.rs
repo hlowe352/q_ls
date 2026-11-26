@@ -1,6 +1,5 @@
-use std::borrow::Cow;
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_lsp_server::jsonrpc::Result;
@@ -12,142 +11,121 @@ use crate::config::Config;
 use crate::document::Document;
 use crate::workspace_index::WorkspaceIndex;
 
+#[derive(Default)]
+struct State {
+    /// Every known document. Open documents hold the editor's text and are
+    /// never overwritten from disk while open.
+    index: WorkspaceIndex,
+    open: HashSet<Uri>,
+    root: Option<PathBuf>,
+    config: Config,
+}
+
+impl State {
+    fn diagnostics(&self, uri: &Uri) -> Option<(Uri, Vec<Diagnostic>, i32)> {
+        let doc = self.index.get(uri)?;
+        let diags = crate::diagnostics::compute_diagnostics(doc, &self.index, &self.config);
+        Some((uri.clone(), diags, doc.version()))
+    }
+}
+
 pub struct QLanguageServer {
     client: Client,
-    documents: Arc<RwLock<HashMap<Uri, Document>>>,
-    workspace_index: Arc<RwLock<WorkspaceIndex>>,
-    workspace_root: Arc<RwLock<Option<PathBuf>>>,
-    config: Arc<RwLock<Config>>,
+    state: Arc<RwLock<State>>,
 }
 
 impl QLanguageServer {
     pub fn new(client: Client) -> Self {
         Self {
             client,
-            documents: Arc::new(RwLock::new(HashMap::new())),
-            workspace_index: Arc::new(RwLock::new(WorkspaceIndex::default())),
-            workspace_root: Arc::new(RwLock::new(None)),
-            config: Arc::new(RwLock::new(Config::default())),
+            state: Arc::default(),
         }
     }
 
-    async fn on_change(&self, uri: Uri, doc: &Document) {
-        let idx = self.workspace_index.read().await;
-        let cfg = self.config.read().await;
-        let diagnostics =
-            crate::diagnostics::compute_diagnostics_with_workspace_and_config(doc, &idx, &cfg);
-        self.client
-            .publish_diagnostics(uri, diagnostics, Some(doc.version()))
-            .await;
+    async fn publish(client: &Client, batch: Vec<(Uri, Vec<Diagnostic>, i32)>) {
+        for (uri, diags, version) in batch {
+            client.publish_diagnostics(uri, diags, Some(version)).await;
+        }
     }
 
-    fn spawn_indexing(
-        root: PathBuf,
-        idx: Arc<RwLock<WorkspaceIndex>>,
-        docs: Arc<RwLock<HashMap<Uri, Document>>>,
-        cfg: Arc<RwLock<Config>>,
-        client: Client,
-    ) {
+    async fn publish_one(&self, uri: &Uri) {
+        let batch = self.state.read().await.diagnostics(uri);
+        Self::publish(&self.client, batch.into_iter().collect()).await;
+    }
+
+    /// Run `f` on the document at `uri`, if known.
+    async fn with_doc<T>(
+        &self,
+        uri: &Uri,
+        f: impl FnOnce(&Document, &WorkspaceIndex) -> Option<T>,
+    ) -> Result<Option<T>> {
+        let st = self.state.read().await;
+        Ok(st.index.get(uri).and_then(|doc| f(doc, &st.index)))
+    }
+
+    /// Load `.q-ls.json` from `root` and index its `.q` files in the
+    /// background, then re-publish diagnostics for open documents.
+    async fn index_workspace(&self, root: PathBuf) {
+        let (cfg, status) = Config::load(&root);
+        self.state.write().await.config = cfg;
+        self.client.log_message(MessageType::INFO, status).await;
+        let msg = format!("q-ls: indexing workspace at {}", root.display());
+        self.client.log_message(MessageType::INFO, msg).await;
+
+        let state = Arc::clone(&self.state);
+        let client = self.client.clone();
         tokio::spawn(async move {
-            match tokio::task::spawn_blocking(move || collect_and_parse_q_files(&root)).await {
-                Ok(pairs) => {
-                    let n = pairs.len();
-                    {
-                        let mut index = idx.write().await;
-                        for (uri, doc) in pairs {
-                            index.index_file(uri, doc);
-                        }
-                    }
-                    client
-                        .log_message(MessageType::INFO, format!("q-ls: indexed {n} .q files"))
-                        .await;
-                    // Re-publish diagnostics for all open documents now that the
-                    // full workspace index is available.
-                    let open = docs.read().await;
-                    let index = idx.read().await;
-                    let config = cfg.read().await;
-                    for (uri, doc) in open.iter() {
-                        let diags =
-                            crate::diagnostics::compute_diagnostics_with_workspace_and_config(
-                                doc, &index, &config,
-                            );
-                        client
-                            .publish_diagnostics(uri.clone(), diags, Some(doc.version()))
-                            .await;
-                    }
-                }
+            let scan = tokio::task::spawn_blocking(move || {
+                let mut files = Vec::new();
+                collect_q_files(&root, &mut files);
+                files
+            });
+            let files = match scan.await {
+                Ok(files) => files,
                 Err(e) => {
-                    client
-                        .log_message(
-                            MessageType::ERROR,
-                            format!("q-ls: workspace indexing failed: {e}"),
-                        )
-                        .await;
+                    let msg = format!("q-ls: workspace indexing failed: {e}");
+                    client.log_message(MessageType::ERROR, msg).await;
+                    return;
                 }
-            }
+            };
+            let n = files.len();
+            let batch: Vec<_> = {
+                let mut st = state.write().await;
+                for (uri, doc) in files {
+                    if !st.open.contains(&uri) {
+                        st.index.insert(uri, doc);
+                    }
+                }
+                st.open.iter().filter_map(|u| st.diagnostics(u)).collect()
+            };
+            let msg = format!("q-ls: indexed {n} .q files");
+            client.log_message(MessageType::INFO, msg).await;
+            Self::publish(&client, batch).await;
         });
-    }
-
-    /// Set workspace root to `root` (if not already set) and kick off background
-    /// indexing. Returns `true` if indexing was started, `false` if a root was
-    /// already set and this call was a no-op.
-    async fn try_start_indexing(&self, root: PathBuf) -> bool {
-        // Atomically claim the root so concurrent did_open calls don't double-index.
-        {
-            let mut guard = self.workspace_root.write().await;
-            if guard.is_some() {
-                return false;
-            }
-            *guard = Some(root.clone());
-        }
-        let (cfg, cfg_status) = Config::load(&root);
-        *self.config.write().await = cfg;
-        self.client.log_message(MessageType::INFO, cfg_status).await;
-        self.client
-            .log_message(
-                MessageType::INFO,
-                format!("q-ls: indexing workspace at {}", root.display()),
-            )
-            .await;
-        Self::spawn_indexing(
-            root,
-            Arc::clone(&self.workspace_index),
-            Arc::clone(&self.documents),
-            Arc::clone(&self.config),
-            self.client.clone(),
-        );
-        true
     }
 }
 
 impl LanguageServer for QLanguageServer {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
         #[allow(deprecated)]
-        let client_root: Option<PathBuf> = params
+        let client_root = params
             .workspace_folders
             .as_ref()
             .and_then(|folders| folders.first())
-            .and_then(|f| f.uri.to_file_path().map(Cow::into_owned))
-            .or_else(|| {
-                params
-                    .root_uri
-                    .as_ref()
-                    .and_then(|u| u.to_file_path().map(Cow::into_owned))
-            });
+            .map(|f| &f.uri)
+            .or(params.root_uri.as_ref())
+            .and_then(|u| u.to_file_path().map(std::borrow::Cow::into_owned));
         // Upgrade to the nearest .git root so a client that sends a sub-folder
         // (or Neovim sending the file's parent dir) still gets the full repo.
-        let root = client_root.and_then(|p| find_git_root(&p).or(Some(p)));
-        *self.workspace_root.write().await = root;
+        self.state.write().await.root = client_root.map(|p| find_git_root(&p).unwrap_or(p));
 
+        let (token_types, token_modifiers) = crate::semantic::legend();
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Options(
                     TextDocumentSyncOptions {
                         open_close: Some(true),
                         change: Some(TextDocumentSyncKind::INCREMENTAL),
-                        save: Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions {
-                            include_text: Some(false),
-                        })),
                         ..Default::default()
                     },
                 )),
@@ -166,16 +144,12 @@ impl LanguageServer for QLanguageServer {
                 semantic_tokens_provider: Some(
                     SemanticTokensServerCapabilities::SemanticTokensOptions(
                         SemanticTokensOptions {
-                            work_done_progress_options: WorkDoneProgressOptions::default(),
-                            legend: {
-                                let (token_types, token_modifiers) = crate::semantic::legend();
-                                SemanticTokensLegend {
-                                    token_types,
-                                    token_modifiers,
-                                }
+                            legend: SemanticTokensLegend {
+                                token_types,
+                                token_modifiers,
                             },
-                            range: Some(false),
                             full: Some(SemanticTokensFullOptions::Bool(true)),
+                            ..Default::default()
                         },
                     ),
                 ),
@@ -192,10 +166,7 @@ impl LanguageServer for QLanguageServer {
                 name: "q-ls".into(),
                 version: Some(env!("CARGO_PKG_VERSION").into()),
             }),
-            // tower-lsp-server defaults to UTF-16, which is what LSP spec
-            // mandates and what our `LineIndex` is built for. `None` ==
-            // "do not negotiate, use spec default" — explicit so the field
-            // doesn't read as forgotten.
+            // `None`: use the spec-default UTF-16, which `LineIndex` implements.
             offset_encoding: None,
         })
     }
@@ -205,42 +176,24 @@ impl LanguageServer for QLanguageServer {
             .log_message(MessageType::INFO, "q-ls initialized")
             .await;
 
+        let watchers = DidChangeWatchedFilesRegistrationOptions {
+            watchers: vec![FileSystemWatcher {
+                glob_pattern: GlobPattern::String("**/*.q".to_string()),
+                kind: None,
+            }],
+        };
         let registration = Registration {
             id: "watch-q-files".to_string(),
             method: "workspace/didChangeWatchedFiles".to_string(),
-            register_options: Some(
-                serde_json::to_value(DidChangeWatchedFilesRegistrationOptions {
-                    watchers: vec![FileSystemWatcher {
-                        glob_pattern: GlobPattern::String("**/*.q".to_string()),
-                        kind: None,
-                    }],
-                })
-                .expect("static registration options are always serialisable"),
-            ),
+            register_options: serde_json::to_value(watchers).ok(),
         };
         let _ = self.client.register_capability(vec![registration]).await;
 
-        // Start indexing if initialize resolved a root. If it didn't (client
-        // sent no root at all), did_open will detect the root from the first
-        // opened file and call try_start_indexing then.
-        let root = self.workspace_root.read().await.clone();
+        // With no root from the client, did_open detects it from the first
+        // opened file instead.
+        let root = self.state.read().await.root.clone();
         if let Some(root) = root {
-            let (cfg, cfg_status) = Config::load(&root);
-            *self.config.write().await = cfg;
-            self.client.log_message(MessageType::INFO, cfg_status).await;
-            self.client
-                .log_message(
-                    MessageType::INFO,
-                    format!("q-ls: indexing workspace at {}", root.display()),
-                )
-                .await;
-            Self::spawn_indexing(
-                root,
-                Arc::clone(&self.workspace_index),
-                Arc::clone(&self.documents),
-                Arc::clone(&self.config),
-                self.client.clone(),
-            );
+            self.index_workspace(root).await;
         } else {
             self.client
                 .log_message(
@@ -256,17 +209,25 @@ impl LanguageServer for QLanguageServer {
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        let uri = params.text_document.uri.clone();
-        let text = params.text_document.text;
-        let version = params.text_document.version;
+        let doc = params.text_document;
+        let uri = doc.uri;
 
-        // Fallback: client sent no root in InitializeParams. Walk up from the
-        // opened file to find .git and index the whole repo from there.
-        if self.workspace_root.read().await.is_none()
-            && let Some(file_path) = uri.to_file_path().map(Cow::into_owned)
-        {
-            if let Some(git_root) = find_git_root(&file_path) {
-                self.try_start_indexing(git_root).await;
+        // Fallback root: walk up from the opened file to its .git.
+        let needs_root = self.state.read().await.root.is_none();
+        if needs_root && let Some(path) = uri.to_file_path() {
+            if let Some(git_root) = find_git_root(&path) {
+                // Claim atomically so concurrent opens don't double-index.
+                let claimed = {
+                    let mut st = self.state.write().await;
+                    let free = st.root.is_none();
+                    if free {
+                        st.root = Some(git_root.clone());
+                    }
+                    free
+                };
+                if claimed {
+                    self.index_workspace(git_root).await;
+                }
             } else {
                 self.client
                     .log_message(
@@ -278,250 +239,163 @@ impl LanguageServer for QLanguageServer {
         }
 
         {
-            let mut idx = self.workspace_index.write().await;
-            idx.index_file(uri.clone(), Document::new(text.clone(), version));
+            let mut st = self.state.write().await;
+            st.open.insert(uri.clone());
+            st.index
+                .insert(uri.clone(), Document::new(doc.text, doc.version));
         }
-
-        let doc = Document::new(text, version);
-        self.on_change(uri.clone(), &doc).await;
-        self.documents.write().await.insert(uri, doc);
+        self.publish_one(&uri).await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
-        let uri = params.text_document.uri.clone();
-
-        let (text, version) = {
-            let mut docs = self.documents.write().await;
-            let Some(doc) = docs.get_mut(&uri) else {
+        let uri = params.text_document.uri;
+        {
+            let mut st = self.state.write().await;
+            let Some(mut doc) = st.index.remove(&uri) else {
                 return;
             };
             doc.apply_changes(params.content_changes, params.text_document.version);
-            (doc.text().to_string(), doc.version())
-        };
-
-        {
-            let mut idx = self.workspace_index.write().await;
-            idx.index_file(uri.clone(), Document::new(text.clone(), version));
+            st.index.insert(uri.clone(), doc);
         }
-
-        let docs = self.documents.read().await;
-        if let Some(doc) = docs.get(&uri) {
-            self.on_change(uri, doc).await;
-        }
+        self.publish_one(&uri).await;
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
-        self.documents
+        // The last editor text stays indexed until the file watcher reports
+        // a change on disk.
+        self.state
             .write()
             .await
+            .open
             .remove(&params.text_document.uri);
     }
 
-    async fn did_save(&self, params: DidSaveTextDocumentParams) {
-        let uri = params.text_document.uri.clone();
-        let docs = self.documents.read().await;
-        if let Some(doc) = docs.get(&uri) {
-            let mut idx = self.workspace_index.write().await;
-            idx.index_file(uri, Document::new(doc.text().to_string(), doc.version()));
-        }
-    }
-
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
-        for change in params.changes {
-            let uri = change.uri;
-            match change.typ {
-                FileChangeType::CREATED | FileChangeType::CHANGED => {
-                    let Some(path) = uri.to_file_path() else {
-                        continue;
-                    };
-                    let Ok(text) = std::fs::read_to_string(&path) else {
-                        continue;
-                    };
-                    let mut idx = self.workspace_index.write().await;
-                    idx.index_file(uri, Document::new(text, 0));
-                }
-                FileChangeType::DELETED => {
-                    let mut idx = self.workspace_index.write().await;
-                    idx.remove_file(&uri);
-                }
-                _ => {}
+        let mut st = self.state.write().await;
+        for FileEvent { uri, typ } in params.changes {
+            if st.open.contains(&uri) {
+                continue;
+            }
+            if typ == FileChangeType::DELETED {
+                st.index.remove(&uri);
+            } else if let Some(text) = uri
+                .to_file_path()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+            {
+                st.index.insert(uri, Document::new(text, 0));
             }
         }
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
-        let uri = &params.text_document_position.text_document.uri;
-        let pos = params.text_document_position.position;
-        let docs = self.documents.read().await;
-        let idx = self.workspace_index.read().await;
-        let Some(doc) = docs.get(uri) else {
-            return Ok(None);
-        };
-        let items = crate::completion::complete_with_workspace(doc, pos, &idx);
-        Ok(Some(CompletionResponse::Array(items)))
+        let tdp = params.text_document_position;
+        self.with_doc(&tdp.text_document.uri, |doc, ws| {
+            let items = crate::completion::complete(doc, tdp.position, ws);
+            Some(CompletionResponse::Array(items))
+        })
+        .await
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
-        let uri = &params.text_document_position_params.text_document.uri;
-        let pos = params.text_document_position_params.position;
-        let docs = self.documents.read().await;
-        let idx = self.workspace_index.read().await;
-        let Some(doc) = docs.get(uri) else {
-            return Ok(None);
-        };
-        Ok(crate::hover::hover_with_workspace(doc, pos, &idx))
+        let tdp = params.text_document_position_params;
+        self.with_doc(&tdp.text_document.uri, |doc, ws| {
+            crate::hover::hover(doc, tdp.position, ws)
+        })
+        .await
     }
 
     async fn goto_definition(
         &self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
-        let uri = params
-            .text_document_position_params
-            .text_document
-            .uri
-            .clone();
-        let pos = params.text_document_position_params.position;
-        let docs = self.documents.read().await;
-        let idx = self.workspace_index.read().await;
-        let Some(doc) = docs.get(&uri) else {
-            return Ok(None);
-        };
-        Ok(crate::goto_def::goto_definition_with_workspace(
-            doc, pos, &uri, &idx,
-        ))
+        let tdp = params.text_document_position_params;
+        let uri = &tdp.text_document.uri;
+        self.with_doc(uri, |doc, ws| {
+            crate::goto_def::goto_definition(doc, tdp.position, uri, ws)
+        })
+        .await
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
-        let uri = params.text_document_position.text_document.uri.clone();
-        let pos = params.text_document_position.position;
-        let include_declaration = params.context.include_declaration;
-        let docs = self.documents.read().await;
-        let idx = self.workspace_index.read().await;
-        let Some(doc) = docs.get(&uri) else {
-            return Ok(None);
-        };
-        let locs = crate::references::find_references_with_workspace(
-            doc,
-            pos,
-            include_declaration,
-            &uri,
-            &docs,
-            &idx,
-        );
-        Ok(Some(locs))
+        let tdp = params.text_document_position;
+        let uri = &tdp.text_document.uri;
+        let include_decl = params.context.include_declaration;
+        self.with_doc(uri, |doc, ws| {
+            let locs = crate::references::find_references(doc, tdp.position, include_decl, uri, ws);
+            Some(locs)
+        })
+        .await
     }
 
     async fn prepare_rename(
         &self,
         params: TextDocumentPositionParams,
     ) -> Result<Option<PrepareRenameResponse>> {
-        let uri = &params.text_document.uri;
-        let pos = params.position;
-        let docs = self.documents.read().await;
-        let Some(doc) = docs.get(uri) else {
-            return Ok(None);
-        };
-        Ok(crate::rename::prepare_rename(doc, pos))
+        self.with_doc(&params.text_document.uri, |doc, _| {
+            crate::rename::prepare_rename(doc, params.position)
+        })
+        .await
     }
 
     async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
-        let uri = params.text_document_position.text_document.uri.clone();
-        let pos = params.text_document_position.position;
-        let docs = self.documents.read().await;
-        let idx = self.workspace_index.read().await;
-        let Some(doc) = docs.get(&uri) else {
-            return Ok(None);
-        };
-        Ok(crate::rename::rename_with_workspace(
-            doc,
-            pos,
-            &params.new_name,
-            &uri,
-            &docs,
-            &idx,
-        ))
+        let tdp = params.text_document_position;
+        let uri = &tdp.text_document.uri;
+        self.with_doc(uri, |doc, ws| {
+            crate::rename::rename(doc, tdp.position, &params.new_name, uri, ws)
+        })
+        .await
     }
 
     async fn semantic_tokens_full(
         &self,
         params: SemanticTokensParams,
     ) -> Result<Option<SemanticTokensResult>> {
-        let uri = &params.text_document.uri;
-        let docs = self.documents.read().await;
-        let Some(doc) = docs.get(uri) else {
-            return Ok(None);
-        };
-        let data = crate::semantic::semantic_tokens(doc);
-        Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
-            result_id: None,
-            data,
-        })))
+        self.with_doc(&params.text_document.uri, |doc, _| {
+            Some(SemanticTokensResult::Tokens(SemanticTokens {
+                result_id: None,
+                data: crate::semantic::semantic_tokens(doc),
+            }))
+        })
+        .await
     }
 
     async fn document_symbol(
         &self,
         params: DocumentSymbolParams,
     ) -> Result<Option<DocumentSymbolResponse>> {
-        let uri = &params.text_document.uri;
-        let docs = self.documents.read().await;
-        let Some(doc) = docs.get(uri) else {
-            return Ok(None);
-        };
-        let symbols = crate::symbols::document_symbols(doc);
-        Ok(Some(DocumentSymbolResponse::Nested(symbols)))
+        self.with_doc(&params.text_document.uri, |doc, _| {
+            Some(DocumentSymbolResponse::Nested(
+                crate::symbols::document_symbols(doc),
+            ))
+        })
+        .await
     }
 }
 
-/// Walk up the directory tree from `path` until a `.git` entry is found.
-/// Returns the directory that contains `.git`, or `None` if never found.
-fn find_git_root(path: &std::path::Path) -> Option<PathBuf> {
-    let mut dir = if path.is_file() {
-        path.parent()?.to_path_buf()
-    } else {
-        path.to_path_buf()
-    };
-    loop {
-        if dir.join(".git").exists() {
-            return Some(dir);
-        }
-        if !dir.pop() {
-            return None;
-        }
-    }
+/// Walk up from `path` to the nearest directory containing `.git`.
+fn find_git_root(path: &Path) -> Option<PathBuf> {
+    let start = if path.is_file() { path.parent()? } else { path };
+    start
+        .ancestors()
+        .find(|dir| dir.join(".git").exists())
+        .map(Path::to_path_buf)
 }
 
-fn collect_and_parse_q_files(root: &std::path::Path) -> Vec<(Uri, Document)> {
-    let mut result = Vec::new();
-    collect_recursive(root, &mut result);
-    result
-}
-
-fn collect_recursive(dir: &std::path::Path, out: &mut Vec<(Uri, Document)>) {
+/// Recursively parse every `.q` file under `dir`, keyed by canonical URI.
+fn collect_q_files(dir: &Path, out: &mut Vec<(Uri, Document)>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
+    for path in entries.flatten().map(|e| e.path()) {
         if path.is_dir() {
-            collect_recursive(&path, out);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("q") {
-            let Ok(text) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let Ok(abs) = path.canonicalize() else {
-                continue;
-            };
-            let Ok(uri) = path_to_uri(&abs) else {
-                continue;
-            };
+            collect_q_files(&path, out);
+        } else if path.extension().is_some_and(|e| e == "q")
+            && let Ok(text) = std::fs::read_to_string(&path)
+            && let Some(uri) = path.canonicalize().ok().and_then(Uri::from_file_path)
+        {
             out.push((uri, Document::new(text, 0)));
         }
     }
-}
-
-fn path_to_uri(abs: &std::path::Path) -> std::result::Result<Uri, ()> {
-    Uri::from_file_path(abs).ok_or(())
 }
 
 #[cfg(test)]
@@ -529,11 +403,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn path_to_uri_encodes_spaces() {
-        let uri = path_to_uri(std::path::Path::new("/tmp/my file.q"))
-            .expect("must produce a Uri for path with spaces");
-        let s = uri.as_str();
-        assert!(!s.contains(' '), "URI must not contain literal spaces: {s}");
-        assert!(s.contains("%20"), "spaces must be percent-encoded: {s}");
+    fn collect_q_files_and_git_root() {
+        let root = std::env::temp_dir().join(format!("q-ls-backend-{}", std::process::id()));
+        let sub = root.join("my dir");
+        std::fs::create_dir_all(sub.join(".git")).unwrap();
+        std::fs::write(sub.join("a.q"), "a:1").unwrap();
+        std::fs::write(sub.join("notes.txt"), "x").unwrap();
+
+        let mut files = Vec::new();
+        collect_q_files(&root, &mut files);
+        assert_eq!(files.len(), 1);
+        let uri = files[0].0.as_str();
+        assert!(
+            uri.ends_with("my%20dir/a.q"),
+            "spaces percent-encoded: {uri}"
+        );
+
+        assert_eq!(find_git_root(&sub.join("a.q")), Some(sub.clone()));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

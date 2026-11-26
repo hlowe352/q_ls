@@ -1,165 +1,87 @@
-use crate::builtins::lookup_doc;
+use crate::builtins::{OPERATORS, lookup_doc};
 use crate::document::Document;
+use crate::syntax::has_ancestor;
 use crate::workspace_index::WorkspaceIndex;
+use q_parser::{SyntaxKind, TextSize};
 #[allow(clippy::wildcard_imports)]
 use tower_lsp_server::ls_types::*;
 
-#[allow(dead_code)]
-pub fn hover(doc: &Document, pos: Position) -> Option<Hover> {
-    hover_with_workspace(doc, pos, &WorkspaceIndex::default())
-}
-
-pub fn hover_with_workspace(
-    doc: &Document,
-    pos: Position,
-    workspace: &WorkspaceIndex,
-) -> Option<Hover> {
+pub fn hover(doc: &Document, pos: Position, workspace: &WorkspaceIndex) -> Option<Hover> {
     let offset = doc.offset_of(pos);
-
-    // Try the word at cursor (handles bare idents and dotted idents).
-    let word = get_word_at(doc.text(), offset)?;
-
-    if let Some(detail) = lookup_doc(&word) {
-        return Some(Hover {
+    let text = doc.text();
+    if offset >= text.len() {
+        return None;
+    }
+    let markdown = |value: String| {
+        Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
-                value: format!("**{word}** - {detail}"),
+                value,
             }),
             range: None,
-        });
-    }
+        })
+    };
 
-    if let Some(doc_str) = operator_doc(&word) {
-        return Some(Hover {
-            contents: HoverContents::Markup(MarkupContent {
-                kind: MarkupKind::Markdown,
-                value: doc_str.to_string(),
-            }),
-            range: None,
-        });
-    }
-
-    // User-defined name: resolve via sym_table, then fall back to workspace.
-    // Strip a leading backtick so hovering on `` `.cache.cache `` works.
-    let name = word.strip_prefix('`').unwrap_or(word.as_str());
-    if !name.is_empty() {
-        let table = doc.sym_table();
-        if table.resolve(offset, name).is_some() {
-            // Don't qualify names that are column definitions inside a table
-            // constructor — they look like globals but are column names.
-            let in_table = cursor_in_table_expr(doc, offset);
-            let display = if in_table {
-                name.to_string()
-            } else {
-                table
-                    .qualified_for(offset, name)
-                    .map_or_else(|| name.to_string(), |q| q.to_string())
-            };
-            let value = if display == name {
-                format!("**`{display}`**")
-            } else {
-                format!("`{name}` → **`{display}`**")
-            };
-            return Some(Hover {
-                contents: HoverContents::Markup(MarkupContent {
-                    kind: MarkupKind::Markdown,
-                    value,
-                }),
-                range: None,
-            });
+    // Text after a backtick is a symbol (`` `.cache.cache ``, `` `:file ``):
+    // never a builtin or operator.
+    let after_tick = |i: usize| i > 0 && text.as_bytes()[i - 1] == b'`';
+    let Some((name, start, _)) = doc.ident_at(offset) else {
+        // No identifier under the cursor: maybe a single-char operator.
+        let op = text[offset..].chars().next()?.to_string();
+        return (!after_tick(offset))
+            .then(|| operator_doc(&op))
+            .flatten()
+            .and_then(markdown);
+    };
+    if !after_tick(start) {
+        if let Some(detail) = lookup_doc(name) {
+            return markdown(format!("**{name}** - {detail}"));
         }
+        if let Some(doc_str) = operator_doc(name) {
+            return markdown(doc_str);
+        }
+    }
 
-        // Same-file resolution failed — try workspace globals.
-        // Qualify bare name with active namespace for lookup.
-        let ns = table.active_ns_at(offset);
-        let qualified_name: String;
-        let lookup_name = if !ns.is_empty() && !name.starts_with('.') {
-            qualified_name = format!("{ns}.{name}");
-            qualified_name.as_str()
+    let table = doc.sym_table();
+    if table.resolve(offset, name).is_some() {
+        // Column definitions in a table constructor look like globals but
+        // are column names; don't namespace-qualify them.
+        let display = if cursor_in_table_expr(doc, offset) {
+            None
         } else {
-            name
+            table.qualified_for(offset, name)
         };
-        if workspace.resolve_global(lookup_name).is_some() {
-            return Some(Hover {
-                contents: HoverContents::Markup(MarkupContent {
-                    kind: MarkupKind::Markdown,
-                    value: format!("**`{lookup_name}`** *(workspace)*"),
-                }),
-                range: None,
-            });
-        }
+        return markdown(match display {
+            Some(q) if q != name => format!("`{name}` → **`{q}`**"),
+            _ => format!("**`{name}`**"),
+        });
     }
 
-    None
+    // Not resolvable in this file — try workspace globals, qualified with
+    // the active namespace.
+    let ns = table.active_ns_at(offset);
+    let lookup = if !ns.is_empty() && !name.starts_with('.') {
+        format!("{ns}.{name}")
+    } else {
+        name.to_string()
+    };
+    workspace
+        .resolve_global(&lookup)
+        .and_then(|_| markdown(format!("**`{lookup}`** *(workspace)*")))
 }
 
 #[allow(clippy::cast_possible_truncation)]
 fn cursor_in_table_expr(doc: &Document, offset: usize) -> bool {
-    use q_parser::SyntaxKind;
     let root = doc.parse().syntax();
-    let pos = q_parser::TextSize::from(offset as u32);
-    let token = root.token_at_offset(pos).left_biased();
-    token
+    root.token_at_offset(TextSize::from(offset as u32))
+        .left_biased()
         .and_then(|t| t.parent())
-        .is_some_and(|n| n.ancestors().any(|a| a.kind() == SyntaxKind::TableExpr))
+        .is_some_and(|n| has_ancestor(&n, SyntaxKind::TableExpr))
 }
 
-fn get_word_at(text: &str, offset: usize) -> Option<String> {
-    if offset >= text.len() {
-        return None;
-    }
-    let bytes = text.as_bytes();
-
-    // Include a leading backtick so `` `.cache.cache `` is returned as
-    // `` `.cache.cache `` (stripping happens later in callers that need the name).
-    let mut start = offset;
-    let mut end = offset;
-    while start > 0 && is_word_char(bytes[start - 1]) {
-        start -= 1;
-    }
-    // Back up one more if the char before start is a backtick.
-    if start > 0 && bytes[start - 1] == b'`' {
-        start -= 1;
-    }
-    while end < bytes.len() && is_word_char(bytes[end]) {
-        end += 1;
-    }
-    if start == end {
-        // Maybe a single-char operator
-        end = (offset + 1).min(bytes.len());
-        start = offset;
-    }
-    Some(text[start..end].to_string())
-}
-
-fn is_word_char(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_' || b == b'.'
-}
-
-fn operator_doc(op: &str) -> Option<&'static str> {
-    match op {
-        "+" => Some("**`+`** - Add (dyadic) / Flip (monadic)"),
-        "-" => Some("**`-`** - Subtract (dyadic) / Negate (monadic)"),
-        "*" => Some("**`*`** - Multiply (dyadic) / First (monadic)"),
-        "%" => Some("**`%`** - Divide (dyadic) / Reciprocal (monadic)"),
-        "!" => Some("**`!`** - Key/mod (dyadic) / Til/enum (monadic)"),
-        "&" => Some("**`&`** - And/min (dyadic) / Where (monadic)"),
-        "|" => Some("**`|`** - Or/max (dyadic) / Reverse (monadic)"),
-        "^" => Some("**`^`** - Fill (dyadic) / Null (monadic)"),
-        "#" => Some("**`#`** - Take (dyadic) / Count (monadic)"),
-        "_" => Some("**`_`** - Drop/cut (dyadic) / Floor (monadic)"),
-        "~" => Some("**`~`** - Match (dyadic) / Not (monadic)"),
-        "$" => Some("**`$`** - Cast/pad (dyadic) / String (monadic)"),
-        "?" => Some("**`?`** - Find/rand (dyadic) / Distinct/type (monadic)"),
-        "@" => Some("**`@`** - Apply/index (dyadic) / Type (monadic)"),
-        "." => Some("**`.`** - Apply deep (dyadic) / Value (monadic)"),
-        "," => Some("**`,`** - Join (dyadic) / Enlist (monadic)"),
-        "=" => Some("**`=`** - Equal (dyadic) / Group (monadic)"),
-        "<" => Some("**`<`** - Less than (dyadic) / Iasc (monadic)"),
-        ">" => Some("**`>`** - Greater than (dyadic) / Idesc (monadic)"),
-        ":" => Some("**`:`** - Assign (dyadic) / Identity (monadic)"),
-        _ => None,
-    }
+fn operator_doc(op: &str) -> Option<String> {
+    let (_, doc) = OPERATORS.iter().find(|(o, _)| *o == op)?;
+    Some(format!("**`{op}`** - {doc}"))
 }
 
 #[cfg(test)]
@@ -170,7 +92,7 @@ mod tests {
     fn hover_text(src: &str, cursor: usize) -> Option<String> {
         let doc = Document::new(src.to_string(), 0);
         let pos = doc.position_of(cursor);
-        hover(&doc, pos).map(|h| match h.contents {
+        hover(&doc, pos, &WorkspaceIndex::default()).map(|h| match h.contents {
             HoverContents::Markup(m) => m.value,
             _ => String::new(),
         })
@@ -221,6 +143,13 @@ mod tests {
     }
 
     #[test]
+    fn no_operator_doc_inside_symbol() {
+        // `:` of a file symbol is not the assign operator; bare `:` is.
+        assert_eq!(hover_text("read0 `:f.txt", 7), None);
+        assert!(hover_text("a : 1", 2).is_some_and(|t| t.contains("Assign")));
+    }
+
+    #[test]
     fn builtin_still_works() {
         let src = "count x";
         let cursor = src.find("count").unwrap();
@@ -235,14 +164,14 @@ mod tests {
         let torq_src = "\\d .proc\n$[1b;[cp:{.z.p}];[cp:{.z.P}]];\n\\d .";
         let torq_uri: tower_lsp_server::ls_types::Uri = "file:///TorQ/torq.q".parse().unwrap();
         let mut idx = WorkspaceIndex::default();
-        idx.index_file(torq_uri, Document::new(torq_src.to_string(), 0));
+        idx.insert(torq_uri, Document::new(torq_src.to_string(), 0));
 
         let cache_src = "\\d .cache\nadd:{[f] now:.proc.cp[];now}\n\\d .";
         let cache_doc = Document::new(cache_src.to_string(), 0);
         let offset = cache_src.find(".proc.cp").unwrap();
         let pos = cache_doc.position_of(offset);
 
-        let result = hover_with_workspace(&cache_doc, pos, &idx);
+        let result = hover(&cache_doc, pos, &idx);
         let text = result
             .map(|h| match h.contents {
                 HoverContents::Markup(m) => m.value,

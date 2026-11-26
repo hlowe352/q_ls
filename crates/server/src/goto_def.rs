@@ -3,12 +3,8 @@ use crate::workspace_index::WorkspaceIndex;
 #[allow(clippy::wildcard_imports)]
 use tower_lsp_server::ls_types::*;
 
-#[allow(dead_code)]
-pub fn goto_definition(doc: &Document, pos: Position, uri: &Uri) -> Option<GotoDefinitionResponse> {
-    goto_definition_with_workspace(doc, pos, uri, &WorkspaceIndex::default())
-}
-
-pub fn goto_definition_with_workspace(
+/// Same-file lexical resolution first, then workspace-wide globals.
+pub fn goto_definition(
     doc: &Document,
     pos: Position,
     uri: &Uri,
@@ -16,45 +12,41 @@ pub fn goto_definition_with_workspace(
 ) -> Option<GotoDefinitionResponse> {
     let offset = doc.offset_of(pos);
     let (name, _, _) = doc.ident_at(offset)?;
+    let location = |uri: &Uri, d: &Document, off: u32| {
+        let p = d.position_of(off as usize);
+        Location::new(uri.clone(), Range::new(p, p))
+    };
 
-    // 1. Try same-file resolution first.
-    if let Some(def_offset) = doc.sym_table().resolve(offset, name) {
-        let def_pos = doc.position_of(def_offset as usize);
-        return Some(GotoDefinitionResponse::Scalar(Location {
-            uri: uri.clone(),
-            range: Range::new(def_pos, def_pos),
-        }));
+    if let Some(def) = doc.sym_table().resolve(offset, name) {
+        return Some(GotoDefinitionResponse::Scalar(location(uri, doc, def)));
     }
-
-    // 2. Fall back to workspace-wide globals.
-    let sites = workspace.resolve_global(name)?;
-    let locations: Vec<Location> = sites
+    let locations: Vec<Location> = workspace
+        .resolve_global(name)?
         .iter()
-        .map(|(def_uri, off)| {
-            let def_pos = workspace
-                .files()
-                .get(def_uri)
-                .map_or(Position::new(0, 0), |d| d.position_of(*off as usize));
-            Location {
-                uri: def_uri.clone(),
-                range: Range::new(def_pos, def_pos),
-            }
-        })
+        .filter_map(|(u, off)| Some(location(u, workspace.get(u)?, *off)))
         .collect();
-    if locations.is_empty() {
-        None
-    } else {
-        Some(GotoDefinitionResponse::Array(locations))
-    }
+    (!locations.is_empty()).then_some(GotoDefinitionResponse::Array(locations))
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
+    use crate::workspace_index::tests::{doc, index, uri};
+
+    /// Flatten a goto-definition response, asserting it is non-empty.
+    pub fn locations(resp: Option<GotoDefinitionResponse>) -> Vec<Location> {
+        let locs = match resp.expect("expected a definition") {
+            GotoDefinitionResponse::Scalar(loc) => vec![loc],
+            GotoDefinitionResponse::Array(locs) => locs,
+            GotoDefinitionResponse::Link(_) => panic!("unexpected Link response"),
+        };
+        assert!(!locs.is_empty());
+        locs
+    }
 
     fn def_offset(src: &str, cursor_byte: usize, name: &str) -> Option<usize> {
-        let doc = Document::new(src.to_string(), 0);
-        doc.sym_table()
+        doc(src)
+            .sym_table()
             .resolve(cursor_byte, name)
             .map(|o| o as usize)
     }
@@ -194,46 +186,37 @@ mod tests {
         assert_eq!(off, expected);
     }
 
+    #[test]
+    fn cross_file_goto_def() {
+        let idx = index(&[("a.q", "foo:42")]);
+        let doc_b = doc("foo+1");
+        let locs = locations(goto_definition(
+            &doc_b,
+            Position::new(0, 0),
+            &uri("b.q"),
+            &idx,
+        ));
+        assert_eq!(locs[0].uri, uri("a.q"));
+    }
+
+    #[test]
+    fn same_file_def_with_workspace() {
+        let d = doc("bar:99; bar+1");
+        let locs = locations(goto_definition(
+            &d,
+            d.position_of(8),
+            &uri("x.q"),
+            &index(&[]),
+        ));
+        assert_eq!(
+            (locs[0].uri.clone(), locs[0].range.start),
+            (uri("x.q"), Position::new(0, 0))
+        );
+    }
+
     /// Wide-stack thread: rowan's `GreenNode` drops recursively and
     /// dbmaint.q nests deep enough to overflow the default 2 MB test
     /// thread stack on teardown — not a logic issue.
-    #[test]
-    fn cross_file_goto_def() {
-        use crate::workspace_index::WorkspaceIndex;
-
-        let uri_a: Uri = "file:///a.q".parse().unwrap();
-        let uri_b: Uri = "file:///b.q".parse().unwrap();
-
-        let doc_b = Document::new("foo+1".to_string(), 0);
-
-        let mut idx = WorkspaceIndex::default();
-        idx.index_file(uri_a.clone(), Document::new("foo:42".to_string(), 0));
-
-        let result = goto_definition_with_workspace(&doc_b, Position::new(0, 0), &uri_b, &idx);
-        let result = result.expect("should resolve cross-file");
-        match result {
-            GotoDefinitionResponse::Array(locs) => {
-                assert!(!locs.is_empty(), "expected at least one location");
-                assert_eq!(locs[0].uri, uri_a);
-            }
-            GotoDefinitionResponse::Scalar(loc) => {
-                assert_eq!(loc.uri, uri_a);
-            }
-            GotoDefinitionResponse::Link(_) => panic!("unexpected response variant"),
-        }
-    }
-
-    #[test]
-    fn same_file_def_still_works_with_workspace() {
-        use crate::workspace_index::WorkspaceIndex;
-
-        let uri: Uri = "file:///x.q".parse().unwrap();
-        let doc = Document::new("bar:99; bar+1".to_string(), 0);
-        let idx = WorkspaceIndex::default();
-        let result = goto_definition_with_workspace(&doc, doc.position_of(8), &uri, &idx);
-        assert!(result.is_some(), "same-file def should still resolve");
-    }
-
     #[test]
     fn dbmaint_fn_resolves_to_lambda_param() {
         std::thread::Builder::new()

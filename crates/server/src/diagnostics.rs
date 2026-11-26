@@ -1,50 +1,46 @@
 use crate::builtins::is_builtin;
 use crate::config::Config;
 use crate::document::Document;
+use crate::syntax::{first_token, has_ancestor, in_qsql, is_assignment_lhs, tokens};
 use crate::workspace_index::WorkspaceIndex;
-use q_parser::{SyntaxKind, SyntaxNode};
+use q_parser::SyntaxKind;
 #[allow(clippy::wildcard_imports)]
 use tower_lsp_server::ls_types::*;
 
-pub fn compute_diagnostics_with_workspace(
-    doc: &Document,
-    workspace: &WorkspaceIndex,
-) -> Vec<Diagnostic> {
-    compute_diagnostics_with_workspace_and_config(doc, workspace, &Config::default())
-}
-
-pub fn compute_diagnostics_with_workspace_and_config(
+pub fn compute_diagnostics(
     doc: &Document,
     workspace: &WorkspaceIndex,
     config: &Config,
 ) -> Vec<Diagnostic> {
-    let mut out: Vec<Diagnostic> = doc
-        .parse()
-        .errors
-        .iter()
-        .map(|err| {
-            let start = doc.position_of(err.offset);
-            let end = doc.position_of(err.offset + err.len);
-            Diagnostic {
-                range: Range::new(start, end),
-                severity: Some(DiagnosticSeverity::ERROR),
-                source: Some("q-ls".into()),
-                message: err.message.clone(),
-                ..Default::default()
-            }
-        })
-        .collect();
-
-    out.extend(unindented_close_warnings(doc));
-    out.extend(unresolved_reference_warnings_with_workspace(
-        doc, workspace, config,
-    ));
-    out
+    let errors = doc.parse().errors.iter().map(|err| {
+        diagnostic(
+            doc,
+            err.offset,
+            err.len,
+            DiagnosticSeverity::ERROR,
+            err.message.clone(),
+        )
+    });
+    errors
+        .chain(unindented_close_warnings(doc))
+        .chain(unresolved_reference_warnings(doc, workspace, config))
+        .collect()
 }
 
-#[allow(dead_code)] // Part of public API
-pub fn compute_diagnostics(doc: &Document) -> Vec<Diagnostic> {
-    compute_diagnostics_with_workspace(doc, &WorkspaceIndex::default())
+fn diagnostic(
+    doc: &Document,
+    offset: usize,
+    len: usize,
+    severity: DiagnosticSeverity,
+    message: String,
+) -> Diagnostic {
+    Diagnostic {
+        range: Range::new(doc.position_of(offset), doc.position_of(offset + len)),
+        severity: Some(severity),
+        source: Some("q-ls".into()),
+        message,
+        ..Default::default()
+    }
 }
 
 /// Warn on closing brackets at column 0 inside a multi-line construct.
@@ -53,192 +49,71 @@ pub fn compute_diagnostics(doc: &Document) -> Vec<Diagnostic> {
 /// so a `}`, `]`, or `)` flush left silently terminates whatever scope it
 /// was meant to close. The parser may still recover, but the resulting
 /// AST diverges from intent and real `q` will reject the file.
-fn unindented_close_warnings(doc: &Document) -> Vec<Diagnostic> {
+fn unindented_close_warnings(doc: &Document) -> impl Iterator<Item = Diagnostic> + '_ {
     let src = doc.text();
-    let root = doc.parse().syntax();
-    let mut diagnostics = Vec::new();
-
-    for tok in root
-        .descendants_with_tokens()
-        .filter_map(q_parser::SyntaxElement::into_token)
-    {
-        let kind = tok.kind();
+    tokens(&doc.parse().syntax()).filter_map(move |tok| {
         if !matches!(
-            kind,
+            tok.kind(),
             SyntaxKind::RBrace | SyntaxKind::RBracket | SyntaxKind::RParen
         ) {
-            continue;
+            return None;
         }
         let off: usize = tok.text_range().start().into();
-
-        // Column 0?  The byte before this token must be a newline (or BOF).
         let at_col_zero = off == 0 || src.as_bytes()[off - 1] == b'\n';
-        if !at_col_zero {
-            continue;
+        // Only closes of scopes that span multiple lines.
+        let open: usize = tok.parent()?.text_range().start().into();
+        if !at_col_zero || !src[open..off].contains('\n') {
+            return None;
         }
-
-        // Single-line scope: skip — only flag closes that span multiple lines.
-        let Some(parent) = tok.parent() else { continue };
-        let open_off: usize = parent.text_range().start().into();
-        if !src[open_off..off].contains('\n') {
-            continue;
-        }
-
-        let pos = doc.position_of(off);
-        let end = doc.position_of(off + tok.text().len());
-        diagnostics.push(Diagnostic {
-            range: Range::new(pos, end),
-            severity: Some(DiagnosticSeverity::WARNING),
-            source: Some("q-ls".into()),
-            message: format!(
+        Some(diagnostic(
+            doc,
+            off,
+            tok.text().len(),
+            DiagnosticSeverity::WARNING,
+            format!(
                 "closing `{}` at column 0 ends the surrounding scope as a new statement; \
                  q expects multi-line closes to be indented",
                 tok.text()
             ),
-            ..Default::default()
-        });
-    }
-
-    diagnostics
-}
-
-/// Warn on identifier references that don't resolve to any visible
-/// definition, considering both local and workspace-level definitions.
-///
-/// Walks every `IdentExpr` / `Namespace` node, skips:
-/// - assignment LHS (the definition site itself),
-/// - parameter list entries (declarations, not refs),
-/// - tokens inside qSQL clauses (`SelectExpr`/`UpdateExpr`/`ExecExpr`/
-///   `DeleteExpr`) — column names there come from row context and aren't
-///   bound by visible code,
-/// - q built-ins (see [`crate::builtins`]),
-/// - symbols defined anywhere in the workspace.
-///
-/// For everything else, calls `SymTable::resolve` at the token's
-/// position. If it returns `None`, checks `WorkspaceIndex::resolve_global`.
-/// Only emits a warning if neither resolves the reference.
-fn unresolved_reference_warnings_with_workspace(
-    doc: &Document,
-    workspace: &WorkspaceIndex,
-    config: &Config,
-) -> Vec<Diagnostic> {
-    let root = doc.parse().syntax();
-    let table = doc.sym_table();
-    let mut diagnostics = Vec::new();
-
-    for node in root.descendants() {
-        if !matches!(node.kind(), SyntaxKind::IdentExpr | SyntaxKind::Namespace) {
-            continue;
-        }
-        if is_in_qsql(&node) || is_assignment_lhs(&node) || is_in_param_list(&node) {
-            continue;
-        }
-        let Some(token) = node
-            .descendants_with_tokens()
-            .filter_map(q_parser::SyntaxElement::into_token)
-            .find(|t| !t.kind().is_trivia())
-        else {
-            continue;
-        };
-        let name = token.text();
-        if is_builtin(name) {
-            continue;
-        }
-        if config.suppress_unresolved.contains(name) {
-            continue;
-        }
-        let off: usize = token.text_range().start().into();
-        if table.resolve(off, name).is_some() {
-            continue;
-        }
-        // Cross-file: suppress if defined anywhere in workspace.
-        if workspace.resolve_global(name).is_some() {
-            continue;
-        }
-
-        let pos = doc.position_of(off);
-        let end = doc.position_of(off + name.len());
-        diagnostics.push(Diagnostic {
-            range: Range::new(pos, end),
-            severity: Some(DiagnosticSeverity::WARNING),
-            source: Some("q-ls".into()),
-            message: format!("unresolved reference `{name}`"),
-            ..Default::default()
-        });
-    }
-
-    diagnostics
-}
-
-/// Warn on identifier references that don't resolve to any visible
-/// definition.
-///
-/// Walks every `IdentExpr` / `Namespace` node, skips:
-/// - assignment LHS (the definition site itself),
-/// - parameter list entries (declarations, not refs),
-/// - tokens inside qSQL clauses (`SelectExpr`/`UpdateExpr`/`ExecExpr`/
-///   `DeleteExpr`) — column names there come from row context and aren't
-///   bound by visible code,
-/// - q built-ins (see [`crate::builtins`]).
-///
-/// For everything else, calls `SymTable::resolve` at the token's
-/// position. If it returns `None`, emit a warning.
-#[allow(dead_code)] // Used by test helper `unresolved_for`
-fn unresolved_reference_warnings(doc: &Document) -> Vec<Diagnostic> {
-    unresolved_reference_warnings_with_workspace(
-        doc,
-        &WorkspaceIndex::default(),
-        &Config::default(),
-    )
-}
-
-fn is_in_qsql(node: &SyntaxNode) -> bool {
-    node.ancestors().any(|n| {
-        match n.kind() {
-            // Statement-level qSQL nodes.
-            SyntaxKind::SelectExpr
-            | SyntaxKind::UpdateExpr
-            | SyntaxKind::ExecExpr
-            | SyntaxKind::DeleteExpr => true,
-            // Expression-level qSQL: inside lambdas or $[…] the parser emits
-            // ApplyExpr chains.  Detect `select`/`exec`/`update`/`delete` in
-            // the function position.
-            SyntaxKind::ApplyExpr => n
-                .first_child()
-                .filter(|fc| fc.kind() == SyntaxKind::IdentExpr)
-                .is_some_and(|fc| {
-                    fc.children_with_tokens()
-                        .filter_map(q_parser::SyntaxElement::into_token)
-                        .any(|t| {
-                            t.kind() == SyntaxKind::Ident
-                                && matches!(t.text(), "select" | "exec" | "update" | "delete")
-                        })
-                }),
-            _ => false,
-        }
+        ))
     })
 }
 
-fn is_in_param_list(node: &SyntaxNode) -> bool {
-    node.ancestors().any(|n| n.kind() == SyntaxKind::ParamList)
-}
-
-/// True if this `IdentExpr` is the LHS of a `BinExpr` whose operator is
-/// `:` or `::` — i.e. this node *is* a definition, not a reference.
-fn is_assignment_lhs(node: &SyntaxNode) -> bool {
-    let Some(parent) = node.parent() else {
-        return false;
-    };
-    if parent.kind() != SyntaxKind::BinExpr {
-        return false;
-    }
-    if parent.first_child().as_ref() != Some(node) {
-        return false;
-    }
-    parent
-        .children_with_tokens()
-        .filter_map(q_parser::SyntaxElement::into_token)
-        .any(|t| t.kind() == SyntaxKind::Colon || t.kind() == SyntaxKind::ColonColon)
+/// Warn on identifier references that resolve neither in this file nor in
+/// the workspace. Skips definition sites (assignment LHS, parameter
+/// lists), qSQL column names (bound by row context), q built-ins, and
+/// names in the config's `suppress_unresolved`.
+fn unresolved_reference_warnings<'a>(
+    doc: &'a Document,
+    workspace: &'a WorkspaceIndex,
+    config: &'a Config,
+) -> impl Iterator<Item = Diagnostic> + 'a {
+    let table = doc.sym_table();
+    doc.parse().syntax().descendants().filter_map(move |node| {
+        if !matches!(node.kind(), SyntaxKind::IdentExpr | SyntaxKind::Namespace)
+            || in_qsql(&node)
+            || is_assignment_lhs(&node)
+            || has_ancestor(&node, SyntaxKind::ParamList)
+        {
+            return None;
+        }
+        let token = first_token(&node)?;
+        let name = token.text();
+        let off: usize = token.text_range().start().into();
+        let resolved = is_builtin(name)
+            || config.suppress_unresolved.contains(name)
+            || table.resolve(off, name).is_some()
+            || workspace.resolve_global(name).is_some();
+        (!resolved).then(|| {
+            diagnostic(
+                doc,
+                off,
+                name.len(),
+                DiagnosticSeverity::WARNING,
+                format!("unresolved reference `{name}`"),
+            )
+        })
+    })
 }
 
 #[cfg(test)]
@@ -247,18 +122,11 @@ mod tests {
 
     fn warns_for(src: &str) -> Vec<String> {
         let doc = Document::new(src.to_string(), 0);
-        unindented_close_warnings(&doc)
-            .into_iter()
-            .map(|d| d.message)
-            .collect()
+        unindented_close_warnings(&doc).map(|d| d.message).collect()
     }
 
     fn unresolved_for(src: &str) -> Vec<String> {
-        let doc = Document::new(src.to_string(), 0);
-        unresolved_reference_warnings(&doc)
-            .into_iter()
-            .map(|d| d.message)
-            .collect()
+        unresolved_with_workspace_for(src, &WorkspaceIndex::default())
     }
 
     #[test]
@@ -476,9 +344,10 @@ mod tests {
 
     fn unresolved_with_workspace_for(src: &str, workspace: &WorkspaceIndex) -> Vec<String> {
         let doc = Document::new(src.to_string(), 0);
-        unresolved_reference_warnings_with_workspace(&doc, workspace, &Config::default())
+        compute_diagnostics(&doc, workspace, &Config::default())
             .into_iter()
             .map(|d| d.message)
+            .filter(|m| m.starts_with("unresolved reference"))
             .collect()
     }
 
@@ -487,7 +356,7 @@ mod tests {
         use crate::workspace_index::WorkspaceIndex;
 
         let mut idx = WorkspaceIndex::default();
-        idx.index_file(
+        idx.insert(
             "file:///other.q".parse().unwrap(),
             Document::new("helper:{x+1}".to_string(), 0),
         );
@@ -521,7 +390,7 @@ mod tests {
         };
         let doc = Document::new("proctype".to_string(), 0);
         let idx = WorkspaceIndex::default();
-        let diags = compute_diagnostics_with_workspace_and_config(&doc, &idx, &cfg);
+        let diags = compute_diagnostics(&doc, &idx, &cfg);
         assert!(diags.is_empty(), "suppressed name must not warn: {diags:?}");
     }
 
@@ -536,7 +405,7 @@ mod tests {
         };
         let doc = Document::new("ghost".to_string(), 0);
         let idx = WorkspaceIndex::default();
-        let diags = compute_diagnostics_with_workspace_and_config(&doc, &idx, &cfg);
+        let diags = compute_diagnostics(&doc, &idx, &cfg);
         assert!(
             diags.iter().any(|d| d.message.contains("`ghost`")),
             "non-suppressed name must still warn: {diags:?}"

@@ -40,6 +40,7 @@ The language server communicates over stdio. Configure your editor's LSP client
 to launch the `q-ls` binary. Neovim (0.11+):
 
 ```lua
+vim.filetype.add({ extension = { q = 'q' } })
 vim.lsp.config('q_ls', { cmd = { 'q-ls' }, filetypes = { 'q' }, root_markers = { '.git' } })
 vim.lsp.enable('q_ls')
 ```

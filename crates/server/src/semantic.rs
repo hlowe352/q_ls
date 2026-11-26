@@ -9,6 +9,7 @@ use tower_lsp_server::ls_types::{SemanticToken, SemanticTokenModifier, SemanticT
 
 use crate::builtins::is_builtin;
 use crate::document::Document;
+use crate::syntax::{has_ancestor, is_assignment_lhs, tokens};
 
 /// Token-type legend, in the order LSP indices reference. Keep this aligned
 /// with `TYPE_*` consts below — `legend()` returns it for capability
@@ -53,10 +54,7 @@ pub fn semantic_tokens(doc: &Document) -> Vec<SemanticToken> {
     let mut prev_line: u32 = 0;
     let mut prev_start: u32 = 0;
 
-    for tok in root
-        .descendants_with_tokens()
-        .filter_map(q_parser::SyntaxElement::into_token)
-    {
+    for tok in tokens(&root) {
         let Some((ty, modifiers)) = classify_token(&tok) else {
             continue;
         };
@@ -143,37 +141,19 @@ fn classify_ident(tok: &SyntaxToken) -> (u32, u32) {
         return (TYPE_FUNCTION, MOD_DEFAULT_LIBRARY);
     }
 
-    let parent = tok.parent();
-    let parent_kind = parent.as_ref().map(q_parser::SyntaxNode::kind);
-
-    // Bare namespace prefix (e.g. `.app` in `.app.cfg` parsed as Namespace).
-    if parent_kind == Some(SyntaxKind::Namespace) {
-        return (TYPE_NAMESPACE, 0);
+    let Some(parent) = tok.parent() else {
+        return (TYPE_VARIABLE, 0);
+    };
+    if parent.kind() == SyntaxKind::Namespace {
+        // Bare namespace (`.app` parsed as Namespace).
+        (TYPE_NAMESPACE, 0)
+    } else if has_ancestor(&parent, SyntaxKind::ParamList) {
+        (TYPE_PARAMETER, MOD_DECLARATION)
+    } else if is_assignment_lhs(&parent) {
+        (TYPE_VARIABLE, MOD_DECLARATION)
+    } else {
+        (TYPE_VARIABLE, 0)
     }
-
-    // Lambda parameter declaration (inside ParamList).
-    if let Some(p) = parent.as_ref()
-        && p.ancestors().any(|n| n.kind() == SyntaxKind::ParamList)
-    {
-        return (TYPE_PARAMETER, MOD_DECLARATION);
-    }
-
-    // Assignment LHS = declaration. The token's grandparent is a BinExpr
-    // whose LHS is the IdentExpr containing this token.
-    let is_decl = parent
-        .as_ref()
-        .and_then(q_parser::SyntaxNode::parent)
-        .is_some_and(|gp| {
-            gp.kind() == SyntaxKind::BinExpr
-                && gp.first_child().as_ref() == parent.as_ref()
-                && gp
-                    .children_with_tokens()
-                    .filter_map(q_parser::SyntaxElement::into_token)
-                    .any(|t| matches!(t.kind(), SyntaxKind::Colon | SyntaxKind::ColonColon))
-        });
-
-    let mods = if is_decl { MOD_DECLARATION } else { 0 };
-    (TYPE_VARIABLE, mods)
 }
 
 #[cfg(test)]

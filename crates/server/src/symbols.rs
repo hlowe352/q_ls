@@ -1,4 +1,5 @@
 use crate::document::Document;
+use crate::syntax::{is_assignment, tokens};
 use q_parser::{SyntaxKind, SyntaxNode, SyntaxToken};
 #[allow(clippy::wildcard_imports)]
 use tower_lsp_server::ls_types::*;
@@ -27,13 +28,7 @@ fn symbol_for_assign(doc: &Document, bin: &SyntaxNode) -> Option<DocumentSymbol>
     let name_tok = first_lhs_name(bin)?;
     let name = name_tok.text().to_string();
 
-    let range = bin.text_range();
-    let start = doc.position_of(range.start().into());
-    let end = doc.position_of(range.end().into());
-    let full_range = Range::new(start, end);
-
-    let sel_range = {
-        let r = name_tok.text_range();
+    let range = |r: q_parser::TextRange| {
         Range::new(
             doc.position_of(r.start().into()),
             doc.position_of(r.end().into()),
@@ -56,22 +51,14 @@ fn symbol_for_assign(doc: &Document, bin: &SyntaxNode) -> Option<DocumentSymbol>
         kind,
         tags: None,
         deprecated: None,
-        range: full_range,
-        selection_range: sel_range,
+        range: range(bin.text_range()),
+        selection_range: range(name_tok.text_range()),
         children,
     })
 }
 
-fn is_assignment(bin: &SyntaxNode) -> bool {
-    bin.children_with_tokens()
-        .filter_map(q_parser::SyntaxElement::into_token)
-        .any(|t| t.kind() == SyntaxKind::Colon || t.kind() == SyntaxKind::ColonColon)
-}
-
 fn first_lhs_name(bin: &SyntaxNode) -> Option<SyntaxToken> {
-    let lhs = bin.first_child()?;
-    lhs.descendants_with_tokens()
-        .filter_map(q_parser::SyntaxElement::into_token)
+    tokens(&bin.first_child()?)
         .find(|t| matches!(t.kind(), SyntaxKind::Ident | SyntaxKind::DottedIdent))
 }
 
