@@ -564,7 +564,7 @@ mod tests {
         let usage = src.find("not minus").unwrap() + "not ".len();
         assert!(refs(src, def, true).len() >= 2);
         assert!(refs(src, usage, true).len() >= 2);
-        assert!(!refs(src, def, false).is_empty());
-        assert!(!refs(src, src.find("loc:").unwrap(), false).is_empty());
+        assert_ne!(refs(src, def, false), [0usize; 0]);
+        assert_ne!(refs(src, src.find("loc:").unwrap(), false), [0usize; 0]);
     }
 }

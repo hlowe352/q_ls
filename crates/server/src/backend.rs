@@ -204,8 +204,8 @@ impl LanguageServer for QLanguageServer {
         }
     }
 
-    async fn shutdown(&self) -> Result<()> {
-        Ok(())
+    fn shutdown(&self) -> impl Future<Output = Result<()>> + Send {
+        std::future::ready(Ok(()))
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {

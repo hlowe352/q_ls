@@ -5,6 +5,9 @@ use logos::Logos;
 /// Horizontal whitespace (spaces and tabs) is skipped automatically.
 /// Newlines are significant in q (statement separators) and are emitted as
 /// [`Token::Newline`].
+// clippy >= 1.100 flags repeated `priority = N` arguments across separate
+// `#[regex]` attributes as duplicates; they are distinct logos patterns.
+#[allow(clippy::duplicated_attributes)]
 #[derive(Logos, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[logos(skip r"[ \t]+")] // skip horizontal whitespace only
 pub enum Token {

@@ -427,7 +427,7 @@ mod tests {
     #[test]
     fn global_def_offsets_empty_for_unknown() {
         let doc = Document::new("foo:1".to_string(), 0);
-        assert!(doc.sym_table().global_def_offsets("bar").is_empty());
+        assert_eq!(doc.sym_table().global_def_offsets("bar"), [0u32; 0]);
     }
 
     #[test]
@@ -465,7 +465,7 @@ mod tests {
             .stack_size(8 * 1024 * 1024)
             .spawn(move || {
                 let doc = Document::new(src.to_string(), 0);
-                assert!(!doc.sym_table().global_def_offsets(".proc.cp").is_empty());
+                assert_ne!(doc.sym_table().global_def_offsets(".proc.cp"), [0u32; 0]);
             })
             .unwrap()
             .join()

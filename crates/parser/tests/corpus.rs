@@ -82,8 +82,11 @@ fn parses_real_q_fixtures_clean() {
 
 #[test]
 fn parses_test_data_fixtures() {
-    assert!(problems(include_str!("../../../test_data/basic.q")).is_empty());
-    assert!(problems(include_str!("../../../test_data/qsql.q")).is_empty());
+    assert_eq!(
+        problems(include_str!("../../../test_data/basic.q")),
+        [""; 0]
+    );
+    assert_eq!(problems(include_str!("../../../test_data/qsql.q")), [""; 0]);
     // errors.q must report errors but stay lossless.
     let src = include_str!("../../../test_data/errors.q");
     let p = parse(src);

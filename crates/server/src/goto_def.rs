@@ -40,7 +40,7 @@ pub mod tests {
             GotoDefinitionResponse::Array(locs) => locs,
             GotoDefinitionResponse::Link(_) => panic!("unexpected Link response"),
         };
-        assert!(!locs.is_empty());
+        assert_ne!(locs, []);
         locs
     }
 
