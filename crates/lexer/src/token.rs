@@ -39,7 +39,8 @@ pub enum Token {
     #[regex(r"[0-9]+\.[0-9]*([eE][0-9]+)?[fe]?")] // decimal float
     #[regex(r"[0-9]+[eE][0-9]+[fe]?")] // scientific without dot
     #[regex(r"[0-9]+f")] // integer-form float: `3f`, `100f`
-    #[regex(r"[0-9]+e")] // integer-form real: `3e`, `100e` (longest-match ensures `3e10` still hits scientific)
+    #[regex(r"[0-9]+e")]
+    // integer-form real: `3e`, `100e` (longest-match ensures `3e10` still hits scientific)
     Float,
 
     /// Timestamp literal: `2024.01.15D12:30:00.000000000`
@@ -276,747 +277,158 @@ pub enum Token {
     Error,
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use logos::Logos;
+
+    /// Each input must lex to exactly the listed token kinds (space-separated).
+    /// Single-token cases therefore also pin the token's span to the input.
+    #[rustfmt::skip]
+    const CASES: &[(&str, &str)] = &[
+    ("42", "Integer"),
+    ("42j", "Integer"),
+    ("42i", "Integer"),
+    ("42h", "Integer"),
+    ("0x2A", "Integer"),
+    ("0Ni", "Integer"),
+    ("0Wi", "Integer"),
+    ("0Nh", "Integer"),
+    ("3.14", "Float"),
+    ("3.14e10", "Float"),
+    ("3.14f", "Float"),
+    ("3f", "Float"),
+    ("0f", "Float"),
+    ("100f", "Float"),
+    ("3e", "Float"),
+    ("0e", "Float"),
+    ("100e", "Float"),
+    ("3e10", "Float"),
+    ("0n", "Float"),
+    ("0w", "Float"),
+    ("0Nf", "Float"),
+    ("0Wf", "Float"),
+    ("010101b", "Boolean"),
+    ("0b", "Boolean"),
+    ("1b", "Boolean"),
+    ("`hello", "Symbol"),
+    ("`", "Symbol"),
+    ("`a.b", "Symbol"),
+    ("trade", "Ident"),
+    ("x1", "Ident"),
+    (".q.func", "DottedIdent"),
+    (".Q.en", "DottedIdent"),
+    ("my_var", "Ident"),
+    (".proc.my_func", "DottedIdent"),
+    (".my_ns.func", "DottedIdent"),
+    ("+ - * %", "Plus Minus Star Percent"),
+    ("{[x;y] x+y}", "LBrace LBracket Ident Semi Ident RBracket Ident Plus Ident RBrace"),
+    ("\"hello world\"", "String"),
+    ("\"a\\nb\"", "String"),
+    ("\\l file.q", "SystemCmd"),
+    ("\\t expr", "SystemCmd"),
+    ("::", "ColonColon"),
+    (":", "Colon"),
+    ("':", "EachPrior"),
+    ("/:", "EachRight"),
+    ("\\:", "EachLeft"),
+    ("'", "Each"),
+    ("a\nb", "Ident Newline Ident"),
+    ("\\\\", "Exit"),
+    ("/", "Slash"),
+    ("\\", "Backslash"),
+    ("/ this is a comment", "LineComment"),
+    ("2024.01.15", "Date"),
+    ("0Nd", "Date"),
+    ("12:30:00.000", "Time"),
+    ("0Nt", "Time"),
+    ("2024.01.15D12:30:00.000000000", "Timestamp"),
+    ("= < >", "Eq Lt Gt"),
+    ("! & | ^ # _ ~ $ ? @ , .", "Bang Amp Pipe Caret Hash Underscore Tilde Dollar Query At Comma Dot"),
+    ("x:42", "Ident Colon Integer"),
+    ("assert.true", "Ident"),
+    ("-42", "Minus Integer"),
+    ("<=", "LtEq"),
+    (">=", "GtEq"),
+    ("<>", "NotEq"),
+    ("x<=y", "Ident LtEq Ident"),
+    ("0: x", "FileOp0 Ident"),
+    ("1:", "FileOp1"),
+    ("2:", "FileOp2"),
+    ("10:x", "Integer Colon Ident"),
+    ("x:0", "Ident Colon Integer"),
+    ("`:data.csv", "FileSymbol"),
+    ("`:/abs/path", "FileSymbol"),
+    ("`:host:5001", "FileSymbol"),
+    ("x+:1", "Ident CompoundAssign Integer"),
+    ("x,:y", "Ident CompoundAssign Ident"),
+    ("0Nm", "Month"),
+    ("0Ng", "Guid"),
+    ("0N", "Integer"),
+    ("0Nj", "Integer"),
+    ("0Nn", "Timespan"),
+    ("0Np", "Integer"),
+    ("0Wm", "Month"),
+    ("0Wg", "Guid"),
+    ("0Wn", "Timespan"),
+    ("0Wz", "Datetime"),
+    ("0Wu", "Minute"),
+    ("0Wv", "Second"),
+    ("0Wp", "Integer"),
+    ("#!/usr/bin/env q", "Shebang"),
+    ("# !x", "Hash Bang Ident"),
+    ("2024.01m", "Month"),
+    ("0D00:00:00.000000000", "Timespan"),
+    ("1D", "Timespan"),
+    ("2D", "Timespan"),
+    ("0D", "Timespan"),
+    ("0Nz", "Datetime"),
+    ("12:30", "Minute"),
+    ("0Nu", "Minute"),
+    ("12:30:45", "Second"),
+    ("0Nv", "Second"),
+    ("12:30:45.678", "Time"),
+    ("0xABCD", "ByteList"),
+    ("0x0011223344", "ByteList"),
+    ("0xAB", "Integer"),
+    ("/\nthis is\nblock comment\n\\\n", "CommentBlock"),
+    ("/\nuntil end of file", "CommentBlock"),
+    ("k)1+2", "DslLine"),
+    ("p)select * from t", "DslLine"),
+    ("k)foo\nbar", "DslLine Newline Ident"),
+    ("k", "Ident"),
+    ("/\nblock\nstuff\n\\\ny:2\n", "CommentBlock"),
+    ("+:", "CompoundAssign"),
+    ("-:", "CompoundAssign"),
+    ("*:", "CompoundAssign"),
+    ("%:", "CompoundAssign"),
+    (">:", "CompoundAssign"),
+    ("<:", "CompoundAssign"),
+    ("~:", "CompoundAssign"),
+    ("=:", "CompoundAssign"),
+    ("_:", "CompoundAssign"),
+    ("#:", "CompoundAssign"),
+    ("$:", "CompoundAssign"),
+    ("!:", "CompoundAssign"),
+    ("|:", "CompoundAssign"),
+    ("&:", "CompoundAssign"),
+    ("?:", "CompoundAssign"),
+    ("^:", "CompoundAssign"),
+    (",:", "CompoundAssign"),
+    ("@:", "CompoundAssign"),
+    ];
 
     #[test]
-    fn lex_integer() {
-        let mut lex = Token::lexer("42");
-        assert_eq!(lex.next(), Some(Ok(Token::Integer)));
-        assert_eq!(lex.slice(), "42");
-    }
-
-    #[test]
-    fn lex_long_suffix() {
-        let mut lex = Token::lexer("42j");
-        assert_eq!(lex.next(), Some(Ok(Token::Integer)));
-    }
-
-    #[test]
-    fn lex_int_suffix() {
-        let mut lex = Token::lexer("42i");
-        assert_eq!(lex.next(), Some(Ok(Token::Integer)));
-    }
-
-    #[test]
-    fn lex_short_suffix() {
-        let mut lex = Token::lexer("42h");
-        assert_eq!(lex.next(), Some(Ok(Token::Integer)));
-    }
-
-    #[test]
-    fn lex_hex() {
-        let mut lex = Token::lexer("0x2A");
-        assert_eq!(lex.next(), Some(Ok(Token::Integer)));
-    }
-
-    #[test]
-    fn lex_typed_null_int() {
-        let mut lex = Token::lexer("0Ni");
-        assert_eq!(lex.next(), Some(Ok(Token::Integer)));
-    }
-
-    #[test]
-    fn lex_typed_inf_int() {
-        let mut lex = Token::lexer("0Wi");
-        assert_eq!(lex.next(), Some(Ok(Token::Integer)));
-    }
-
-    #[test]
-    fn lex_typed_null_short() {
-        let mut lex = Token::lexer("0Nh");
-        assert_eq!(lex.next(), Some(Ok(Token::Integer)));
-    }
-
-    #[test]
-    fn lex_float() {
-        let mut lex = Token::lexer("3.14");
-        assert_eq!(lex.next(), Some(Ok(Token::Float)));
-    }
-
-    #[test]
-    fn lex_float_scientific() {
-        let mut lex = Token::lexer("3.14e10");
-        assert_eq!(lex.next(), Some(Ok(Token::Float)));
-    }
-
-    #[test]
-    fn lex_float_suffix() {
-        let mut lex = Token::lexer("3.14f");
-        assert_eq!(lex.next(), Some(Ok(Token::Float)));
-    }
-
-    // Integer-form typed float/real: `3f` → float, `3e` → real.
-    // These appear as list suffixes, e.g. `1 2 3f` or `10 20 30e`.
-    #[test]
-    fn lex_integer_form_float() {
-        assert_eq!(Token::lexer("3f").next(), Some(Ok(Token::Float)));
-        assert_eq!(Token::lexer("0f").next(), Some(Ok(Token::Float)));
-        assert_eq!(Token::lexer("100f").next(), Some(Ok(Token::Float)));
-    }
-
-    #[test]
-    fn lex_integer_form_real() {
-        assert_eq!(Token::lexer("3e").next(), Some(Ok(Token::Float)));
-        assert_eq!(Token::lexer("0e").next(), Some(Ok(Token::Float)));
-        assert_eq!(Token::lexer("100e").next(), Some(Ok(Token::Float)));
-    }
-
-    // `3e10` must remain scientific notation (not `3e` + `10`).
-    #[test]
-    fn lex_scientific_beats_real_suffix() {
-        let mut lex = Token::lexer("3e10");
-        assert_eq!(lex.next(), Some(Ok(Token::Float)));
-        assert_eq!(lex.slice(), "3e10");
-        assert_eq!(lex.next(), None);
-    }
-
-    #[test]
-    fn lex_float_null() {
-        let mut lex = Token::lexer("0n");
-        assert_eq!(lex.next(), Some(Ok(Token::Float)));
-    }
-
-    #[test]
-    fn lex_float_inf() {
-        let mut lex = Token::lexer("0w");
-        assert_eq!(lex.next(), Some(Ok(Token::Float)));
-    }
-
-    #[test]
-    fn lex_typed_null_float() {
-        let mut lex = Token::lexer("0Nf");
-        assert_eq!(lex.next(), Some(Ok(Token::Float)));
-    }
-
-    #[test]
-    fn lex_typed_inf_float() {
-        let mut lex = Token::lexer("0Wf");
-        assert_eq!(lex.next(), Some(Ok(Token::Float)));
-    }
-
-    #[test]
-    fn lex_boolean_list() {
-        let mut lex = Token::lexer("010101b");
-        assert_eq!(lex.next(), Some(Ok(Token::Boolean)));
-    }
-
-    #[test]
-    fn lex_boolean_single_zero() {
-        let mut lex = Token::lexer("0b");
-        assert_eq!(lex.next(), Some(Ok(Token::Boolean)));
-    }
-
-    #[test]
-    fn lex_boolean_single_one() {
-        let mut lex = Token::lexer("1b");
-        assert_eq!(lex.next(), Some(Ok(Token::Boolean)));
-    }
-
-    #[test]
-    fn lex_symbol() {
-        let mut lex = Token::lexer("`hello");
-        assert_eq!(lex.next(), Some(Ok(Token::Symbol)));
-        assert_eq!(lex.slice(), "`hello");
-    }
-
-    #[test]
-    fn lex_null_symbol() {
-        let mut lex = Token::lexer("`");
-        assert_eq!(lex.next(), Some(Ok(Token::Symbol)));
-    }
-
-    #[test]
-    fn lex_dotted_symbol() {
-        let mut lex = Token::lexer("`a.b");
-        assert_eq!(lex.next(), Some(Ok(Token::Symbol)));
-        assert_eq!(lex.slice(), "`a.b");
-    }
-
-    #[test]
-    fn lex_identifier() {
-        let mut lex = Token::lexer("trade");
-        assert_eq!(lex.next(), Some(Ok(Token::Ident)));
-    }
-
-    #[test]
-    fn lex_identifier_with_digits() {
-        let mut lex = Token::lexer("x1");
-        assert_eq!(lex.next(), Some(Ok(Token::Ident)));
-    }
-
-    #[test]
-    fn lex_dotted_ident() {
-        let mut lex = Token::lexer(".q.func");
-        assert_eq!(lex.next(), Some(Ok(Token::DottedIdent)));
-    }
-
-    #[test]
-    fn lex_dotted_ident_upper() {
-        let mut lex = Token::lexer(".Q.en");
-        assert_eq!(lex.next(), Some(Ok(Token::DottedIdent)));
-    }
-
-    #[test]
-    fn lex_ident_with_underscore() {
-        let mut lex = Token::lexer("my_var");
-        assert_eq!(lex.next(), Some(Ok(Token::Ident)));
-        assert_eq!(lex.slice(), "my_var");
-    }
-
-    #[test]
-    fn lex_dotted_ident_with_underscore() {
-        let mut lex = Token::lexer(".proc.my_func");
-        assert_eq!(lex.next(), Some(Ok(Token::DottedIdent)));
-        assert_eq!(lex.slice(), ".proc.my_func");
-    }
-
-    #[test]
-    fn lex_dotted_ident_underscore_in_first_segment() {
-        let mut lex = Token::lexer(".my_ns.func");
-        assert_eq!(lex.next(), Some(Ok(Token::DottedIdent)));
-        assert_eq!(lex.slice(), ".my_ns.func");
-    }
-
-    #[test]
-    fn lex_operators() {
-        let input = "+ - * %";
-        let tokens: Vec<_> = Token::lexer(input).map(|r| r.unwrap()).collect();
-        assert_eq!(
-            tokens,
-            vec![Token::Plus, Token::Minus, Token::Star, Token::Percent]
-        );
-    }
-
-    #[test]
-    fn lex_lambda() {
-        let input = "{[x;y] x+y}";
-        let tokens: Vec<_> = Token::lexer(input).map(|r| r.unwrap()).collect();
-        assert_eq!(
-            tokens,
-            vec![
-                Token::LBrace,
-                Token::LBracket,
-                Token::Ident,
-                Token::Semi,
-                Token::Ident,
-                Token::RBracket,
-                Token::Ident,
-                Token::Plus,
-                Token::Ident,
-                Token::RBrace,
-            ]
-        );
-    }
-
-    #[test]
-    fn lex_string() {
-        let mut lex = Token::lexer(r#""hello world""#);
-        assert_eq!(lex.next(), Some(Ok(Token::String)));
-    }
-
-    #[test]
-    fn lex_string_with_escape() {
-        let mut lex = Token::lexer(r#""a\nb""#);
-        assert_eq!(lex.next(), Some(Ok(Token::String)));
-    }
-
-    #[test]
-    fn lex_system_cmd() {
-        let mut lex = Token::lexer("\\l file.q");
-        assert_eq!(lex.next(), Some(Ok(Token::SystemCmd)));
-    }
-
-    #[test]
-    fn lex_system_cmd_t() {
-        let mut lex = Token::lexer("\\t expr");
-        assert_eq!(lex.next(), Some(Ok(Token::SystemCmd)));
-    }
-
-    #[test]
-    fn lex_global_assign() {
-        let mut lex = Token::lexer("::");
-        assert_eq!(lex.next(), Some(Ok(Token::ColonColon)));
-    }
-
-    #[test]
-    fn lex_colon() {
-        let mut lex = Token::lexer(":");
-        assert_eq!(lex.next(), Some(Ok(Token::Colon)));
-    }
-
-    #[test]
-    fn lex_adverbs() {
-        let mut lex = Token::lexer("':");
-        assert_eq!(lex.next(), Some(Ok(Token::EachPrior)));
-    }
-
-    #[test]
-    fn lex_each_right() {
-        let mut lex = Token::lexer("/:");
-        assert_eq!(lex.next(), Some(Ok(Token::EachRight)));
-    }
-
-    #[test]
-    fn lex_each_left() {
-        let mut lex = Token::lexer("\\:");
-        assert_eq!(lex.next(), Some(Ok(Token::EachLeft)));
-    }
-
-    #[test]
-    fn lex_each() {
-        let mut lex = Token::lexer("'");
-        assert_eq!(lex.next(), Some(Ok(Token::Each)));
-    }
-
-    #[test]
-    fn lex_newlines_preserved() {
-        let input = "a\nb";
-        let tokens: Vec<_> = Token::lexer(input).map(|r| r.unwrap()).collect();
-        assert_eq!(tokens, vec![Token::Ident, Token::Newline, Token::Ident]);
-    }
-
-    #[test]
-    fn lex_exit() {
-        let mut lex = Token::lexer("\\\\");
-        assert_eq!(lex.next(), Some(Ok(Token::Exit)));
-    }
-
-    #[test]
-    fn lex_slash_over() {
-        let mut lex = Token::lexer("/");
-        assert_eq!(lex.next(), Some(Ok(Token::Slash)));
-    }
-
-    #[test]
-    fn lex_backslash_scan() {
-        // bare `\` not followed by letter → Backslash (scan adverb)
-        let mut lex = Token::lexer("\\");
-        assert_eq!(lex.next(), Some(Ok(Token::Backslash)));
-    }
-
-    #[test]
-    fn lex_line_comment() {
-        let mut lex = Token::lexer("/ this is a comment");
-        assert_eq!(lex.next(), Some(Ok(Token::LineComment)));
-    }
-
-    #[test]
-    fn lex_date() {
-        let mut lex = Token::lexer("2024.01.15");
-        assert_eq!(lex.next(), Some(Ok(Token::Date)));
-    }
-
-    #[test]
-    fn lex_date_null() {
-        let mut lex = Token::lexer("0Nd");
-        assert_eq!(lex.next(), Some(Ok(Token::Date)));
-    }
-
-    #[test]
-    fn lex_time() {
-        let mut lex = Token::lexer("12:30:00.000");
-        assert_eq!(lex.next(), Some(Ok(Token::Time)));
-    }
-
-    #[test]
-    fn lex_time_null() {
-        let mut lex = Token::lexer("0Nt");
-        assert_eq!(lex.next(), Some(Ok(Token::Time)));
-    }
-
-    #[test]
-    fn lex_timestamp() {
-        let mut lex = Token::lexer("2024.01.15D12:30:00.000000000");
-        assert_eq!(lex.next(), Some(Ok(Token::Timestamp)));
-    }
-
-    #[test]
-    fn lex_comparison_ops() {
-        let input = "= < >";
-        let tokens: Vec<_> = Token::lexer(input).map(|r| r.unwrap()).collect();
-        assert_eq!(tokens, vec![Token::Eq, Token::Lt, Token::Gt]);
-    }
-
-    #[test]
-    fn lex_other_ops() {
-        let input = "! & | ^ # _ ~ $ ? @ , .";
-        let tokens: Vec<_> = Token::lexer(input).map(|r| r.unwrap()).collect();
-        assert_eq!(
-            tokens,
-            vec![
-                Token::Bang,
-                Token::Amp,
-                Token::Pipe,
-                Token::Caret,
-                Token::Hash,
-                Token::Underscore,
-                Token::Tilde,
-                Token::Dollar,
-                Token::Query,
-                Token::At,
-                Token::Comma,
-                Token::Dot,
-            ]
-        );
-    }
-
-    #[test]
-    fn lex_mixed_statement() {
-        // `x:42` — assignment
-        let input = "x:42";
-        let tokens: Vec<_> = Token::lexer(input).map(|r| r.unwrap()).collect();
-        assert_eq!(tokens, vec![Token::Ident, Token::Colon, Token::Integer]);
-    }
-
-    #[test]
-    fn lex_assert_dot_name() {
-        let tokens: Vec<_> = Token::lexer("assert.true").collect();
-        for (i, t) in tokens.iter().enumerate() {
-            match t {
-                Ok(tok) => println!("  {i}: {tok:?}"),
-                Err(()) => println!("  {i}: ERROR"),
+    fn token_sequences() {
+        for (src, expected) in CASES {
+            let mut lex = Token::lexer(src);
+            let mut kinds = Vec::new();
+            while let Some(tok) = lex.next() {
+                kinds.push(tok.map_or_else(|()| "ERR".to_string(), |t| format!("{t:?}")));
+                if kinds.len() == 1 && !expected.contains(' ') {
+                    assert_eq!(lex.slice(), *src, "span of {src:?}");
+                }
             }
+            assert_eq!(kinds.join(" "), *expected, "tokens of {src:?}");
         }
-        assert_eq!(tokens.len(), 1); // single namespaced ident
-        assert_eq!(tokens[0], Ok(Token::Ident));
-    }
-
-    #[test]
-    fn lex_no_negative_in_integer() {
-        // `-42` should be Minus then Integer, not a single negative integer
-        let input = "-42";
-        let tokens: Vec<_> = Token::lexer(input).map(|r| r.unwrap()).collect();
-        assert_eq!(tokens, vec![Token::Minus, Token::Integer]);
-    }
-
-    #[test]
-    fn lex_less_equal() {
-        let mut lex = Token::lexer("<=");
-        assert_eq!(lex.next(), Some(Ok(Token::LtEq)));
-    }
-
-    #[test]
-    fn lex_greater_equal() {
-        let mut lex = Token::lexer(">=");
-        assert_eq!(lex.next(), Some(Ok(Token::GtEq)));
-    }
-
-    #[test]
-    fn lex_not_equal() {
-        let mut lex = Token::lexer("<>");
-        assert_eq!(lex.next(), Some(Ok(Token::NotEq)));
-    }
-
-    #[test]
-    fn lex_comparison_mixed() {
-        // x<=y should be Ident LtEq Ident, not Ident Lt Eq Ident
-        let tokens: Vec<_> = Token::lexer("x<=y").map(|r| r.unwrap()).collect();
-        assert_eq!(tokens, vec![Token::Ident, Token::LtEq, Token::Ident]);
-    }
-
-    #[test]
-    fn lex_file_op_0() {
-        let tokens: Vec<_> = Token::lexer("0: x").map(|r| r.unwrap()).collect();
-        assert_eq!(tokens, vec![Token::FileOp0, Token::Ident]);
-    }
-
-    #[test]
-    fn lex_file_op_1() {
-        let mut lex = Token::lexer("1:");
-        assert_eq!(lex.next(), Some(Ok(Token::FileOp1)));
-    }
-
-    #[test]
-    fn lex_file_op_2() {
-        let mut lex = Token::lexer("2:");
-        assert_eq!(lex.next(), Some(Ok(Token::FileOp2)));
-    }
-
-    #[test]
-    fn lex_file_op_not_10_colon() {
-        // `10:` should be Integer(10) Colon, NOT Integer(1) FileOp0
-        let tokens: Vec<_> = Token::lexer("10:x").map(|r| r.unwrap()).collect();
-        assert_eq!(tokens, vec![Token::Integer, Token::Colon, Token::Ident]);
-    }
-
-    #[test]
-    fn lex_assign_zero() {
-        // `x:0` should be Ident Colon Integer, not Ident FileOp0 with missing text
-        let tokens: Vec<_> = Token::lexer("x:0").map(|r| r.unwrap()).collect();
-        assert_eq!(tokens, vec![Token::Ident, Token::Colon, Token::Integer]);
-    }
-
-    #[test]
-    fn lex_file_symbol_split() {
-        assert_eq!(
-            Token::lexer("`:data.csv").next(),
-            Some(Ok(Token::FileSymbol))
-        );
-        assert_eq!(
-            Token::lexer("`:/abs/path").next(),
-            Some(Ok(Token::FileSymbol))
-        );
-        assert_eq!(
-            Token::lexer("`:host:5001").next(),
-            Some(Ok(Token::FileSymbol))
-        );
-        assert_eq!(Token::lexer("`hello").next(), Some(Ok(Token::Symbol)));
-        assert_eq!(Token::lexer("`").next(), Some(Ok(Token::Symbol)));
-    }
-
-    #[test]
-    fn lex_file_handle_symbol() {
-        let mut lex = Token::lexer("`:data.csv");
-        assert_eq!(lex.next(), Some(Ok(Token::FileSymbol)));
-        assert_eq!(lex.slice(), "`:data.csv");
-    }
-
-    #[test]
-    fn lex_compound_assign_plus() {
-        let tokens: Vec<_> = Token::lexer("x+:1").map(|r| r.unwrap()).collect();
-        assert_eq!(
-            tokens,
-            vec![Token::Ident, Token::CompoundAssign, Token::Integer]
-        );
-    }
-
-    #[test]
-    fn lex_compound_assign_comma() {
-        let tokens: Vec<_> = Token::lexer("x,:y").map(|r| r.unwrap()).collect();
-        assert_eq!(
-            tokens,
-            vec![Token::Ident, Token::CompoundAssign, Token::Ident]
-        );
-    }
-
-    #[test]
-    fn lex_compound_assign_all() {
-        for op in [
-            "+:", "-:", "*:", "%:", ">:", "<:", "~:", "=:", "_:", "#:", "$:", "!:", "|:", "&:",
-            "?:", "^:", ",:", "@:",
-        ] {
-            let mut lex = Token::lexer(op);
-            assert_eq!(
-                lex.next(),
-                Some(Ok(Token::CompoundAssign)),
-                "failed for {op}"
-            );
-        }
-    }
-
-    #[test]
-    fn lex_compound_assign_not_colon_colon() {
-        // :: should still be ColonColon, not CompoundAssign
-        let mut lex = Token::lexer("::");
-        assert_eq!(lex.next(), Some(Ok(Token::ColonColon)));
-    }
-
-    #[test]
-    fn lex_compound_assign_not_adverbs() {
-        // '/: \: ': should still be adverbs
-        assert_eq!(Token::lexer("/:").next(), Some(Ok(Token::EachRight)));
-        assert_eq!(Token::lexer("\\:").next(), Some(Ok(Token::EachLeft)));
-        assert_eq!(Token::lexer("':").next(), Some(Ok(Token::EachPrior)));
-    }
-
-    #[test]
-    fn lex_month_null() {
-        let mut lex = Token::lexer("0Nm");
-        assert_eq!(lex.next(), Some(Ok(Token::Month)));
-        assert_eq!(lex.slice(), "0Nm");
-    }
-
-    #[test]
-    fn lex_guid_null() {
-        let mut lex = Token::lexer("0Ng");
-        assert_eq!(lex.next(), Some(Ok(Token::Guid)));
-        assert_eq!(lex.slice(), "0Ng");
-    }
-
-    #[test]
-    fn lex_bare_long_null() {
-        // `0N` without a suffix is the long null (integer type)
-        assert_eq!(Token::lexer("0N").next(), Some(Ok(Token::Integer)));
-        // Ensure typed nulls still work (longer match wins)
-        assert_eq!(Token::lexer("0Ni").next(), Some(Ok(Token::Integer)));
-        assert_eq!(Token::lexer("0Nj").next(), Some(Ok(Token::Integer)));
-        assert_eq!(Token::lexer("0Nn").next(), Some(Ok(Token::Timespan)));
-        assert_eq!(Token::lexer("0Nd").next(), Some(Ok(Token::Date)));
-    }
-
-    #[test]
-    fn lex_timespan_null() {
-        let mut lex = Token::lexer("0Nn");
-        assert_eq!(lex.next(), Some(Ok(Token::Timespan)));
-        assert_eq!(lex.slice(), "0Nn");
-    }
-
-    #[test]
-    fn lex_timestamp_null() {
-        let mut lex = Token::lexer("0Np");
-        assert_eq!(lex.next(), Some(Ok(Token::Integer)));
-        assert_eq!(lex.slice(), "0Np");
-    }
-
-    #[test]
-    fn lex_temporal_infs() {
-        // 0Wm is Month, 0Wg/0Wn/0Wz are their respective types
-        // 0Wu is Minute, 0Wv is Second, 0Wp is Integer
-        assert_eq!(Token::lexer("0Wm").next(), Some(Ok(Token::Month)));
-        assert_eq!(Token::lexer("0Wg").next(), Some(Ok(Token::Guid)));
-        assert_eq!(Token::lexer("0Wn").next(), Some(Ok(Token::Timespan)));
-        assert_eq!(Token::lexer("0Wz").next(), Some(Ok(Token::Datetime)));
-        assert_eq!(Token::lexer("0Wu").next(), Some(Ok(Token::Minute)));
-        assert_eq!(Token::lexer("0Wv").next(), Some(Ok(Token::Second)));
-        // 0Wp is still Integer
-        let mut lex = Token::lexer("0Wp");
-        assert_eq!(lex.next(), Some(Ok(Token::Integer)), "failed for 0Wp");
-    }
-
-    #[test]
-    fn lex_shebang() {
-        let mut lex = Token::lexer("#!/usr/bin/env q");
-        assert_eq!(lex.next(), Some(Ok(Token::Shebang)));
-        assert_eq!(lex.slice(), "#!/usr/bin/env q");
-    }
-
-    #[test]
-    fn lex_shebang_not_hash_bang() {
-        // Without `!` immediately after `#`, should be Hash then Bang
-        let tokens: Vec<_> = Token::lexer("# !x").map(|r| r.unwrap()).collect();
-        assert_eq!(tokens, vec![Token::Hash, Token::Bang, Token::Ident]);
-    }
-
-    #[test]
-    fn lex_month_literal() {
-        let mut lex = Token::lexer("2024.01m");
-        assert_eq!(lex.next(), Some(Ok(Token::Month)));
-        assert_eq!(lex.slice(), "2024.01m");
-    }
-
-    #[test]
-    fn lex_month_null_typed() {
-        assert_eq!(Token::lexer("0Nm").next(), Some(Ok(Token::Month)));
-    }
-
-    #[test]
-    fn lex_month_inf_typed() {
-        assert_eq!(Token::lexer("0Wm").next(), Some(Ok(Token::Month)));
-    }
-
-    #[test]
-    fn lex_guid_literal_typed() {
-        assert_eq!(Token::lexer("0Ng").next(), Some(Ok(Token::Guid)));
-    }
-
-    #[test]
-    fn lex_timespan_literal() {
-        assert_eq!(
-            Token::lexer("0D00:00:00.000000000").next(),
-            Some(Ok(Token::Timespan))
-        );
-        assert_eq!(Token::lexer("0Nn").next(), Some(Ok(Token::Timespan)));
-        assert_eq!(Token::lexer("0Wn").next(), Some(Ok(Token::Timespan)));
-        // bare days form: `1D`, `2D`, `0D`
-        assert_eq!(Token::lexer("1D").next(), Some(Ok(Token::Timespan)));
-        assert_eq!(Token::lexer("2D").next(), Some(Ok(Token::Timespan)));
-        assert_eq!(Token::lexer("0D").next(), Some(Ok(Token::Timespan)));
-    }
-
-    #[test]
-    fn lex_datetime_literal_typed() {
-        assert_eq!(Token::lexer("0Nz").next(), Some(Ok(Token::Datetime)));
-        assert_eq!(Token::lexer("0Wz").next(), Some(Ok(Token::Datetime)));
-    }
-
-    #[test]
-    fn lex_minute_literal() {
-        assert_eq!(Token::lexer("12:30").next(), Some(Ok(Token::Minute)));
-        assert_eq!(Token::lexer("0Nu").next(), Some(Ok(Token::Minute)));
-        assert_eq!(Token::lexer("0Wu").next(), Some(Ok(Token::Minute)));
-    }
-
-    #[test]
-    fn lex_second_literal() {
-        assert_eq!(Token::lexer("12:30:45").next(), Some(Ok(Token::Second)));
-        assert_eq!(Token::lexer("0Nv").next(), Some(Ok(Token::Second)));
-        assert_eq!(Token::lexer("0Wv").next(), Some(Ok(Token::Second)));
-    }
-
-    #[test]
-    fn lex_time_keeps_fractional() {
-        assert_eq!(Token::lexer("12:30:45.678").next(), Some(Ok(Token::Time)));
-    }
-
-    #[test]
-    fn lex_byte_list() {
-        assert_eq!(Token::lexer("0xABCD").next(), Some(Ok(Token::ByteList)));
-        assert_eq!(
-            Token::lexer("0x0011223344").next(),
-            Some(Ok(Token::ByteList))
-        );
-    }
-
-    #[test]
-    fn lex_single_byte_stays_integer() {
-        assert_eq!(Token::lexer("0xAB").next(), Some(Ok(Token::Integer)));
-    }
-
-    #[test]
-    fn lex_comment_block_closed() {
-        let src = "/\nthis is\nblock comment\n\\\n";
-        let mut lex = Token::lexer(src);
-        assert_eq!(lex.next(), Some(Ok(Token::CommentBlock)));
-    }
-
-    #[test]
-    fn lex_comment_block_terminal() {
-        let src = "/\nuntil end of file";
-        let mut lex = Token::lexer(src);
-        assert_eq!(lex.next(), Some(Ok(Token::CommentBlock)));
-    }
-
-    #[test]
-    fn lex_dsl_k_line() {
-        let mut lex = Token::lexer("k)1+2");
-        assert_eq!(lex.next(), Some(Ok(Token::DslLine)));
-        assert_eq!(lex.slice(), "k)1+2");
-    }
-
-    #[test]
-    fn lex_dsl_p_line() {
-        let mut lex = Token::lexer("p)select * from t");
-        assert_eq!(lex.next(), Some(Ok(Token::DslLine)));
-    }
-
-    #[test]
-    fn lex_dsl_stops_at_newline() {
-        let mut lex = Token::lexer("k)foo\nbar");
-        assert_eq!(lex.next(), Some(Ok(Token::DslLine)));
-        assert_eq!(lex.slice(), "k)foo");
-        assert_eq!(lex.next(), Some(Ok(Token::Newline)));
-    }
-
-    #[test]
-    fn lex_bare_k_is_ident() {
-        assert_eq!(Token::lexer("k").next(), Some(Ok(Token::Ident)));
-    }
-
-    #[test]
-    fn lex_comment_block_with_following_code() {
-        let src = "/\nblock\nstuff\n\\\ny:2\n";
-        let mut lex = Token::lexer(src);
-
-        // Due to regex limitations, the lexer may over-match comment blocks.
-        // The parser's collapse_block_comments will split them properly.
-        let tok1 = lex.next();
-        assert_eq!(tok1, Some(Ok(Token::CommentBlock)));
     }
 }

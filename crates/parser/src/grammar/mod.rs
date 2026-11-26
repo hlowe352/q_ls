@@ -15,51 +15,20 @@ pub fn root(p: &mut Parser) {
 
 /// Parse a single statement.
 pub fn statement(p: &mut Parser) {
-    // Skip bare newlines and semicolons (statement separators)
-    while p.at(SyntaxKind::Newline) || p.at(SyntaxKind::Semi) {
-        p.bump();
-    }
-    if p.at_end() {
-        return;
-    }
-
-    // DSL statement (k) or p) lines)
-    if p.at(SyntaxKind::DslLine) {
-        let m = p.start();
-        p.bump();
-        m.complete(p, SyntaxKind::DslStmt);
-        return;
-    }
-
-    // System command
-    if p.at(SyntaxKind::SystemCmd) || p.at(SyntaxKind::Exit) {
-        let m = p.start();
-        p.bump();
-        m.complete(p, SyntaxKind::SystemCmdStmt);
-        return;
-    }
-
-    // Expression (assignments like `x:42` and qSQL are parsed via expr())
+    // Skip semicolon separators (newlines are trivia).
+    while p.eat(SyntaxKind::Semi) {}
+    let single = match p.current() {
+        None => return,
+        Some(SyntaxKind::DslLine) => Some(SyntaxKind::DslStmt),
+        Some(SyntaxKind::SystemCmd | SyntaxKind::Exit) => Some(SyntaxKind::SystemCmdStmt),
+        Some(_) => None,
+    };
     let m = p.start();
-    expressions::expr(p);
-    m.complete(p, SyntaxKind::ExprStmt);
-}
-
-#[cfg(test)]
-mod dsl_tests {
-    use crate::parse;
-
-    #[test]
-    fn parse_dsl_k_stmt() {
-        let parse = parse("k)1+2");
-        let dump = format!("{:#?}", parse.syntax());
-        assert!(dump.contains("DslStmt"), "got:\n{dump}");
-    }
-
-    #[test]
-    fn parse_dsl_p_stmt() {
-        let parse = parse("p)select * from t");
-        let dump = format!("{:#?}", parse.syntax());
-        assert!(dump.contains("DslStmt"), "got:\n{dump}");
+    if let Some(kind) = single {
+        p.bump();
+        m.complete(p, kind);
+    } else {
+        expressions::expr(p);
+        m.complete(p, SyntaxKind::ExprStmt);
     }
 }

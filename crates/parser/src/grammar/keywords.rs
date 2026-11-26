@@ -19,24 +19,12 @@ pub fn is_builtin_infix(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_builtin_infix;
+    use super::{BUILTIN_INFIX, is_builtin_infix};
 
     #[test]
-    fn recognises_core_keywords() {
-        for kw in [
-            "mmu", "lsq", "in", "within", "each", "peach", "div", "mod", "wavg", "wsum", "cor",
-            "cov", "scov", "cross", "union", "inter", "except", "sublist", "vs", "sv", "ss",
-            "like", "mavg", "mmax", "mmin", "msum", "mdev", "mcount", "ema", "ij", "ijf", "uj",
-            "ujf", "lj", "ljf", "asof", "pj", "insert", "upsert", "xasc", "xdesc", "xcol", "xcols",
-            "xkey", "xprev", "xrank", "xbar", "xexp", "xlog", "dsave", "fby", "bin", "binr", "and",
-            "or", "setenv",
-        ] {
-            assert!(is_builtin_infix(kw), "{kw} should be recognised");
-        }
-    }
-
-    #[test]
-    fn rejects_non_keywords() {
+    fn table_sorted_and_lookup_works() {
+        assert!(BUILTIN_INFIX.is_sorted(), "BUILTIN_INFIX must stay sorted");
+        assert!(BUILTIN_INFIX.iter().all(|kw| is_builtin_infix(kw)));
         for s in ["foo", "bar", "select", "from", "where", "by", "x", ""] {
             assert!(!is_builtin_infix(s), "{s} should not be recognised");
         }

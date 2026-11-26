@@ -9,5 +9,3 @@ logos = { workspace = true }
 rowan = { workspace = true }
 smol_str = { workspace = true }
 
-[dev-dependencies]
-expect-test = "1"

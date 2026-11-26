@@ -34,21 +34,15 @@ The binary is at `target/release/q-ls`.
 cargo test --all
 ```
 
-## VS Code Extension
-
-```
-cd editors/vscode
-npm install
-npm run build
-```
-
-Then install the extension in VS Code and ensure `q-ls` is on your PATH or
-configure the server path in the extension settings.
-
 ## Usage
 
 The language server communicates over stdio. Configure your editor's LSP client
-to launch the `q-ls` binary.
+to launch the `q-ls` binary. Neovim (0.11+):
+
+```lua
+vim.lsp.config('q_ls', { cmd = { 'q-ls' }, filetypes = { 'q' }, root_markers = { '.git' } })
+vim.lsp.enable('q_ls')
+```
 
 ## q/kdb+ 4.1 Coverage
 

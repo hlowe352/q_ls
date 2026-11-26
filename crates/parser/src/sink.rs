@@ -1,102 +1,44 @@
 use rowan::{GreenNode, GreenNodeBuilder, Language};
 
-use crate::event::Event;
-use crate::parser::ParseError;
+use crate::parser::Event;
 use crate::syntax_kind::QLang;
 
-pub struct Sink {
-    builder: GreenNodeBuilder<'static>,
-    events: Vec<Event>,
-    errors: Vec<ParseError>,
-}
-
-impl Sink {
-    #[must_use]
-    pub fn new(events: Vec<Event>, errors: Vec<ParseError>) -> Self {
-        Self {
-            builder: GreenNodeBuilder::new(),
-            events,
-            errors,
-        }
-    }
-
-    #[must_use]
-    pub fn finish(mut self) -> (GreenNode, Vec<ParseError>) {
-        // Indices of Start events that have already been emitted as part of a
-        // forward_parent chain (so we skip them when we reach them normally).
-        let mut already_started: std::collections::HashSet<usize> =
-            std::collections::HashSet::new();
-
-        // We need to iterate by index because we need to walk forward_parent
-        // chains which are stored by absolute index.
-        let len = self.events.len();
-        let mut i = 0;
-        while i < len {
-            match &self.events[i] {
-                Event::Start {
-                    kind,
-                    forward_parent,
-                } => {
-                    if already_started.contains(&i) {
-                        // Already emitted as part of a chain started from a
-                        // child that had a forward_parent pointing here.
-                        i += 1;
-                        continue;
-                    }
-
-                    if forward_parent.is_some() {
-                        // This node has a parent waiting further in the event
-                        // list.  Collect the full ancestor chain so we can
-                        // emit outermost-first.
-                        let mut chain: Vec<usize> = vec![i];
-                        let mut cur = i;
-                        loop {
-                            let fp = match &self.events[cur] {
-                                Event::Start { forward_parent, .. } => *forward_parent,
-                                _ => None,
-                            };
-                            match fp {
-                                Some(offset) => {
-                                    let parent_idx = cur + offset;
-                                    chain.push(parent_idx);
-                                    already_started.insert(parent_idx);
-                                    cur = parent_idx;
-                                }
-                                None => break,
-                            }
-                        }
-
-                        // Emit nodes outermost-first (reverse of the chain
-                        // which was built innermost-first).
-                        for &idx in chain.iter().rev() {
-                            let k = match &self.events[idx] {
-                                Event::Start { kind, .. } => *kind,
-                                _ => unreachable!(),
-                            };
-                            self.builder.start_node(QLang::kind_to_raw(k));
-                        }
-                    } else {
-                        // Simple case: no forward_parent.
-                        let k = *kind;
-                        self.builder.start_node(QLang::kind_to_raw(k));
-                    }
+/// Build the green tree from the parser's event stream.
+///
+/// A `Start` with a `forward_parent` chain opens its ancestors first
+/// (outermost-first); each visited ancestor is replaced with a Placeholder so
+/// it isn't opened again when the loop reaches it.
+pub fn build(mut events: Vec<Event>) -> GreenNode {
+    let mut builder = GreenNodeBuilder::new();
+    let mut chain = Vec::new();
+    for i in 0..events.len() {
+        match std::mem::replace(&mut events[i], Event::Placeholder) {
+            Event::Start {
+                kind,
+                mut forward_parent,
+            } => {
+                chain.push(kind);
+                let mut idx = i;
+                while let Some(offset) = forward_parent {
+                    idx += offset;
+                    let Event::Start {
+                        kind,
+                        forward_parent: next,
+                    } = std::mem::replace(&mut events[idx], Event::Placeholder)
+                    else {
+                        unreachable!("forward_parent must point to a Start event")
+                    };
+                    chain.push(kind);
+                    forward_parent = next;
                 }
-                Event::Token { kind, text } => {
-                    let k = *kind;
-                    let t = text.clone();
-                    self.builder.token(QLang::kind_to_raw(k), t.as_str());
-                }
-                Event::Finish => {
-                    self.builder.finish_node();
-                }
-                Event::Placeholder => {
-                    // Abandoned marker — nothing to emit.
+                for kind in chain.drain(..).rev() {
+                    builder.start_node(QLang::kind_to_raw(kind));
                 }
             }
-            i += 1;
+            Event::Token { kind, text } => builder.token(QLang::kind_to_raw(kind), &text),
+            Event::Finish => builder.finish_node(),
+            Event::Placeholder => {}
         }
-
-        let green = self.builder.finish();
-        (green, self.errors)
     }
+    builder.finish()
 }
