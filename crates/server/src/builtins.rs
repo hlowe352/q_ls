@@ -179,6 +179,30 @@ pub const BUILTINS: &[(&str, &str)] = &[
     ("xrank", "Bucket rank"),
 ];
 
+/// Primitive operator docs for hover: `(glyph, "dyadic / monadic")`.
+pub const OPERATORS: &[(&str, &str)] = &[
+    ("+", "Add (dyadic) / Flip (monadic)"),
+    ("-", "Subtract (dyadic) / Negate (monadic)"),
+    ("*", "Multiply (dyadic) / First (monadic)"),
+    ("%", "Divide (dyadic) / Reciprocal (monadic)"),
+    ("!", "Key/mod (dyadic) / Til/enum (monadic)"),
+    ("&", "And/min (dyadic) / Where (monadic)"),
+    ("|", "Or/max (dyadic) / Reverse (monadic)"),
+    ("^", "Fill (dyadic) / Null (monadic)"),
+    ("#", "Take (dyadic) / Count (monadic)"),
+    ("_", "Drop/cut (dyadic) / Floor (monadic)"),
+    ("~", "Match (dyadic) / Not (monadic)"),
+    ("$", "Cast/pad (dyadic) / String (monadic)"),
+    ("?", "Find/rand (dyadic) / Distinct/type (monadic)"),
+    ("@", "Apply/index (dyadic) / Type (monadic)"),
+    (".", "Apply deep (dyadic) / Value (monadic)"),
+    (",", "Join (dyadic) / Enlist (monadic)"),
+    ("=", "Equal (dyadic) / Group (monadic)"),
+    ("<", "Less than (dyadic) / Iasc (monadic)"),
+    (">", "Greater than (dyadic) / Idesc (monadic)"),
+    (":", "Assign (dyadic) / Identity (monadic)"),
+];
+
 /// Reserved names from `.Q.res` that aren't surfaced in completion/hover.
 /// Sorted; binary-searched alongside [`BUILTINS`] by [`is_builtin`].
 const EXTRA_RESERVED: &[&str] = &[
@@ -213,58 +237,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtins_alphabetised() {
-        let names: Vec<&&str> = BUILTINS.iter().map(|(n, _)| n).collect();
-        let mut sorted = names.clone();
-        sorted.sort();
-        assert_eq!(names, sorted, "BUILTINS must stay alphabetised");
-    }
-
-    #[test]
-    fn extra_reserved_alphabetised() {
-        let mut sorted: Vec<&&str> = EXTRA_RESERVED.iter().collect();
-        sorted.sort();
-        let actual: Vec<&&str> = EXTRA_RESERVED.iter().collect();
-        assert_eq!(actual, sorted, "EXTRA_RESERVED must stay alphabetised");
-    }
-
-    #[test]
-    fn builtins_and_extra_disjoint() {
+    fn tables_sorted_and_disjoint() {
+        assert!(
+            BUILTINS.is_sorted_by_key(|(n, _)| *n),
+            "BUILTINS must stay sorted"
+        );
+        assert!(
+            EXTRA_RESERVED.is_sorted(),
+            "EXTRA_RESERVED must stay sorted"
+        );
         for name in EXTRA_RESERVED {
-            assert!(
-                BUILTINS.binary_search_by_key(name, |(n, _)| n).is_err(),
-                "{name} appears in both BUILTINS and EXTRA_RESERVED"
-            );
+            assert!(lookup_doc(name).is_none(), "{name} in both tables");
         }
     }
 
     #[test]
-    fn recognises_documented() {
+    fn is_builtin_classifies_names() {
         for n in [
-            "each", "count", "select", "from", "where", "by", "string", "key", "keys", "cols",
-            "type", "raze", "enlist", "if",
+            "each",
+            "count",
+            "select",
+            "from",
+            "where",
+            "by",
+            "string",
+            "key",
+            "keys",
+            "cols",
+            "type",
+            "raze",
+            "enlist",
+            "if",
+            "asin",
+            "asof",
+            "bin",
+            "ema",
+            "year",
+            ".q.id",
+            ".Q.dd",
+            ".z.s",
+            ".h.iso8601",
         ] {
             assert!(is_builtin(n), "{n} should be builtin");
         }
-    }
-
-    #[test]
-    fn recognises_extra_reserved() {
-        for n in ["asin", "asof", "bin", "ema", "year"] {
-            assert!(is_builtin(n), "{n} should be builtin");
-        }
-    }
-
-    #[test]
-    fn recognises_namespaces() {
-        assert!(is_builtin(".q.id"));
-        assert!(is_builtin(".Q.dd"));
-        assert!(is_builtin(".z.s"));
-        assert!(is_builtin(".h.iso8601"));
-    }
-
-    #[test]
-    fn rejects_user_names() {
         for n in ["foo", "bar", "myFunc", ".app.cfg", ".myns.x", "x", ""] {
             assert!(!is_builtin(n), "{n} should not be builtin");
         }

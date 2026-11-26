@@ -16,8 +16,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use q_parser::{SyntaxKind, SyntaxNode, TextRange};
+use q_parser::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange};
 use smol_str::SmolStr;
+
+use crate::syntax::{first_token, has_ancestor, tokens};
 
 #[derive(Default)]
 pub struct SymTable {
@@ -78,20 +80,14 @@ impl SymTable {
 
             // Harvest identifiers for completion.
             if matches!(kind, SyntaxKind::IdentExpr | SyntaxKind::Namespace)
-                && let Some(tok) = node
-                    .descendants_with_tokens()
-                    .filter_map(q_parser::SyntaxElement::into_token)
-                    .find(|t| !t.kind().is_trivia())
+                && let Some(tok) = first_token(&node)
             {
                 t.idents.insert(SmolStr::new(tok.text()));
             }
 
             // Track \d .namespace and system "d .namespace" directives.
             if kind == SyntaxKind::SystemCmdStmt {
-                if let Some(cmd_tok) = node
-                    .descendants_with_tokens()
-                    .filter_map(q_parser::SyntaxElement::into_token)
-                    .find(|t| t.kind() == SyntaxKind::SystemCmd)
+                if let Some(cmd_tok) = tokens(&node).find(|t| t.kind() == SyntaxKind::SystemCmd)
                     && let Some(ns) = parse_d_directive(cmd_tok.text())
                 {
                     let off: u32 = cmd_tok.text_range().start().into();
@@ -109,23 +105,18 @@ impl SymTable {
             if kind == SyntaxKind::Lambda {
                 let scope_idx = t.lambdas.len();
                 let parent = scope_stack.last().copied();
-                let has_param_list = node.children().any(|c| c.kind() == SyntaxKind::ParamList);
-                let mut params = Vec::new();
-                if let Some(plist) = node.children().find(|c| c.kind() == SyntaxKind::ParamList) {
-                    for tok in plist
-                        .children_with_tokens()
-                        .filter_map(q_parser::SyntaxElement::into_token)
+                let plist = node.children().find(|c| c.kind() == SyntaxKind::ParamList);
+                let params = plist.iter().flat_map(|pl| {
+                    pl.children_with_tokens()
+                        .filter_map(SyntaxElement::into_token)
                         .filter(|tok| tok.kind() == SyntaxKind::Ident)
-                    {
-                        let off: u32 = tok.text_range().start().into();
-                        params.push((SmolStr::new(tok.text()), off));
-                    }
-                }
+                        .map(|tok| (SmolStr::new(tok.text()), tok.text_range().start().into()))
+                });
                 t.lambdas.push(LambdaScope {
                     range: node.text_range(),
                     parent,
-                    has_param_list,
-                    params,
+                    has_param_list: plist.is_some(),
+                    params: params.collect(),
                     locals: Vec::new(),
                 });
                 scope_stack.push(scope_idx);
@@ -148,16 +139,10 @@ impl SymTable {
         //       the compound-assign amends that global — don't create a local.
         //   (b) Only the FIRST compound-assign per (scope, name) introduces the
         //       local binding; subsequent ones amend the already-created local.
-        let mut seen_local: std::collections::HashSet<(usize, SmolStr)> =
-            std::collections::HashSet::new();
+        let mut seen_local = HashSet::new();
         for (scope_idx, name, off, ns) in deferred_compound {
-            // Check both bare name and namespace-qualified form.
-            let qualified = if !ns.is_empty() && !name.starts_with('.') {
-                SmolStr::from(format!("{ns}.{name}"))
-            } else {
-                name.clone()
-            };
-            if t.globals.contains_key(name.as_str()) || t.globals.contains_key(qualified.as_str()) {
+            let qualified = qualify(&name, true, &ns);
+            if t.globals.contains_key(&name) || t.globals.contains_key(&qualified) {
                 continue; // amends a global
             }
             // Only the first compound-assign in this scope creates the binding.
@@ -176,15 +161,13 @@ impl SymTable {
         active_ns: &str,
         deferred_compound: &mut Vec<(usize, SmolStr, u32, SmolStr)>,
     ) {
-        // Column definitions inside a TableExpr (keyed or plain table
-        // constructor) are not variable assignments — skip them.
-        if bin.ancestors().any(|n| n.kind() == SyntaxKind::TableExpr) {
+        // Column definitions inside a table constructor are not variables.
+        if has_ancestor(bin, SyntaxKind::TableExpr) {
             return;
         }
-
         let Some(op) = bin
             .children_with_tokens()
-            .filter_map(q_parser::SyntaxElement::into_token)
+            .filter_map(SyntaxElement::into_token)
             .find(|t| {
                 matches!(
                     t.kind(),
@@ -194,65 +177,49 @@ impl SymTable {
         else {
             return;
         };
-        let is_compound = op.kind() == SyntaxKind::CompoundAssign;
         let is_double_colon = op.kind() == SyntaxKind::ColonColon;
         let in_lambda = stack.last().copied();
-
         let Some(lhs) = bin.first_child() else { return };
+        let is_name =
+            |t: &SyntaxToken| matches!(t.kind(), SyntaxKind::Ident | SyntaxKind::DottedIdent);
 
-        // Single-name assign: `name:` or `.ns.name:`.
-        let single_name = lhs
-            .descendants_with_tokens()
-            .filter_map(q_parser::SyntaxElement::into_token)
-            .find(|t| !t.kind().is_trivia())
-            .filter(|t| t.kind() == SyntaxKind::Ident || t.kind() == SyntaxKind::DottedIdent);
-
-        if let Some(tok) = single_name
-            && !matches!(lhs.kind(), SyntaxKind::ListExpr | SyntaxKind::ParenExpr)
-        {
-            let is_dotted = tok.kind() == SyntaxKind::DottedIdent;
-            let off: u32 = tok.text_range().start().into();
-            let is_global = is_double_colon || is_dotted || in_lambda.is_none();
-            let name = qualify(tok.text(), is_global && !is_dotted, active_ns);
-
-            if is_compound && in_lambda.is_some() {
-                // Defer: record as local only if name has no global def (resolved after pass 1).
-                if let Some(idx) = in_lambda {
-                    deferred_compound.push((idx, name, off, SmolStr::new(active_ns)));
+        // List-pattern: `(a; b:type; c):rhs`. Each element binds at the
+        // outer assign's scope (`::` is unusual here but legal: global).
+        if matches!(lhs.kind(), SyntaxKind::ListExpr | SyntaxKind::ParenExpr) {
+            for entry in lhs.children() {
+                if let Some(tok) = tokens(&entry).find(is_name) {
+                    let is_global = is_double_colon || in_lambda.is_none();
+                    self.bind(&tok, is_global, in_lambda, active_ns);
                 }
-                return;
-            }
-
-            if is_global {
-                self.globals.entry(name).or_default().push(off);
-            } else if let Some(idx) = in_lambda {
-                self.lambdas[idx].locals.push((name, off));
             }
             return;
         }
 
-        // List-pattern: `(a; b:type; c):rhs`. Each LHS element binds at
-        // the same scope as the outer assign. `::` is unusual here but
-        // legal — treat it as global.
-        if matches!(lhs.kind(), SyntaxKind::ListExpr | SyntaxKind::ParenExpr) {
-            let is_global = is_double_colon || in_lambda.is_none();
-            for entry in lhs.children() {
-                let Some(tok) = entry
-                    .descendants_with_tokens()
-                    .filter_map(q_parser::SyntaxElement::into_token)
-                    .find(|t| t.kind() == SyntaxKind::Ident || t.kind() == SyntaxKind::DottedIdent)
-                else {
-                    continue;
-                };
-                let is_dotted = tok.kind() == SyntaxKind::DottedIdent;
-                let name = qualify(tok.text(), is_global && !is_dotted, active_ns);
-                let off: u32 = tok.text_range().start().into();
-                if is_global {
-                    self.globals.entry(name).or_default().push(off);
-                } else if let Some(idx) = in_lambda {
-                    self.lambdas[idx].locals.push((name, off));
-                }
-            }
+        // Single-name assign: `name:` or `.ns.name:`.
+        let Some(tok) = first_token(&lhs).filter(is_name) else {
+            return;
+        };
+        let is_global =
+            is_double_colon || tok.kind() == SyntaxKind::DottedIdent || in_lambda.is_none();
+        if let (SyntaxKind::CompoundAssign, Some(idx)) = (op.kind(), in_lambda) {
+            // Local only if no global def exists — resolved after pass 1.
+            let name = qualify(tok.text(), is_global, active_ns);
+            let off = tok.text_range().start().into();
+            deferred_compound.push((idx, name, off, SmolStr::new(active_ns)));
+            return;
+        }
+        self.bind(&tok, is_global, in_lambda, active_ns);
+    }
+
+    /// Record `tok` as a global (namespace-qualified unless already dotted)
+    /// or as a local of the enclosing lambda.
+    fn bind(&mut self, tok: &SyntaxToken, is_global: bool, in_lambda: Option<usize>, ns: &str) {
+        let name = qualify(tok.text(), is_global, ns);
+        let off = tok.text_range().start().into();
+        if is_global {
+            self.globals.entry(name).or_default().push(off);
+        } else if let Some(idx) = in_lambda {
+            self.lambdas[idx].locals.push((name, off));
         }
     }
 
@@ -272,179 +239,107 @@ impl SymTable {
     /// Find the innermost lambda whose range contains `cursor`, or `None`
     /// if `cursor` is at top level.
     ///
-    /// `self.lambdas` is built in DFS preorder, which (because the CST's
-    /// `range.start()` is monotonic in preorder) leaves it sorted by start
-    /// offset. We binary-search for the rightmost lambda starting at or
-    /// before `cursor` and walk back through siblings whose range ended
-    /// before `cursor` until we find one whose range still contains it.
-    /// The walk-back is bounded by sibling count, not total lambda count.
+    /// `self.lambdas` is built in DFS preorder, so it is sorted by start
+    /// offset. Binary-search for the rightmost lambda starting at or before
+    /// `cursor`, then walk back past siblings that ended before `cursor`.
     #[allow(clippy::cast_possible_truncation)]
     fn innermost_lambda(&self, cursor: usize) -> Option<usize> {
         let off = cursor as u32;
-        let mut hi = self.lambdas.partition_point(|l| {
-            let s: u32 = l.range.start().into();
-            s <= off
-        });
-        while hi > 0 {
-            hi -= 1;
-            let e: u32 = self.lambdas[hi].range.end().into();
-            if off < e {
-                return Some(hi);
+        let hi = self
+            .lambdas
+            .partition_point(|l| u32::from(l.range.start()) <= off);
+        (0..hi)
+            .rev()
+            .find(|&i| off < u32::from(self.lambdas[i].range.end()))
+    }
+
+    /// The definition sites of `name` in the innermost scope that binds it
+    /// at `cursor`: lambda params, then locals, then implicit `x`/`y`/`z`
+    /// (only without a `[...]` list), climbing out through enclosing lambdas;
+    /// finally globals, preferring the `\d`-namespace-qualified form.
+    fn binding(&self, cursor: usize, name: &str) -> Option<Binding<'_>> {
+        let named = |list: &[(SmolStr, u32)]| -> Vec<u32> {
+            list.iter()
+                .filter(|(n, _)| n == name)
+                .map(|(_, o)| *o)
+                .collect()
+        };
+        let mut current = self.innermost_lambda(cursor);
+        while let Some(idx) = current {
+            let scope = &self.lambdas[idx];
+            let params = named(&scope.params);
+            if !params.is_empty() {
+                return Some(Binding::Param(params[0], params));
             }
+            let locals = named(&scope.locals);
+            if !locals.is_empty() {
+                return Some(Binding::Local(locals));
+            }
+            if !scope.has_param_list && matches!(name, "x" | "y" | "z") {
+                let start = scope.range.start().into();
+                return Some(Binding::Param(start, vec![start]));
+            }
+            current = scope.parent;
         }
-        None
+
+        // Inside a namespace prefer the qualified global over a root-level
+        // name with the same spelling.
+        let ns = self.active_ns_at(cursor);
+        if !ns.is_empty()
+            && !name.starts_with('.')
+            && let Some(list) = self.globals.get(format!("{ns}.{name}").as_str())
+        {
+            return Some(Binding::Global(list));
+        }
+        self.globals.get(name).map(|l| Binding::Global(l))
     }
 
     /// Resolve `name` against the lexical scope at byte `cursor`.
     pub fn resolve(&self, cursor: usize, name: &str) -> Option<u32> {
-        // Climb lambda chain.
-        let mut current = self.innermost_lambda(cursor);
-        while let Some(idx) = current {
-            let scope = &self.lambdas[idx];
-
-            // Explicit params.
-            if let Some(off) = scope
-                .params
-                .iter()
-                .find(|(n, _)| n == name)
-                .map(|(_, o)| *o)
-            {
-                return Some(off);
-            }
-
-            // Local `name:` (last before cursor; else first after — covers
-            // q's right-to-left binding inside `(c:key db) like …`).
-            let mut before: Option<u32> = None;
-            let mut after: Option<u32> = None;
-            for (n, o) in &scope.locals {
-                if n != name {
-                    continue;
-                }
-                if (*o as usize) < cursor {
-                    before = Some(*o);
-                } else if after.is_none() {
-                    after = Some(*o);
-                }
-            }
-            if let Some(o) = before.or(after) {
-                return Some(o);
-            }
-
-            // Implicit x/y/z: only when the lambda has no `[...]` list.
-            if !scope.has_param_list && matches!(name, "x" | "y" | "z") {
-                return Some(scope.range.start().into());
-            }
-
-            current = scope.parent;
+        match self.binding(cursor, name)? {
+            Binding::Param(first, _) => Some(first),
+            // Last local before cursor; else first after — covers q's
+            // right-to-left binding inside `(c:key db) like …`.
+            Binding::Local(list) => last_before(&list, cursor)
+                .or_else(|| list.iter().copied().find(|&o| o as usize >= cursor)),
+            Binding::Global(list) => last_before(list, cursor).or(list.last().copied()),
         }
-
-        // Globals: when inside a namespace, prefer the qualified form over a
-        // root-level name with the same spelling.  Fall back to the bare name
-        // for names that are not in the active namespace (e.g. dotted idents
-        // from other namespaces, or names that genuinely live at root).
-        let ns = self.active_ns_at(cursor);
-        if !ns.is_empty() && !name.starts_with('.') {
-            let qualified = format!("{ns}.{name}");
-            if let Some(off) = self.resolve_global(cursor, &qualified) {
-                return Some(off);
-            }
-        }
-        self.resolve_global(cursor, name)
     }
 
+    /// Last global def of `name` before `cursor`, else the last overall.
     fn resolve_global(&self, cursor: usize, name: &str) -> Option<u32> {
         let list = self.globals.get(name)?;
-        let mut last_overall: Option<u32> = None;
-        let mut before: Option<u32> = None;
-        for &o in list {
-            last_overall = Some(o);
-            if (o as usize) < cursor {
-                before = Some(o);
-            }
-        }
-        before.or(last_overall)
+        last_before(list, cursor).or(list.last().copied())
     }
 
     /// All offsets that bind `name` in the same scope as the def the cursor
-    /// resolves to. Used by find-references / rename so that multiple
-    /// rebindings of the same name (`a:1; a:2; a`) are treated as one
-    /// symbol, not several. Returns an empty vec if `name` has no visible
-    /// def at `cursor`.
+    /// resolves to. Used by find-references / rename so that rebindings
+    /// (`a:1; a:2; a`) are one symbol. Empty if `name` is not visible.
     pub fn def_offsets_for(&self, cursor: usize, name: &str) -> Vec<u32> {
-        // Walk the lambda chain looking for the scope that owns `name`.
-        let mut current = self.innermost_lambda(cursor);
-        while let Some(idx) = current {
-            let scope = &self.lambdas[idx];
-
-            let params: Vec<u32> = scope
-                .params
-                .iter()
-                .filter(|(n, _)| n == name)
-                .map(|(_, o)| *o)
-                .collect();
-            if !params.is_empty() {
-                return params;
-            }
-
-            let locals: Vec<u32> = scope
-                .locals
-                .iter()
-                .filter(|(n, _)| n == name)
-                .map(|(_, o)| *o)
-                .collect();
-            if !locals.is_empty() {
-                return locals;
-            }
-
-            if !scope.has_param_list && matches!(name, "x" | "y" | "z") {
-                return vec![scope.range.start().into()];
-            }
-
-            current = scope.parent;
+        match self.binding(cursor, name) {
+            Some(Binding::Param(_, all) | Binding::Local(all)) => all,
+            Some(Binding::Global(list)) => list.to_vec(),
+            None => Vec::new(),
         }
-
-        // Prefer namespace-qualified form when inside a namespace (same
-        // priority logic as resolve()).  Fall back to bare name.
-        let ns = self.active_ns_at(cursor);
-        if !ns.is_empty() && !name.starts_with('.') {
-            let qualified = format!("{ns}.{name}");
-            let namespaced: Vec<u32> = self
-                .globals
-                .get(qualified.as_str())
-                .map_or_else(Vec::new, std::clone::Clone::clone);
-            if !namespaced.is_empty() {
-                return namespaced;
-            }
-        }
-        self.globals.get(name).cloned().unwrap_or_default()
     }
 
     /// If `name` at `cursor` resolves via namespace fallback AND that resolution
     /// is not shadowed by a lambda param or local, returns the qualified form.
     /// Used by hover to surface the full name.
     pub fn qualified_for(&self, cursor: usize, name: &str) -> Option<SmolStr> {
-        if name.starts_with('.') {
-            return None; // already qualified
-        }
         let ns = self.active_ns_at(cursor);
-        if ns.is_empty() {
+        if name.starts_with('.') || ns.is_empty() {
             return None;
         }
         let q = format!("{ns}.{name}");
         let global_off = self.resolve_global(cursor, &q)?;
-        // A param or local shadows the global if resolve() returns a different
-        // offset (the local def site rather than the global one).
-        let resolved_off = self.resolve(cursor, name)?;
-        if resolved_off == global_off {
-            Some(SmolStr::new(q))
-        } else {
-            None
-        }
+        // A shadowing param/local resolves to a different offset.
+        (self.resolve(cursor, name)? == global_off).then(|| SmolStr::new(q))
     }
 
     /// All identifier texts seen in the document (for completion).
     pub fn idents(&self) -> impl Iterator<Item = &str> {
-        self.idents.iter().map(smol_str::SmolStr::as_str)
+        self.idents.iter().map(SmolStr::as_str)
     }
 
     /// All global definitions, yielding `(name, offsets)` pairs.
@@ -452,17 +347,28 @@ impl SymTable {
         self.globals.iter().map(|(k, v)| (k.as_str(), v.as_slice()))
     }
 
-    /// Get all byte offsets where `name` is globally defined.
-    /// Returns an empty slice if `name` has no global definitions.
-    #[allow(dead_code)]
+    /// All byte offsets where `name` is globally defined (empty if none).
     pub fn global_def_offsets(&self, name: &str) -> &[u32] {
         self.globals.get(name).map_or(&[], Vec::as_slice)
     }
 }
 
-/// Qualify `name` with `ns` if `should_qualify` and `ns` is non-empty.
-fn qualify(name: &str, should_qualify: bool, ns: &str) -> SmolStr {
-    if should_qualify && !ns.is_empty() {
+/// Last offset in `list` (in list order) before `cursor`.
+fn last_before(list: &[u32], cursor: usize) -> Option<u32> {
+    list.iter().copied().rfind(|&o| (o as usize) < cursor)
+}
+
+/// Where a name is bound; see [`SymTable::binding`].
+enum Binding<'a> {
+    /// Explicit or implicit lambda parameter: `(resolved, all sites)`.
+    Param(u32, Vec<u32>),
+    Local(Vec<u32>),
+    Global(&'a [u32]),
+}
+
+/// Qualify a global `name` with `ns` unless it is already dotted.
+fn qualify(name: &str, is_global: bool, ns: &str) -> SmolStr {
+    if is_global && !ns.is_empty() && !name.starts_with('.') {
         SmolStr::new(format!("{ns}.{name}"))
     } else {
         SmolStr::new(name)
@@ -476,10 +382,7 @@ fn parse_system_d_call(apply: &SyntaxNode) -> Option<SmolStr> {
     if func.kind() != SyntaxKind::IdentExpr {
         return None;
     }
-    let func_ident = func
-        .descendants_with_tokens()
-        .filter_map(q_parser::SyntaxElement::into_token)
-        .find(|t| t.kind() == SyntaxKind::Ident)?;
+    let func_ident = tokens(&func).find(|t| t.kind() == SyntaxKind::Ident)?;
     if func_ident.text() != "system" {
         return None;
     }
@@ -487,10 +390,7 @@ fn parse_system_d_call(apply: &SyntaxNode) -> Option<SmolStr> {
     if arg.kind() != SyntaxKind::LiteralExpr {
         return None;
     }
-    let str_tok = arg
-        .descendants_with_tokens()
-        .filter_map(q_parser::SyntaxElement::into_token)
-        .find(|t| t.kind() == SyntaxKind::String)?;
+    let str_tok = tokens(&arg).find(|t| t.kind() == SyntaxKind::String)?;
     // Strip surrounding quotes then delegate to the same logic as \d.
     let raw = str_tok.text();
     let content = raw.strip_prefix('"')?.strip_suffix('"')?;
@@ -527,7 +427,7 @@ mod tests {
     #[test]
     fn global_def_offsets_empty_for_unknown() {
         let doc = Document::new("foo:1".to_string(), 0);
-        assert!(doc.sym_table().global_def_offsets("bar").is_empty());
+        assert_eq!(doc.sym_table().global_def_offsets("bar"), [0u32; 0]);
     }
 
     #[test]
@@ -558,69 +458,38 @@ mod tests {
         );
     }
 
-    /// Index the real torq.q and confirm .proc.cp is found.
     #[test]
-    #[ignore = "requires /Users/hugo/projects/TorQ/torq.q — run manually"]
     fn real_torq_q_indexes_proc_cp() {
-        let path = "/Users/hugo/projects/TorQ/torq.q";
-        let Ok(src) = std::fs::read_to_string(path) else {
-            eprintln!("skipping: {path} not found");
-            return;
-        };
-        let doc = crate::document::Document::new(src, 0);
-        let st = doc.sym_table();
-        let entries: Vec<_> = st.global_entries().map(|(k, _)| k).collect();
-        assert!(
-            !st.global_def_offsets(".proc.cp").is_empty(),
-            ".proc.cp not in globals. found: {:?}",
-            entries
-                .iter()
-                .filter(|k| k.contains("proc"))
-                .collect::<Vec<_>>()
-        );
+        let src = include_str!("../../parser/tests/data/real_q/torq.q");
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                let doc = Document::new(src.to_string(), 0);
+                assert_ne!(doc.sym_table().global_def_offsets(".proc.cp"), [0u32; 0]);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
     fn torq_style_cross_file_goto_def() {
-        use crate::document::Document;
-        use crate::goto_def::goto_definition_with_workspace;
-        use crate::workspace_index::WorkspaceIndex;
-        use tower_lsp_server::ls_types::GotoDefinitionResponse;
+        use crate::goto_def::{goto_definition, tests::locations};
+        use crate::workspace_index::tests::{doc, index, uri};
 
-        let torq_src = "\\d .proc\n$[1b;[cp:{.z.p}];[cp:{.z.P}]];\n\\d .";
-        let torq_uri: tower_lsp_server::ls_types::Uri = "file:///TorQ/torq.q".parse().unwrap();
-        let mut idx = WorkspaceIndex::default();
-        idx.index_file(torq_uri.clone(), Document::new(torq_src.to_string(), 0));
-
+        let idx = index(&[("torq.q", "\\d .proc\n$[1b;[cp:{.z.p}];[cp:{.z.P}]];\n\\d .")]);
         // cache.q references .proc.cp inside \d .cache
         let cache_src = "\\d .cache\nadd:{[f] now:.proc.cp[];now}\n\\d .";
-        let cache_uri: tower_lsp_server::ls_types::Uri =
-            "file:///TorQ/code/common/cache.q".parse().unwrap();
-        let cache_doc = Document::new(cache_src.to_string(), 0);
-
-        let offset = cache_src
-            .find(".proc.cp")
-            .expect("fixture must contain .proc.cp");
-        let pos = cache_doc.position_of(offset);
-
-        let result = goto_definition_with_workspace(&cache_doc, pos, &cache_uri, &idx);
-        match result {
-            Some(GotoDefinitionResponse::Array(locs)) => {
-                assert!(!locs.is_empty(), "expected at least one location");
-                assert_eq!(locs[0].uri, torq_uri, "must resolve to torq.q");
-            }
-            Some(GotoDefinitionResponse::Scalar(loc)) => {
-                assert_eq!(loc.uri, torq_uri, "must resolve to torq.q");
-            }
-            other => panic!("expected Some(Array|Scalar), got {other:?}"),
-        }
+        let cache = doc(cache_src);
+        let pos = cache.position_of(cache_src.find(".proc.cp").unwrap());
+        let locs = locations(goto_definition(&cache, pos, &uri("cache.q"), &idx));
+        assert_eq!(locs[0].uri, uri("torq.q"));
     }
 
     #[test]
     fn compound_assign_in_lambda_creates_local_when_no_global() {
         // `a,:value` inside a lambda when `a` has no global def → creates a local.
         // Subsequent uses of `a` in the lambda must resolve (no unresolved warning).
-        use crate::document::Document;
         let src = "f:{[path] a,:raze 1 2 3; a}";
         let doc = Document::new(src.to_string(), 0);
         let table = doc.sym_table();
@@ -636,7 +505,6 @@ mod tests {
     fn compound_assign_second_occurrence_not_a_new_def() {
         // Only the FIRST `a,:` creates the local; subsequent ones amend it.
         // goto-def from a use after the second `,: ` must point to the FIRST.
-        use crate::document::Document;
         let src = "f:{a,:1 2; a,:3 4; a}";
         let doc = Document::new(src.to_string(), 0);
         let table = doc.sym_table();
@@ -655,29 +523,24 @@ mod tests {
         // Inside a lambda, `loadedf,:enlist x` amends the global — it must NOT
         // create a new local that shadows it.  goto-def on a use inside the
         // lambda must resolve to the global def, not the amend site.
-        use crate::document::Document;
-        use crate::goto_def::goto_definition;
-        use tower_lsp_server::ls_types::{GotoDefinitionResponse, Uri};
+        use crate::goto_def::{goto_definition, tests::locations};
+        use crate::workspace_index::{WorkspaceIndex, tests::uri};
 
         let src = "loadedf:enlist enlist\"\"\nf:{[x] if[x in loadedf;:()]; loadedf,:enlist x}";
         let doc = Document::new(src.to_string(), 0);
-        let uri: Uri = "file:///a.q".parse().unwrap();
-
         // cursor on `loadedf` in `x in loadedf` (use inside lambda)
-        let use_off = src.find("x in loadedf").unwrap() + "x in ".len();
-        let pos = doc.position_of(use_off);
+        let pos = doc.position_of(src.find("x in loadedf").unwrap() + "x in ".len());
+        let locs = locations(goto_definition(
+            &doc,
+            pos,
+            &uri("a.q"),
+            &WorkspaceIndex::default(),
+        ));
         let def_off = src.find("loadedf:enlist").unwrap(); // line 1 global def
-
-        match goto_definition(&doc, pos, &uri) {
-            Some(GotoDefinitionResponse::Array(locs)) => {
-                let got = doc.offset_of(locs[0].range.start);
-                assert_eq!(got, def_off, "must point to global def, not amend site");
-            }
-            Some(GotoDefinitionResponse::Scalar(loc)) => {
-                let got = doc.offset_of(loc.range.start);
-                assert_eq!(got, def_off, "must point to global def, not amend site");
-            }
-            other => panic!("expected Some location, got {other:?}"),
-        }
+        assert_eq!(
+            doc.offset_of(locs[0].range.start),
+            def_off,
+            "global def, not amend site"
+        );
     }
 }

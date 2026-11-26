@@ -7,38 +7,23 @@
 //! them. A name with the same spelling but a different scope (an outer
 //! global vs. a lambda parameter) is a *different* symbol and is excluded.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
-use q_parser::SyntaxKind;
+use q_parser::{SyntaxKind, SyntaxNode, SyntaxToken};
 #[allow(clippy::wildcard_imports)]
 use tower_lsp_server::ls_types::*;
 
 use crate::document::Document;
+use crate::syntax::{
+    has_ancestor, in_qsql, is_assignment_lhs, is_from_apply, is_qsql_stmt, tokens,
+};
 use crate::workspace_index::WorkspaceIndex;
 
-#[allow(dead_code)]
 pub fn find_references(
     doc: &Document,
     pos: Position,
     include_declaration: bool,
     uri: &Uri,
-) -> Vec<Location> {
-    find_references_with_workspace(
-        doc,
-        pos,
-        include_declaration,
-        uri,
-        &HashMap::new(),
-        &WorkspaceIndex::default(),
-    )
-}
-
-pub fn find_references_with_workspace(
-    doc: &Document,
-    pos: Position,
-    include_declaration: bool,
-    uri: &Uri,
-    all_open_docs: &HashMap<Uri, Document>,
     workspace: &WorkspaceIndex,
 ) -> Vec<Location> {
     let cursor = doc.offset_of(pos);
@@ -46,479 +31,248 @@ pub fn find_references_with_workspace(
     let Some((name, _, _)) = doc.ident_at(cursor) else {
         return Vec::new();
     };
-    // Copy the borrowed name so we can read the syntax tree without
-    // holding a reference into `doc.text`.
     let name = name.to_string();
 
-    // All def sites of `name` in the scope the cursor lives in.
+    // All def sites of `name` in the scope the cursor lives in. If there is
+    // none here, a workspace-known global still gets a cross-file scan.
     let def_offsets: HashSet<u32> = table.def_offsets_for(cursor, &name).into_iter().collect();
-
-    // If no local def, check whether it's a workspace-known global. If so,
-    // we can still do a cross-file scan — fall through with empty def_offsets.
-    // If it's not known anywhere, bail.
-    if def_offsets.is_empty() && workspace.resolve_global(&name).is_none() {
+    let is_workspace_global = workspace.resolve_global(&name).is_some();
+    if def_offsets.is_empty() && !is_workspace_global {
         return Vec::new();
     }
 
-    // Qualified form of `name` (e.g. `.cache.cache` when name is `cache`
-    // inside `\d .cache`).  Used to match backtick symbol tokens.
-    let qualified_name = table
+    // Qualified form (`.cache.cache` for `cache` inside `\d .cache`), used
+    // to match dotted idents and backtick symbols.
+    let qualified = table
         .qualified_for(cursor, &name)
         .map_or_else(|| name.clone(), |q| q.to_string());
 
-    // Collect same-file refs via def-offset matching (only when we have local defs).
     let mut out = if def_offsets.is_empty() {
         Vec::new()
     } else {
-        collect_refs_in_doc(
+        scoped_refs(
             doc,
+            uri,
             &name,
-            &qualified_name,
+            &qualified,
             &def_offsets,
             include_declaration,
-            uri,
         )
     };
 
-    // Cross-file scan when:
-    // (a) cursor is on a global symbol (not a lambda param/local), AND
-    //     (i) the file has a global def of this name, OR
-    //     (ii) no local def at all (use-site whose def lives in another file).
-    let is_local_global = !table.global_def_offsets(&name).is_empty()
-        || !table.global_def_offsets(&qualified_name).is_empty();
-    let is_workspace_global = workspace.resolve_global(&name).is_some();
-
-    // Only do cross-file scanning when the cursor is actually on a global
-    // binding, not a lambda param or local.  When `def_offsets` is non-empty,
-    // confirm at least one of those offsets is in the global table; if none
-    // match, the cursor is on a lambda-local/param and must stay in-scope.
-    let cursor_on_global = def_offsets.is_empty() || {
-        let g_name = table.global_def_offsets(&name);
-        let g_qual = table.global_def_offsets(&qualified_name);
-        def_offsets
+    // Cross-file only for globals: either no local def at all (a use whose
+    // def lives elsewhere), or a local def that is in the global table
+    // (not a lambda param/local).
+    let g_name = table.global_def_offsets(&name);
+    let g_qual = table.global_def_offsets(&qualified);
+    let cursor_on_global = def_offsets.is_empty()
+        || def_offsets
             .iter()
-            .any(|&off| g_name.contains(&off) || g_qual.contains(&off))
-    };
+            .any(|off| g_name.contains(off) || g_qual.contains(off));
+    let is_local_global = !g_name.is_empty() || !g_qual.is_empty();
 
     if cursor_on_global && (is_local_global || is_workspace_global) {
         if def_offsets.is_empty() {
-            // No local def — collect_refs_in_doc was skipped; scan current file via global path.
-            out.extend(collect_global_refs_in_doc(doc, &name, &qualified_name, uri));
+            out.extend(global_refs(doc, uri, &name, &qualified));
         }
-        // Scan all other docs: open docs (excluding current) + workspace background files.
-        // O(total tokens × files) — add an inverted index to WorkspaceIndex if this becomes a bottleneck.
-        let open_others = all_open_docs.iter().filter(|(u, _)| *u != uri);
-        let workspace_only = workspace
-            .files()
-            .iter()
-            .filter(|(u, _)| !all_open_docs.contains_key(*u));
-
-        for (other_uri, other_doc) in open_others.chain(workspace_only) {
-            out.extend(collect_global_refs_in_doc(
-                other_doc,
-                &name,
-                &qualified_name,
-                other_uri,
-            ));
+        // O(total tokens × files) — add an inverted index if this gets slow.
+        for (other_uri, other_doc) in workspace.files().filter(|(u, _)| *u != uri) {
+            out.extend(global_refs(other_doc, other_uri, &name, &qualified));
         }
     }
-
     out
 }
 
-fn collect_refs_in_doc(
+fn location(doc: &Document, uri: &Uri, token: &SyntaxToken) -> Location {
+    let r = token.text_range();
+    Location::new(
+        uri.clone(),
+        Range::new(
+            doc.position_of(r.start().into()),
+            doc.position_of(r.end().into()),
+        ),
+    )
+}
+
+/// Ident/dotted-ident tokens of `doc` that could be variable references:
+/// not qSQL column names (a `from` table is fine) and not column
+/// definitions in a table constructor.
+fn candidate_idents(doc: &Document) -> impl Iterator<Item = SyntaxToken> {
+    tokens(&doc.parse().syntax()).filter(|t| {
+        matches!(t.kind(), SyntaxKind::Ident | SyntaxKind::DottedIdent)
+            && t.parent().is_some_and(|p| {
+                (!in_qsql(&p) || is_qsql_from_table(&p)) && !is_col_def_in_table(&p)
+            })
+    })
+}
+
+/// Is the token a plain reference expression (not a parameter declaration)?
+fn is_ident_ref(token: &SyntaxToken) -> bool {
+    token.parent().is_some_and(|p| {
+        matches!(p.kind(), SyntaxKind::IdentExpr | SyntaxKind::Namespace)
+            && !has_ancestor(&p, SyntaxKind::ParamList)
+    })
+}
+
+/// References in `doc` that resolve to one of `def_offsets`.
+fn scoped_refs(
     doc: &Document,
+    uri: &Uri,
     name: &str,
-    qualified_name: &str,
+    qualified: &str,
     def_offsets: &HashSet<u32>,
     include_declaration: bool,
-    uri: &Uri,
 ) -> Vec<Location> {
-    let root = doc.parse().syntax();
     let table = doc.sym_table();
-    let mut out = Vec::new();
+    // Also match the bare last component of a qualified name, so refs from
+    // `.cache.cache` find bare `cache` uses inside `\d .cache`; resolution
+    // against `def_offsets` still enforces correctness.
+    let q = if qualified.starts_with('.') {
+        qualified
+    } else {
+        name
+    };
+    let bare = q
+        .rsplit('.')
+        .next()
+        .filter(|b| !b.is_empty() && *b != name && *b != qualified);
 
-    for token in root
-        .descendants_with_tokens()
-        .filter_map(q_parser::SyntaxElement::into_token)
-    {
-        let tk = token.kind();
-        let off_u32: u32 = token.text_range().start().into();
-        let off: usize = off_u32 as usize;
-
-        if matches!(tk, SyntaxKind::Ident | SyntaxKind::DottedIdent) {
-            let tok_text = token.text();
-            // Match bare name OR the qualified form (e.g. `.cache.cache` when
-            // searching for `cache` inside `\d .cache`).
-            //
-            // Also match the bare last component of a qualified name so that
-            // go-to-ref from `.cache.cache` also finds bare `cache` refs
-            // inside `\d .cache`.  Correctness is still enforced by the
-            // `resolve → def_offsets` check below.
-            let q = if qualified_name.starts_with('.') {
-                qualified_name
-            } else {
-                name
-            };
-            let bare_of_qualified = q.rsplit('.').next().unwrap_or("");
-            let lookup_name: &str = if tok_text == name {
-                name
-            } else if tok_text == qualified_name {
-                qualified_name
-            } else if !bare_of_qualified.is_empty()
-                && bare_of_qualified != name
-                && bare_of_qualified != qualified_name
-                && tok_text == bare_of_qualified
-            {
-                bare_of_qualified
-            } else {
-                continue;
-            };
-            // Column names inside qSQL are not global refs, but the table
-            // argument of a `from` clause IS (it names the global table).
-            if is_in_qsql(&token) && !is_qsql_from_table_ident(&token) {
-                continue;
-            }
-
-            let parent_kind = token.parent().map(|p| p.kind());
-            let in_param_list = is_in_kind(&token, SyntaxKind::ParamList);
-
-            let is_decl = def_offsets.contains(&off_u32);
-            // Table constructor column defs (`id` in `([id:...])`) are not
-            // variable references even though resolve() would find the global.
-            if is_col_def_in_table(&token) {
-                continue;
-            }
-            let resolves_to_def = is_decl
-                || (!in_param_list
-                    && matches!(
-                        parent_kind,
-                        Some(SyntaxKind::IdentExpr | SyntaxKind::Namespace)
-                    )
-                    && table
-                        .resolve(off, lookup_name)
-                        .is_some_and(|d| def_offsets.contains(&d)));
-
-            if !resolves_to_def {
-                continue;
-            }
-            if is_decl && !include_declaration {
-                continue;
-            }
-
-            let start = doc.position_of(off);
-            let end = doc.position_of(off + tok_text.len());
-            out.push(Location {
-                uri: uri.clone(),
-                range: Range::new(start, end),
-            });
-        } else if tk == SyntaxKind::Symbol {
-            // Only treat backtick symbols as global table refs in in-place
-            // modification contexts: `upsert`, `insert`, or qSQL
-            // delete/update with a symbol table.  Excludes dict indexing
-            // (r`id), symbol literals in assignments, etc.
-            if !is_inplace_table_symbol(&token) {
-                continue;
-            }
-            let sym_name = token.text().strip_prefix('`').unwrap_or("");
-            if sym_name != name && sym_name != qualified_name {
-                continue;
-            }
-            let start = doc.position_of(off);
-            let end = doc.position_of(off + token.text().len());
-            out.push(Location {
-                uri: uri.clone(),
-                range: Range::new(start, end),
-            });
+    let idents = candidate_idents(doc).filter(|tok| {
+        let text = tok.text();
+        if text != name && text != qualified && Some(text) != bare {
+            return false;
         }
-    }
-    out
+        let off: u32 = tok.text_range().start().into();
+        if def_offsets.contains(&off) {
+            return include_declaration;
+        }
+        is_ident_ref(tok)
+            && table
+                .resolve(off as usize, text)
+                .is_some_and(|d| def_offsets.contains(&d))
+    });
+    // Backtick symbols naming the table in in-place modification contexts.
+    let symbols = tokens(&doc.parse().syntax()).filter(|tok| {
+        tok.kind() == SyntaxKind::Symbol
+            && is_inplace_table_symbol(tok)
+            && tok
+                .text()
+                .strip_prefix('`')
+                .is_some_and(|s| s == name || s == qualified)
+    });
+    let mut out: Vec<SyntaxToken> = idents.chain(symbols).collect();
+    out.sort_by_key(|t| t.text_range().start());
+    out.iter().map(|t| location(doc, uri, t)).collect()
 }
 
-fn collect_global_refs_in_doc(
-    doc: &Document,
-    name: &str,
-    qualified_name: &str,
-    uri: &Uri,
-) -> Vec<Location> {
-    let root = doc.parse().syntax();
+/// References in `doc` to the *global* `name`: tokens that resolve to a
+/// global def in `doc`, or don't resolve locally at all (cross-file use).
+fn global_refs(doc: &Document, uri: &Uri, name: &str, qualified: &str) -> Vec<Location> {
     let table = doc.sym_table();
-    let mut out = Vec::new();
-
-    for token in root
-        .descendants_with_tokens()
-        .filter_map(q_parser::SyntaxElement::into_token)
-    {
-        let tk = token.kind();
-        if !matches!(tk, SyntaxKind::Ident | SyntaxKind::DottedIdent) {
-            continue;
-        }
-        let tok_text = token.text();
-        let lookup = if tok_text == name {
-            name
-        } else if tok_text == qualified_name {
-            qualified_name
-        } else {
-            continue;
-        };
-        if is_in_kind(&token, SyntaxKind::ParamList) {
-            continue;
-        }
-        if is_in_qsql(&token) && !is_qsql_from_table_ident(&token) {
-            continue;
-        }
-        if is_col_def_in_table(&token) {
-            continue;
-        }
-        let off: usize = token.text_range().start().into();
-        let parent_kind = token.parent().map(|p| p.kind());
-        if !matches!(
-            parent_kind,
-            Some(SyntaxKind::IdentExpr | SyntaxKind::Namespace)
-        ) {
-            continue;
-        }
-        // Accept the token if it either (a) resolves to a global in *this*
-        // file, or (b) has no local definition at all (unresolved reference
-        // that must come from another file).
-        let resolved_off = table.resolve(off, lookup);
-        let passes = match resolved_off {
-            None => true, // no local binding — treat as cross-file use
-            Some(r) => table.global_def_offsets(lookup).contains(&r),
-        };
-        if !passes {
-            continue;
-        }
-        let start = doc.position_of(off);
-        let end = doc.position_of(off + tok_text.len());
-        out.push(Location {
-            uri: uri.clone(),
-            range: Range::new(start, end),
-        });
-    }
-    out
-}
-
-fn is_in_kind(token: &q_parser::SyntaxToken, kind: SyntaxKind) -> bool {
-    let mut cur = token.parent();
-    while let Some(node) = cur {
-        if node.kind() == kind {
-            return true;
-        }
-        cur = node.parent();
-    }
-    false
-}
-
-fn is_in_qsql(token: &q_parser::SyntaxToken) -> bool {
-    let mut cur = token.parent();
-    while let Some(node) = cur {
-        match node.kind() {
-            // Statement-level qSQL nodes.
-            SyntaxKind::SelectExpr
-            | SyntaxKind::UpdateExpr
-            | SyntaxKind::ExecExpr
-            | SyntaxKind::DeleteExpr => return true,
-
-            // Expression-level qSQL: inside $[…] or lambdas the parser emits
-            // plain ApplyExpr chains.  Detect `update`/`select`/`exec`/`delete`
-            // as the function position of an apply — these identifiers are only
-            // valid as qSQL verbs, never as ordinary function names.
-            SyntaxKind::ApplyExpr => {
-                if let Some(func) = node.first_child()
-                    && func.kind() == SyntaxKind::IdentExpr
-                {
-                    let text = func
-                        .children_with_tokens()
-                        .filter_map(q_parser::SyntaxElement::into_token)
-                        .find(|t| t.kind() == SyntaxKind::Ident)
-                        .map(|t| t.text().to_string())
-                        .unwrap_or_default();
-                    if matches!(text.as_str(), "update" | "select" | "exec" | "delete") {
-                        return true;
-                    }
-                }
-            }
-            _ => {}
-        }
-        cur = node.parent();
-    }
-    false
+    candidate_idents(doc)
+        .filter(|tok| {
+            let text = tok.text();
+            (text == name || text == qualified)
+                && is_ident_ref(tok)
+                && table
+                    .resolve(tok.text_range().start().into(), text)
+                    .is_none_or(|r| table.global_def_offsets(text).contains(&r))
+        })
+        .map(|t| location(doc, uri, &t))
+        .collect()
 }
 
 /// True only when a Symbol token is used as a global table reference:
-///
-/// - LHS of a `upsert` / `insert` binary expression:
-///   `` `.t upsert row `` → `BinExpr` { `LiteralExpr`(Symbol), "upsert", … }
-/// - Table argument of a `from` clause in any context (statement or lambda):
-///   `` delete from `.t where … `` / `` update … from `.t where … ``
-///   Even inside lambdas the parser emits an `ApplyExpr` chain; we detect the
-///   `from`-apply pattern: `LiteralExpr` is first child of `ApplyExpr` whose
-///   parent is an `ApplyExpr` with `IdentExpr`("from") as its first child.
-///
-/// Excluded: dict/list indexing (`r`id`), assignment RHS (`x:`sym`),
-/// symbol lists, function arguments, etc.
-fn is_inplace_table_symbol(token: &q_parser::SyntaxToken) -> bool {
-    let Some(lit) = token.parent() else {
+/// the LHS of `upsert` / `insert`, or the table of a qSQL `from` clause
+/// (statement-level, or the `ApplyExpr` chains the parser emits inside
+/// lambdas). Excludes dict indexing (`` r`id ``), assignment RHS, etc.
+fn is_inplace_table_symbol(token: &SyntaxToken) -> bool {
+    let Some(lit) = token
+        .parent()
+        .filter(|l| l.kind() == SyntaxKind::LiteralExpr)
+    else {
         return false;
     };
-    if lit.kind() != SyntaxKind::LiteralExpr {
-        return false;
-    }
-
     let Some(parent) = lit.parent() else {
         return false;
     };
-
+    let lit_first = parent.first_child().as_ref() == Some(&lit);
     match parent.kind() {
-        // After qSQL parse fix, the from-table LiteralExpr is a direct child of
-        // the qSQL statement node (no longer wrapped in an ApplyExpr chain).
-        SyntaxKind::DeleteExpr
-        | SyntaxKind::UpdateExpr
-        | SyntaxKind::SelectExpr
-        | SyntaxKind::ExecExpr => true,
-
+        _ if is_qsql_stmt(&parent) => true,
         // `` `.t upsert rows `` / `` `.t insert rows ``
-        // CST: BinExpr { LiteralExpr(sym), Ident("upsert"|"insert"), … }
         SyntaxKind::BinExpr => {
-            parent.first_child().as_ref() == Some(&lit)
-                && parent
-                    .children_with_tokens()
-                    .filter_map(q_parser::SyntaxElement::into_token)
-                    .any(|t| {
+            lit_first
+                && parent.children_with_tokens().any(|t| {
+                    t.as_token().is_some_and(|t| {
                         t.kind() == SyntaxKind::Ident && matches!(t.text(), "upsert" | "insert")
                     })
+                })
         }
-
-        SyntaxKind::ApplyExpr => {
-            if parent.first_child().as_ref() == Some(&lit) {
-                let Some(grandparent) = parent.parent() else {
-                    return false;
-                };
-
-                // Pattern A: LiteralExpr → ApplyExpr → DeleteExpr|UpdateExpr|SelectExpr
-                // (statement-level `delete from `.t` with no column list)
-                if matches!(
-                    grandparent.kind(),
-                    SyntaxKind::DeleteExpr
-                        | SyntaxKind::UpdateExpr
-                        | SyntaxKind::SelectExpr
-                        | SyntaxKind::ExecExpr
-                ) {
-                    return true;
-                }
-
-                // Pattern B: `from`-apply chain — covers lambdas and update with
-                // column assignments where the parser folds `from` into an apply.
-                // LiteralExpr → ApplyExpr → ApplyExpr { IdentExpr("from"), … }
-                is_from_apply(&grandparent)
-            } else {
-                // Pattern C: simple `from `tbl`` with no where clause or table args.
-                // Parser emits ApplyExpr { IdentExpr("from"), LiteralExpr(`tbl`) }.
-                // LiteralExpr is the non-first argument of the from-apply.
-                is_from_apply(&parent)
-            }
-        }
+        // `from tbl where …` / `from tbl[args]`: first child of an apply
+        // nested in a qSQL statement or a `from`-apply.
+        SyntaxKind::ApplyExpr if lit_first => parent
+            .parent()
+            .is_some_and(|gp| is_qsql_stmt(&gp) || is_from_apply(&gp)),
+        // `from tbl`: non-first argument of a `from`-apply.
+        SyntaxKind::ApplyExpr => is_from_apply(&parent),
         _ => false,
     }
 }
 
-/// True when a token is an `IdentExpr`/`DottedIdent` used as the table
-/// argument of a qSQL `from` clause.  Lets us skip the `is_in_qsql` guard
-/// for the table name while still filtering out column names.
-fn is_qsql_from_table_ident(token: &q_parser::SyntaxToken) -> bool {
-    let Some(ident_expr) = token.parent() else {
-        return false;
-    };
+/// Is an `IdentExpr` the table argument of a qSQL `from` clause? Lets
+/// the table name through the qSQL column-name filter.
+fn is_qsql_from_table(ident_expr: &SyntaxNode) -> bool {
     if ident_expr.kind() != SyntaxKind::IdentExpr {
         return false;
     }
     let Some(parent) = ident_expr.parent() else {
         return false;
     };
-
-    // Case 1: IdentExpr is a direct child of a qSQL statement node.
-    // Occurs in `select from .t` (no column list, so parser places .t directly).
-    if matches!(
-        parent.kind(),
-        SyntaxKind::SelectExpr
-            | SyntaxKind::UpdateExpr
-            | SyntaxKind::DeleteExpr
-            | SyntaxKind::ExecExpr
-    ) {
+    // `select from .t` — no column list, table is a direct child.
+    if is_qsql_stmt(&parent) {
         return true;
     }
-
-    // Case 2: `from`-apply chain (for `from tbl[args]`).
-    // IdentExpr is first child of ApplyExpr whose parent is ApplyExpr { from, … }.
-    if parent.kind() == SyntaxKind::ApplyExpr
-        && parent.first_child().as_ref() == Some(&ident_expr)
-        && let Some(grandparent) = parent.parent()
-    {
-        return is_from_apply(&grandparent);
-    }
-
-    // Case 3: simple `from tbl` in an ApplyExpr chain (no table args, no where
-    // clause). Parser emits ApplyExpr { IdentExpr("from"), IdentExpr("tbl") }.
-    // IdentExpr is the non-first argument of a from-apply.
-    if is_from_apply(&parent) && parent.first_child().as_ref() != Some(&ident_expr) {
-        return true;
-    }
-
-    false
+    // `from tbl[args]` (first child of an apply inside a `from`-apply) or
+    // `from tbl` (non-first argument of a `from`-apply).
+    parent.kind() == SyntaxKind::ApplyExpr
+        && if parent.first_child().as_ref() == Some(ident_expr) {
+            parent.parent().is_some_and(|gp| is_from_apply(&gp))
+        } else {
+            is_from_apply(&parent)
+        }
 }
 
-/// True when `token` is the column-name LHS of a `BinExpr` with `:` inside
-/// a `TableExpr` — e.g. the `id` in `([id:`u#`long$()]...)`.
-/// These are column definitions, not references to globals.
-fn is_col_def_in_table(token: &q_parser::SyntaxToken) -> bool {
-    let Some(ident_expr) = token.parent() else {
-        return false;
-    };
-    if ident_expr.kind() != SyntaxKind::IdentExpr {
-        return false;
-    }
-    let Some(bin) = ident_expr.parent() else {
-        return false;
-    };
-    if bin.kind() != SyntaxKind::BinExpr {
-        return false;
-    }
-    if bin.first_child().as_ref() != Some(&ident_expr) {
-        return false;
-    }
-    let has_colon = bin
-        .children_with_tokens()
-        .filter_map(q_parser::SyntaxElement::into_token)
-        .any(|t| matches!(t.kind(), SyntaxKind::Colon | SyntaxKind::ColonColon));
-    has_colon && bin.ancestors().any(|n| n.kind() == SyntaxKind::TableExpr)
-}
-
-/// True when `node` is an `ApplyExpr` whose first child is `IdentExpr("from")`.
-fn is_from_apply(node: &q_parser::SyntaxNode) -> bool {
-    if node.kind() != SyntaxKind::ApplyExpr {
-        return false;
-    }
-    node.first_child()
-        .filter(|fc| fc.kind() == SyntaxKind::IdentExpr)
-        .is_some_and(|fc| {
-            fc.children_with_tokens()
-                .filter_map(q_parser::SyntaxElement::into_token)
-                .any(|t| t.kind() == SyntaxKind::Ident && t.text() == "from")
-        })
+/// Is `ident_expr` the column-name LHS of `col:value` inside a table
+/// constructor (`([id:...] ...)`)? Column definitions aren't references.
+fn is_col_def_in_table(ident_expr: &SyntaxNode) -> bool {
+    ident_expr.kind() == SyntaxKind::IdentExpr
+        && is_assignment_lhs(ident_expr)
+        && has_ancestor(ident_expr, SyntaxKind::TableExpr)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace_index::tests::{doc, index, uri};
 
+    /// Start offsets of single-file references from byte `cursor`.
     fn refs(src: &str, cursor: usize, include_decl: bool) -> Vec<usize> {
-        let doc = Document::new(src.to_string(), 0);
-        let uri: Uri = "file:///x.q".parse().unwrap();
-        let pos = doc.position_of(cursor);
-        find_references(&doc, pos, include_decl, &uri)
+        let d = doc(src);
+        let idx = WorkspaceIndex::default();
+        find_references(&d, d.position_of(cursor), include_decl, &uri("x.q"), &idx)
             .into_iter()
-            .map(|loc| doc.offset_of(loc.range.start))
+            .map(|loc| d.offset_of(loc.range.start))
+            .collect()
+    }
+
+    /// Cross-file references from `cursor` in `src` (file `a.q`), with the
+    /// workspace holding `others`; returns the URIs of the hits.
+    fn cross_refs(src: &str, cursor: usize, others: &[(&str, &str)]) -> Vec<Uri> {
+        let d = doc(src);
+        let idx = index(others);
+        find_references(&d, d.position_of(cursor), true, &uri("a.q"), &idx)
+            .into_iter()
+            .map(|l| l.uri)
             .collect()
     }
 
@@ -642,15 +396,8 @@ mod tests {
         // go-to-ref from `.cache.cache` (dotted form) must find bare `cache`
         // refs inside `\d .cache`, same as go-to-ref from the bare definition.
         let src = "\\d .cache\ncache:1\nf:{exec size from cache}\n\\d .\nshow .cache.cache";
-        let doc = Document::new(src.to_string(), 0);
-        let uri: Uri = "file:///x.q".parse().unwrap();
         // cursor on `.cache.cache` (the dotted-ident use outside the namespace)
-        let dotted_off = src.rfind(".cache.cache").unwrap();
-        let pos = doc.position_of(dotted_off);
-        let r: Vec<usize> = find_references(&doc, pos, true, &uri)
-            .into_iter()
-            .map(|loc| doc.offset_of(loc.range.start))
-            .collect();
+        let r = refs(src, src.rfind(".cache.cache").unwrap(), true);
         // Must find the bare `cache` def at line 2.
         let def_off = src.find("cache:1").unwrap();
         assert!(
@@ -773,210 +520,51 @@ mod tests {
 
     #[test]
     fn find_refs_from_use_site_when_def_is_in_another_file() {
-        use crate::document::Document;
-        use crate::workspace_index::WorkspaceIndex;
-        use std::collections::HashMap;
-
-        // `sharedFn` is defined in a.q, used in b.q. Cursor is in b.q on the use.
-        let uri_a: Uri = "file:///a.q".parse().unwrap();
-        let uri_b: Uri = "file:///b.q".parse().unwrap();
-
-        let mut idx = WorkspaceIndex::default();
-        idx.index_file(
-            uri_a.clone(),
-            Document::new("sharedFn:{x+1}".to_string(), 0),
-        );
-
-        let doc_b = Document::new("sharedFn 99".to_string(), 0);
-        // cursor on `sharedFn` at offset 0
-        let pos = doc_b.position_of(0);
-
-        let locs = find_references_with_workspace(&doc_b, pos, true, &uri_b, &HashMap::new(), &idx);
-
-        assert!(
-            !locs.is_empty(),
-            "must find references when def is in another file"
-        );
-        let uris: Vec<_> = locs.iter().map(|l| &l.uri).collect();
-        assert!(
-            uris.contains(&&uri_a),
-            "must include def site in a.q: {locs:?}"
-        );
-        assert!(
-            uris.contains(&&uri_b),
-            "must include use site in b.q: {locs:?}"
-        );
+        // `sharedFn` defined in b.q, used in a.q; cursor on the use.
+        let uris = cross_refs("sharedFn 99", 0, &[("b.q", "sharedFn:{x+1}")]);
+        assert!(uris.contains(&uri("a.q")), "use site in a.q: {uris:?}");
+        assert!(uris.contains(&uri("b.q")), "def site in b.q: {uris:?}");
     }
 
     #[test]
     fn cross_file_global_refs_found() {
-        use crate::workspace_index::WorkspaceIndex;
-
-        let uri_a: Uri = "file:///a.q".parse().unwrap();
-        let uri_b: Uri = "file:///b.q".parse().unwrap();
-
-        let doc_b_src = "foo+2".to_string();
-
-        let mut idx = WorkspaceIndex::default();
-        idx.index_file(uri_b.clone(), Document::new(doc_b_src.clone(), 0));
-
-        let mut open_docs: HashMap<Uri, Document> = HashMap::new();
-        open_docs.insert(uri_a.clone(), Document::new("foo:1".to_string(), 0));
-        let doc_a = Document::new("foo:1".to_string(), 0);
-
-        let locs = find_references_with_workspace(
-            &doc_a,
-            doc_a.position_of(0),
-            true,
-            &uri_a,
-            &open_docs,
-            &idx,
-        );
-        let b_locs: Vec<_> = locs.iter().filter(|l| l.uri == uri_b).collect();
-        assert!(
-            !b_locs.is_empty(),
-            "cross-file ref in b.q not found; got: {locs:?}"
-        );
+        let uris = cross_refs("foo:1", 0, &[("b.q", "foo+2")]);
+        assert!(uris.contains(&uri("b.q")), "ref in b.q: {uris:?}");
     }
 
     #[test]
     fn lambda_param_not_found_cross_file() {
-        // Cursor on param `x` in `{[x] x+1}`. a.q also has a global `x:99`.
-        // b.q has its own global `x:77`.
-        // Cross-file scan must NOT return b.q's `x`.
-        use crate::workspace_index::WorkspaceIndex;
-
-        let uri_a: Uri = "file:///a.q".parse().unwrap();
-        let uri_b: Uri = "file:///b.q".parse().unwrap();
-
-        let src_a = "x:99\nf:{[x] x+1}".to_string();
-        let mut idx = WorkspaceIndex::default();
-        idx.index_file(uri_b.clone(), Document::new("x:77".to_string(), 0));
-
-        let doc_a = Document::new(src_a.clone(), 0);
-        // Cursor on the param declaration `x` in `{[x] ...}`
-        let param_pos = doc_a.position_of(src_a.find("{[x]").unwrap() + 2);
-        let locs =
-            find_references_with_workspace(&doc_a, param_pos, true, &uri_a, &HashMap::new(), &idx);
-        let b_locs: Vec<_> = locs.iter().filter(|l| l.uri == uri_b).collect();
+        // Cursor on param `x`; a.q has a global `x:99`, b.q its own `x:77`.
+        let src = "x:99\nf:{[x] x+1}";
+        let d = doc(src);
+        let idx = index(&[("b.q", "x:77")]);
+        let pos = d.position_of(src.find("{[x]").unwrap() + 2);
+        let locs = find_references(&d, pos, true, &uri("a.q"), &idx);
+        assert!(locs.iter().all(|l| l.uri == uri("a.q")), "{locs:?}");
+        let global_x = src.find("x:99").unwrap();
         assert!(
-            b_locs.is_empty(),
-            "lambda param must not cross-file scan: {locs:?}"
-        );
-        // All returned refs must be inside the lambda body/param list
-        let global_x_off = src_a.find("x:99").unwrap();
-        let any_global = locs.iter().any(|l| {
-            let off = doc_a.offset_of(l.range.start);
-            off == global_x_off
-        });
-        assert!(
-            !any_global,
+            locs.iter().all(|l| d.offset_of(l.range.start) != global_x),
             "global x:99 must not appear in param refs: {locs:?}"
         );
     }
 
     #[test]
     fn lambda_local_not_found_cross_file() {
-        use crate::workspace_index::WorkspaceIndex;
-
-        let uri_a: Uri = "file:///a.q".parse().unwrap();
-        let uri_b: Uri = "file:///b.q".parse().unwrap();
-
-        let src_a = "f:{x:42; x}".to_string();
-
-        let mut idx = WorkspaceIndex::default();
-        idx.index_file(uri_b.clone(), Document::new("g:{x:99; x}".to_string(), 0));
-
-        let mut open_docs: HashMap<Uri, Document> = HashMap::new();
-        open_docs.insert(uri_a.clone(), Document::new(src_a.clone(), 0));
-
-        let doc_a = Document::new(src_a.clone(), 0);
-        let x_pos = doc_a.position_of(src_a.find("x:42").unwrap());
-        let locs = find_references_with_workspace(&doc_a, x_pos, true, &uri_a, &open_docs, &idx);
-        let b_locs: Vec<_> = locs.iter().filter(|l| l.uri == uri_b).collect();
-        assert!(
-            b_locs.is_empty(),
-            "lambda local must not find cross-file refs: {locs:?}"
-        );
-    }
-}
-
-#[cfg(test)]
-mod aoc_tests {
-    use super::*;
-    use crate::document::Document;
-
-    // Regression: `minus` in q1b is assigned inside $[...] and used later in
-    // the same lambda. Both the def and ref sites must be found from either cursor.
-    #[test]
-    fn finds_minus_refs_in_q1b() {
-        let src = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../crates/parser/tests/data/real_q/aoc.q"
-        ))
-        .expect("aoc.q");
-
-        let doc = Document::new(src.clone(), 0);
-        let uri: Uri = "file:///aoc.q".parse().unwrap();
-
-        let def_cursor = src.find("minus:").expect("minus: def");
-        let ref_cursor = src.find("not minus").expect("(not minus)") + "not ".len();
-
-        let refs_from_def = find_references(&doc, doc.position_of(def_cursor), true, &uri);
-        let refs_from_usage = find_references(&doc, doc.position_of(ref_cursor), true, &uri);
-
-        assert!(
-            refs_from_def.len() >= 2,
-            "from def: expected ≥2, got {}",
-            refs_from_def.len()
-        );
-        assert!(
-            refs_from_usage.len() >= 2,
-            "from ref: expected ≥2, got {}",
-            refs_from_usage.len()
-        );
-    }
-}
-
-#[cfg(test)]
-mod vscode_simulation {
-    use super::*;
-    use crate::document::Document;
-
-    #[test]
-    fn find_refs_exclude_decl_from_def_site() {
-        let src = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../crates/parser/tests/data/real_q/aoc.q"
-        ))
-        .expect("aoc.q");
-        let doc = Document::new(src.clone(), 0);
-        let uri: Uri = "file:///aoc.q".parse().unwrap();
-        let def_cursor = src.find("minus:").unwrap();
-        let refs = find_references(&doc, doc.position_of(def_cursor), false, &uri);
-        eprintln!("include_decl=false from def: {} refs", refs.len());
-        for r in &refs {
-            eprintln!("  {:?}", r.range);
-        }
-        assert!(!refs.is_empty(), "expected ref site to be found, got 0");
+        let src = "f:{x:42; x}";
+        let uris = cross_refs(src, src.find("x:42").unwrap(), &[("b.q", "g:{x:99; x}")]);
+        assert!(uris.iter().all(|u| *u == uri("a.q")), "{uris:?}");
     }
 
+    /// Regression: `minus` (assigned inside `$[...]`) and `loc` in aoc.q's
+    /// q1b lambda must find their refs from the def and the use.
     #[test]
-    fn find_refs_loc_from_def_site() {
-        let src = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../crates/parser/tests/data/real_q/aoc.q"
-        ))
-        .expect("aoc.q");
-        let doc = Document::new(src.clone(), 0);
-        let uri: Uri = "file:///aoc.q".parse().unwrap();
-        // cursor on `loc` in `loc: x[0]+...`
-        let def_cursor = src.find("loc:").unwrap();
-        let refs = find_references(&doc, doc.position_of(def_cursor), false, &uri);
-        eprintln!("loc include_decl=false from def: {} refs", refs.len());
-        for r in &refs {
-            eprintln!("  {:?}", r.range);
-        }
-        assert!(!refs.is_empty(), "expected ref sites to be found, got 0");
+    fn aoc_lambda_local_refs() {
+        let src = include_str!("../../parser/tests/data/real_q/aoc.q");
+        let def = src.find("minus:").unwrap();
+        let usage = src.find("not minus").unwrap() + "not ".len();
+        assert!(refs(src, def, true).len() >= 2);
+        assert!(refs(src, usage, true).len() >= 2);
+        assert_ne!(refs(src, def, false), [0usize; 0]);
+        assert_ne!(refs(src, src.find("loc:").unwrap(), false), [0usize; 0]);
     }
 }

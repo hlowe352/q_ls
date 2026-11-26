@@ -1,9 +1,35 @@
 use crate::parser::{CompletedMarker, Parser};
-use crate::syntax_kind::SyntaxKind;
+// Glob import: grammar code names dozens of kinds; `SyntaxKind::` everywhere buries the logic.
+#[allow(clippy::enum_glob_use)]
+use crate::syntax_kind::SyntaxKind::{self, *};
 
 /// Parse an expression.
 pub fn expr(p: &mut Parser) {
     expr_bp(p, 0);
+}
+
+/// Parse an expression wrapped in an `ExprStmt` (list entries, arguments,
+/// lambda body statements — anywhere an assignment like `x:42` may appear).
+pub(crate) fn stmt(p: &mut Parser) {
+    let m = p.start();
+    expr(p);
+    m.complete(p, ExprStmt);
+}
+
+/// Run `f` with the qSQL clause flags set to `(stop, comma_stop)`, restoring
+/// the previous values afterwards. Bracketed sub-expressions run with both
+/// flags cleared so clause-boundary behaviour never leaks into them.
+pub(crate) fn with_qsql_flags<T>(
+    p: &mut Parser,
+    stop: bool,
+    comma_stop: bool,
+    f: impl FnOnce(&mut Parser) -> T,
+) -> T {
+    let saved = (p.qsql_stop, p.qsql_comma_stop);
+    (p.qsql_stop, p.qsql_comma_stop) = (stop, comma_stop);
+    let out = f(p);
+    (p.qsql_stop, p.qsql_comma_stop) = saved;
+    out
 }
 
 /// Pratt parser with binding power for right-to-left evaluation.
@@ -13,8 +39,11 @@ pub fn expr(p: &mut Parser) {
 ///
 /// We use binding power (`l_bp=1`, `r_bp=0)`: since we recurse with `r_bp=0`,
 /// any operator to the right will always win (its `l_bp=1` >= `min_bp=0`),
-/// so it gets consumed into the RHS — giving right-associativity.
+/// so it gets consumed into the RHS — giving right-associativity. Prefix
+/// operands recurse with `min_bp=100`, which stops at the first infix.
 fn expr_bp(p: &mut Parser, min_bp: u8) {
+    const L_BP: u8 = 1;
+    const R_BP: u8 = 0;
     let Some(mut lhs) = atom(p) else {
         return;
     };
@@ -24,46 +53,39 @@ fn expr_bp(p: &mut Parser, min_bp: u8) {
         if is_adverb(p) {
             let m = lhs.precede(p);
             p.bump();
-            lhs = m.complete(p, SyntaxKind::AdverbExpr);
+            lhs = m.complete(p, AdverbExpr);
             continue;
         }
 
         // Postfix: indexing expr[...]
-        if p.at(SyntaxKind::LBracket) {
+        if p.at(LBracket) {
             let m = lhs.precede(p);
-            parse_arg_list(p);
-            lhs = m.complete(p, SyntaxKind::IndexExpr);
+            parse_bracketed(p, ArgList);
+            lhs = m.complete(p, IndexExpr);
             continue;
         }
 
         // Binary operator (or projection if no RHS: `1+` is valid q)
-        if let Some(_op) = binary_op(p) {
-            // Right-to-left: l_bp=1, r_bp=0 → right-associative at equal level
-            let (l_bp, r_bp) = (1u8, 0u8);
-            if l_bp < min_bp {
+        if at_binary_op(p) {
+            if L_BP < min_bp {
                 break;
             }
-
             let m = lhs.precede(p);
-            p.bump(); // consume operator
-            let mut decorated = false;
-            if is_adverb(p) {
+            p.bump(); // operator
+            let decorated = is_adverb(p);
+            if decorated {
                 p.bump(); // adverb modifier
-                decorated = true;
             }
-            // Only parse RHS if next token can be part of an expression.
-            // Otherwise this is a projection (e.g., `1+` or `2*`).
-            let had_rhs = if at_expr_boundary(p) {
-                false
-            } else {
+            // No RHS at a boundary: this is a projection (e.g. `1+` or `2*`).
+            let had_rhs = !at_expr_boundary(p) && {
                 let before = p.events.len();
-                expr_bp(p, r_bp);
+                expr_bp(p, R_BP);
                 p.events.len() > before
             };
             let kind = match (decorated, had_rhs) {
-                (true, _) => SyntaxKind::InfixModExpr,
-                (false, true) => SyntaxKind::BinExpr,
-                (false, false) => SyntaxKind::InfixProjection,
+                (true, _) => InfixModExpr,
+                (false, true) => BinExpr,
+                (false, false) => InfixProjection,
             };
             lhs = m.complete(p, kind);
             continue;
@@ -71,22 +93,19 @@ fn expr_bp(p: &mut Parser, min_bp: u8) {
 
         // Juxtaposition: `f x` — implicit function application.
         if can_juxtapose(p) {
-            let (l_bp, r_bp) = (1u8, 0u8);
-            if l_bp < min_bp {
+            if L_BP < min_bp {
                 break;
             }
             let m = lhs.precede(p);
-            expr_bp(p, r_bp);
-            lhs = m.complete(p, SyntaxKind::ApplyExpr);
+            expr_bp(p, R_BP);
+            lhs = m.complete(p, ApplyExpr);
             continue;
         }
 
         // A SystemCmd token on the same line as an expression (e.g. `f\x`) is
-        // most likely a mistyped scan adverb — the user probably meant `(f\) x`
-        // or `f\[x]`. kdb+ only allows system commands at line start.
-        // If there's a preceding newline it belongs to the next statement; break
-        // so root() can call statement() for it.
-        if p.current() == Some(SyntaxKind::SystemCmd) && !p.has_preceding_newline() {
+        // most likely a mistyped scan adverb. kdb+ only allows system commands
+        // at line start; after a newline it belongs to the next statement.
+        if p.at(SystemCmd) && !p.has_preceding_newline() {
             let text = p.current_text().unwrap_or("\\...").to_string();
             p.error(format!(
                 "unexpected `{text}`; did you mean a scan adverb? \
@@ -100,775 +119,355 @@ fn expr_bp(p: &mut Parser, min_bp: u8) {
 }
 
 /// Parse an atomic expression (leaves and prefix constructs).
-#[allow(clippy::too_many_lines)]
 fn atom(p: &mut Parser) -> Option<CompletedMarker> {
     let kind = p.current()?;
     match kind {
-        // Literals
-        SyntaxKind::Integer
-        | SyntaxKind::Float
-        | SyntaxKind::Boolean
-        | SyntaxKind::String
-        | SyntaxKind::Symbol
-        | SyntaxKind::Date
-        | SyntaxKind::Month
-        | SyntaxKind::Guid
-        | SyntaxKind::Timespan
-        | SyntaxKind::Datetime
-        | SyntaxKind::Minute
-        | SyntaxKind::Second
-        | SyntaxKind::Time
-        | SyntaxKind::Timestamp
-        | SyntaxKind::ByteList => {
-            // If the next non-trivia token is also a scalar literal with no
-            // newline between, we're at the start of a space-separated vector
-            // (`1 2 3`). Emit the leading trivia BEFORE opening the VectorExpr
-            // node so its text range starts at the first digit, not at any
-            // preceding whitespace.
-            // Guard on `kind` is required: `String` shares this match arm but is
-            // NOT a scalar literal kind, so without the guard a String followed by
-            // an Integer (e.g. `"a" 32`) would enter VectorExpr, `eat_trivia()`,
-            // exit the while-loop immediately (String fails `is_scalar_literal`),
-            // and return Some(empty VectorExpr) WITHOUT advancing — causing the
-            // caller to recurse on the same String token indefinitely.
-            if is_scalar_literal_kind(kind)
-                && p.nth(1).is_some_and(is_scalar_literal_kind)
-                && !p.has_newline_after_current()
-            {
-                p.eat_trivia();
-                let m = p.start();
-                while is_scalar_literal(p) && !p.has_preceding_newline() {
-                    let em = p.start();
-                    p.bump();
-                    em.complete(p, SyntaxKind::LiteralExpr);
-                }
-                return Some(m.complete(p, SyntaxKind::VectorExpr));
-            }
-            let m = p.start();
+        LBracket => return Some(parse_bracketed(p, PrognExpr)),
+        LParen => return Some(parse_paren(p)),
+        LBrace => return Some(parse_lambda(p)),
+        // qSQL keywords in expression position: select/exec/update/delete
+        Ident if super::qsql::at_qsql_keyword(p) => return Some(super::qsql::parse_qsql(p)),
+        // Adjacent scalar literals on one line form a vector (`1 2 3`).
+        k if is_scalar_literal(k)
+            && p.nth(1).is_some_and(is_scalar_literal)
+            && !p.has_newline_after_current() =>
+        {
+            return Some(parse_vector(p));
+        }
+        _ => {}
+    }
+    let m = p.start();
+    let node = match kind {
+        k if k == String || is_scalar_literal(k) => {
             p.bump();
-            Some(m.complete(p, SyntaxKind::LiteralExpr))
+            LiteralExpr
         }
 
-        // FileSymbol is a distinct expression kind
-        SyntaxKind::FileSymbol => {
-            let m = p.start();
+        FileSymbol => {
             p.bump();
-            Some(m.complete(p, SyntaxKind::FileSymbolExpr))
+            FileSymbolExpr
         }
 
-        // Identifiers (with control word detection)
-        SyntaxKind::Ident | SyntaxKind::DottedIdent => {
-            // qSQL keywords in expression position: select/exec/update/delete
-            if kind == SyntaxKind::Ident && super::qsql::at_qsql_keyword(p) {
-                return Some(super::qsql::parse_qsql(p));
-            }
+        Ident | DottedIdent => {
             // Control words: if[...], do[...], while[...]
-            if kind == SyntaxKind::Ident
-                && p.nth(1) == Some(SyntaxKind::LBracket)
-                && let Some(text) = p.current_text()
+            let ctrl = match p.current_text() {
+                Some("if") => Some(IfExpr),
+                Some("do") => Some(DoExpr),
+                Some("while") => Some(WhileExpr),
+                _ => None,
+            };
+            if let Some(ctrl) = ctrl
+                && kind == Ident
+                && p.nth(1) == Some(LBracket)
             {
-                let ctrl_kind = match text {
-                    "if" => Some(SyntaxKind::IfExpr),
-                    "do" => Some(SyntaxKind::DoExpr),
-                    "while" => Some(SyntaxKind::WhileExpr),
-                    _ => None,
-                };
-                if let Some(sk) = ctrl_kind {
-                    return parse_control_word(p, sk);
-                }
+                p.bump();
+                parse_bracketed(p, ArgList);
+                return Some(m.complete(p, ctrl));
             }
-            let bare_ns = kind == SyntaxKind::DottedIdent
+            // `.q` / `.z` alone is a bare namespace; `.q.f` is a member.
+            let bare_ns = kind == DottedIdent
                 && p.current_text()
                     .is_some_and(|t| t.matches('.').count() == 1);
-
-            let m = p.start();
             p.bump();
-            let node_kind = if bare_ns {
-                SyntaxKind::Namespace
-            } else {
-                SyntaxKind::IdentExpr
-            };
-            Some(m.complete(p, node_kind))
+            if bare_ns { Namespace } else { IdentExpr }
         }
 
-        // Each (`'`) — special-cased before the generic unary block.
-        // Three distinct forms:
-        //   '[f;g]   → Composition (bracket form)
-        //   'expr    → SignalExpr  (signal/error with operand)
-        //   bare '   → UnaryExpr  (no operand, e.g. used as postfix adverb)
-        SyntaxKind::Each => {
-            let m = p.start();
-            p.bump(); // consume '
-            if p.at(SyntaxKind::LBracket) {
-                // '[f;g] form — composition
-                parse_arg_list(p);
-                Some(m.complete(p, SyntaxKind::Composition))
+        // `'[f;g]` composition, `'expr` signal, or bare `'` (e.g. postfix).
+        Each => {
+            p.bump();
+            if p.at(LBracket) {
+                parse_bracketed(p, ArgList);
+                Composition
             } else if !is_adverb(p) && !at_expr_boundary(p) {
-                // Has an operand — this is a signal/error expression
                 expr_bp(p, 100);
-                Some(m.complete(p, SyntaxKind::SignalExpr))
+                SignalExpr
             } else {
-                // Bare `'` (no operand, or followed by another adverb)
-                Some(m.complete(p, SyntaxKind::UnaryExpr))
+                UnaryExpr
             }
         }
 
-        // Monadic (unary prefix) operators — consume and parse their operand
-        // with high bp so they bind tightly.
-        //
-        // Special case: if the very next non-trivia token after the operator
-        // is an adverb (e.g. `+/x`), we do NOT recurse for an operand here.
-        // Instead we return the operator as a bare UnaryExpr with no operand,
-        // and let the caller's postfix loop attach the adverb.  The adverb
-        // then wraps the whole thing, and the argument (`x`) becomes part of
-        // the surrounding binary expression.
-        SyntaxKind::Minus
-        | SyntaxKind::Plus
-        | SyntaxKind::Star
-        | SyntaxKind::Percent
-        | SyntaxKind::Bang
-        | SyntaxKind::Amp
-        | SyntaxKind::Pipe
-        | SyntaxKind::Caret
-        | SyntaxKind::Hash
-        | SyntaxKind::Underscore
-        | SyntaxKind::Tilde
-        | SyntaxKind::Eq
-        | SyntaxKind::Lt
-        | SyntaxKind::Gt
-        | SyntaxKind::NotEq
-        | SyntaxKind::LtEq
-        | SyntaxKind::GtEq
-        | SyntaxKind::At
-        | SyntaxKind::Query
-        | SyntaxKind::Dot
-        | SyntaxKind::Comma
-        | SyntaxKind::ColonColon
-        | SyntaxKind::CompoundAssign
-        | SyntaxKind::FileOp0
-        | SyntaxKind::FileOp1
-        | SyntaxKind::FileOp2
-        | SyntaxKind::EachPrior
-        | SyntaxKind::EachRight
-        | SyntaxKind::EachLeft
-        | SyntaxKind::Slash
-        | SyntaxKind::Backslash => {
-            let m = p.start();
+        // Monadic verbs. Leave the operand alone when followed by an adverb
+        // (`+/x`: the postfix loop wraps the bare verb), by `[` (functional
+        // form `op[args]`), or at a boundary (projection like `1+;`).
+        k if is_monadic_verb(k) => {
             p.bump();
-            // Don't consume operand if:
-            // - followed by adverb (e.g. `+/x` — let postfix handle it)
-            // - followed by `[` (e.g. operator[args] — functional form handled by caller)
-            // - at expression boundary (e.g. `1+;` — projection)
-            if !is_adverb(p) && !at_expr_boundary(p) && p.current() != Some(SyntaxKind::LBracket) {
-                expr_bp(p, 100); // high bp: bind tightly to next token
-            }
-            Some(m.complete(p, SyntaxKind::UnaryExpr))
-        }
-
-        // Standalone progn block: [stmt; stmt; ...] — returns last value
-        SyntaxKind::LBracket => parse_progn(p),
-
-        // Parenthesised expression, list, or table
-        SyntaxKind::LParen => parse_paren(p),
-
-        // Lambda: {[params] body} or {body}
-        SyntaxKind::LBrace => parse_lambda(p),
-
-        // Conditional $[cond;true;false] or monadic $
-        SyntaxKind::Dollar => {
-            if p.nth(1) == Some(SyntaxKind::LBracket) {
-                let m = p.start();
-                p.bump(); // $
-                parse_arg_list(p);
-                Some(m.complete(p, SyntaxKind::CondExpr))
-            } else {
-                // monadic $
-                let m = p.start();
-                p.bump();
+            if !is_adverb(p) && !at_expr_boundary(p) && !p.at(LBracket) {
                 expr_bp(p, 100);
-                Some(m.complete(p, SyntaxKind::UnaryExpr))
             }
+            UnaryExpr
         }
 
-        // Colon as monadic (identity / return)
-        SyntaxKind::Colon => {
-            let m = p.start();
+        // `$[cond;true;false]` conditional, or monadic `$`.
+        Dollar => {
             p.bump();
-            let kind = if !at_expr_boundary(p) && p.current() != Some(SyntaxKind::LBracket) {
-                expr_bp(p, 100);
-                SyntaxKind::ReturnExpr
+            if p.at(LBracket) {
+                parse_bracketed(p, ArgList);
+                CondExpr
             } else {
-                SyntaxKind::UnaryExpr
-            };
-            Some(m.complete(p, kind))
+                expr_bp(p, 100);
+                UnaryExpr
+            }
         }
 
-        SyntaxKind::SystemCmd => {
-            p.error(format!(
-                "system command `{}` must appear at the start of a line",
-                p.current_text().unwrap_or("\\...")
-            ));
-            None
+        // `:expr` return, or bare `:` (identity).
+        Colon => {
+            p.bump();
+            if !at_expr_boundary(p) && !p.at(LBracket) {
+                expr_bp(p, 100);
+                ReturnExpr
+            } else {
+                UnaryExpr
+            }
         }
 
         _ => {
-            p.error(format!("unexpected token: {kind:?}"));
-            None
+            m.abandon();
+            let msg = if kind == SystemCmd {
+                format!(
+                    "system command `{}` must appear at the start of a line",
+                    p.current_text().unwrap_or("\\...")
+                )
+            } else {
+                format!("unexpected token: {kind:?}")
+            };
+            p.error(msg);
+            return None;
         }
-    }
+    };
+    Some(m.complete(p, node))
 }
 
-/// Parse a progn block: `[stmt; stmt; ...]` — a sequence of statements
-/// returning the value of the last one.  Used as an expression in q.
-#[allow(clippy::unnecessary_wraps)]
-fn parse_progn(p: &mut Parser) -> Option<CompletedMarker> {
+/// `1 2 3`: run of same-line scalar literals. Leading trivia is emitted
+/// before opening the node so its range starts at the first literal.
+fn parse_vector(p: &mut Parser) -> CompletedMarker {
+    p.eat_trivia();
     let m = p.start();
-    let saved_stop = p.qsql_stop;
-    let saved_comma = p.qsql_comma_stop;
-    p.qsql_stop = false;
-    p.qsql_comma_stop = false;
-    p.expect(SyntaxKind::LBracket);
-    while !p.at(SyntaxKind::RBracket) && !p.at_end() {
-        if p.at(SyntaxKind::Semi) {
-            p.bump();
-            continue;
-        }
-        parse_stmt_or_expr(p);
-        if !p.eat(SyntaxKind::Semi) {
-            break;
-        }
-    }
-    p.expect(SyntaxKind::RBracket);
-    p.qsql_stop = saved_stop;
-    p.qsql_comma_stop = saved_comma;
-    Some(m.complete(p, SyntaxKind::PrognExpr))
-}
-
-#[allow(clippy::unnecessary_wraps)]
-fn parse_paren(p: &mut Parser) -> Option<CompletedMarker> {
-    let m = p.start();
-    let saved_stop = p.qsql_stop;
-    let saved_comma = p.qsql_comma_stop;
-    p.qsql_stop = false;
-    p.qsql_comma_stop = false;
-    p.bump(); // (
-
-    // Empty list: ()
-    if p.at(SyntaxKind::RParen) {
+    while p.current().is_some_and(is_scalar_literal) && !p.has_preceding_newline() {
+        let em = p.start();
         p.bump();
-        p.qsql_stop = saved_stop;
-        p.qsql_comma_stop = saved_comma;
-        return Some(m.complete(p, SyntaxKind::ListExpr));
+        em.complete(p, LiteralExpr);
     }
+    m.complete(p, VectorExpr)
+}
 
-    // Table literal: ([] ...) or keyed table: ([key:val;...] ...)
-    if p.at(SyntaxKind::LBracket) {
-        if p.nth(1) == Some(SyntaxKind::RBracket) {
-            // Simple table: ([] col:val; ...)
-            p.bump(); // [
-            p.bump(); // ]
-        } else {
-            // Keyed table: ([key:val;...] col:val; ...)
-            let km = p.start();
-            parse_arg_list(p);
-            km.complete(p, SyntaxKind::TableKeys);
-        }
-        while !p.at(SyntaxKind::RParen) && !p.at_end() {
-            parse_list_entry(p);
-            if !p.eat(SyntaxKind::Semi) {
+/// `[stmt; stmt; ...]` as `kind` (`ArgList` or `PrognExpr`). Empty entries
+/// (`$[c;t;]`) are allowed.
+fn parse_bracketed(p: &mut Parser, kind: SyntaxKind) -> CompletedMarker {
+    let m = p.start();
+    with_qsql_flags(p, false, false, |p| {
+        p.expect(LBracket);
+        while !p.at(RBracket) && !p.at_end() {
+            if p.eat(Semi) {
+                continue;
+            }
+            stmt(p);
+            if !p.eat(Semi) {
                 break;
             }
         }
-        p.expect(SyntaxKind::RParen);
-        p.qsql_stop = saved_stop;
-        p.qsql_comma_stop = saved_comma;
-        return Some(m.complete(p, SyntaxKind::TableExpr));
-    }
+        p.expect(RBracket);
+    });
+    m.complete(p, kind)
+}
 
-    // First entry (expression or assignment)
-    parse_list_entry(p);
-
-    let result = if p.at(SyntaxKind::Semi) {
-        // List: (expr; expr; ...)
-        while p.eat(SyntaxKind::Semi) {
-            if !p.at(SyntaxKind::RParen) {
-                parse_list_entry(p);
-            }
+/// `(expr)`, `(a;b;c)`, `()`, or a table `([keys] col:val; ...)`.
+fn parse_paren(p: &mut Parser) -> CompletedMarker {
+    let m = p.start();
+    let kind = with_qsql_flags(p, false, false, |p| {
+        p.bump(); // (
+        if p.eat(RParen) {
+            return ListExpr;
         }
-        p.expect(SyntaxKind::RParen);
-        m.complete(p, SyntaxKind::ListExpr)
-    } else {
-        // Simple paren: (expr)
-        p.expect(SyntaxKind::RParen);
-        m.complete(p, SyntaxKind::ParenExpr)
-    };
-    p.qsql_stop = saved_stop;
-    p.qsql_comma_stop = saved_comma;
-    Some(result)
-}
-
-/// Parse a control word: if[...], do[...], while[...]
-#[allow(clippy::unnecessary_wraps)]
-fn parse_control_word(p: &mut Parser, kind: SyntaxKind) -> Option<CompletedMarker> {
-    let m = p.start();
-    p.bump(); // keyword (if/do/while)
-    parse_arg_list(p);
-    Some(m.complete(p, kind))
-}
-
-#[allow(clippy::unnecessary_wraps)]
-fn parse_lambda(p: &mut Parser) -> Option<CompletedMarker> {
-    let m = p.start();
-    let saved_stop = p.qsql_stop;
-    let saved_comma = p.qsql_comma_stop;
-    p.qsql_stop = false;
-    p.qsql_comma_stop = false;
-    p.bump(); // {
-
-    // Optional parameter list: [x;y;z] or [x:type;y:type;z]
-    if p.at(SyntaxKind::LBracket) {
-        let pm = p.start();
-        p.bump(); // [
-        while !p.at(SyntaxKind::RBracket) && !p.at_end() {
-            // Parameter names are typically identifiers, but q (and tree-sitter-q)
-            // also allows integer literals as parameter "names" in some patterns.
-            let is_param_name = matches!(
-                p.current(),
-                Some(
-                    SyntaxKind::Ident
-                        | SyntaxKind::Integer
-                        | SyntaxKind::Float
-                        | SyntaxKind::Symbol
-                )
-            );
-            if is_param_name {
-                p.bump();
+        if p.at(LBracket) {
+            if p.nth(1) == Some(RBracket) {
+                p.bump(); // [
+                p.bump(); // ]
             } else {
-                p.expect(SyntaxKind::Ident);
+                let km = p.start();
+                parse_bracketed(p, ArgList);
+                km.complete(p, TableKeys);
             }
-            // Optional type annotation: name:type
-            if p.at(SyntaxKind::Colon) {
-                p.bump(); // :
-                // Type can be an identifier, symbol, or expression
-                if !p.at(SyntaxKind::Semi) && !p.at(SyntaxKind::RBracket) {
-                    expr(p);
+            while !p.at(RParen) && !p.at_end() {
+                stmt(p);
+                if !p.eat(Semi) {
+                    break;
                 }
             }
-            if !p.eat(SyntaxKind::Semi) {
+            p.expect(RParen);
+            return TableExpr;
+        }
+        stmt(p);
+        let kind = if p.at(Semi) {
+            while p.eat(Semi) {
+                if !p.at(RParen) {
+                    stmt(p);
+                }
+            }
+            ListExpr
+        } else {
+            ParenExpr
+        };
+        p.expect(RParen);
+        kind
+    });
+    m.complete(p, kind)
+}
+
+/// `{[params] body}` or `{body}`.
+fn parse_lambda(p: &mut Parser) -> CompletedMarker {
+    let m = p.start();
+    with_qsql_flags(p, false, false, |p| {
+        p.bump(); // {
+        if p.at(LBracket) {
+            let pm = p.start();
+            p.bump(); // [
+            while !p.at(RBracket) && !p.at_end() {
+                // tree-sitter-q also allows literal parameter "names".
+                if matches!(p.current(), Some(Ident | Integer | Float | Symbol)) {
+                    p.bump();
+                } else {
+                    p.expect(Ident);
+                }
+                // Optional type annotation: `name:type`
+                if p.eat(Colon) && !p.at(Semi) && !p.at(RBracket) {
+                    expr(p);
+                }
+                if !p.eat(Semi) {
+                    break;
+                }
+            }
+            p.expect(RBracket);
+            pm.complete(p, ParamList);
+        }
+        while !p.at(RBrace) && !p.at_end() {
+            stmt(p);
+            if !p.eat(Semi) {
                 break;
             }
         }
-        p.expect(SyntaxKind::RBracket);
-        pm.complete(p, SyntaxKind::ParamList);
+        p.expect(RBrace);
+    });
+    m.complete(p, Lambda)
+}
+
+/// Is the current token a binary (dyadic) operator?
+fn at_binary_op(p: &Parser) -> bool {
+    let Some(kind) = p.current() else {
+        return false;
+    };
+    // In qSQL clause lists comma is a separator, not the join dyad.
+    if p.qsql_comma_stop && kind == Comma {
+        return false;
     }
-
-    // Body: statements separated by ; (assignments allowed inside lambdas)
-    while !p.at(SyntaxKind::RBrace) && !p.at_end() {
-        parse_lambda_stmt(p);
-        if !p.eat(SyntaxKind::Semi) {
-            break;
-        }
-    }
-    p.expect(SyntaxKind::RBrace);
-    p.qsql_stop = saved_stop;
-    p.qsql_comma_stop = saved_comma;
-    Some(m.complete(p, SyntaxKind::Lambda))
-}
-
-/// Parse an entry that may be an expression or assignment.
-/// Since `:` and `::` are now binary operators, assignments like `x:42`
-/// parse as BinExpr(x, :, 42) inside `expr()`.
-fn parse_stmt_or_expr(p: &mut Parser) {
-    let m = p.start();
-    expr(p);
-    m.complete(p, SyntaxKind::ExprStmt);
-}
-
-/// Parse a statement inside a lambda body (expression or assignment).
-fn parse_lambda_stmt(p: &mut Parser) {
-    parse_stmt_or_expr(p);
-}
-
-/// Parse a list entry (expression or assignment, e.g. `0=pos: loc mod 100`).
-fn parse_list_entry(p: &mut Parser) {
-    parse_stmt_or_expr(p);
-}
-
-/// Parse bracketed argument list: [expr;expr;...]
-/// Arguments can be expressions or assignments (e.g. `$[x:cond;true;false]`).
-pub fn parse_arg_list(p: &mut Parser) {
-    let m = p.start();
-    let saved_stop = p.qsql_stop;
-    let saved_comma = p.qsql_comma_stop;
-    p.qsql_stop = false;
-    p.qsql_comma_stop = false;
-    p.expect(SyntaxKind::LBracket);
-    while !p.at(SyntaxKind::RBracket) && !p.at_end() {
-        // Allow empty args (trailing semicolons like $[cond;true;])
-        if p.at(SyntaxKind::Semi) {
-            p.bump();
-            continue;
-        }
-        parse_arg_entry(p);
-        if !p.eat(SyntaxKind::Semi) {
-            break;
-        }
-    }
-    p.expect(SyntaxKind::RBracket);
-    p.qsql_stop = saved_stop;
-    p.qsql_comma_stop = saved_comma;
-    m.complete(p, SyntaxKind::ArgList);
-}
-
-/// Parse a single argument entry (expression or assignment).
-fn parse_arg_entry(p: &mut Parser) {
-    parse_stmt_or_expr(p);
-}
-
-/// Returns the current token if it is a binary (dyadic) operator.
-fn binary_op(p: &Parser) -> Option<SyntaxKind> {
-    let kind = p.current()?;
-    // In qSQL column-list / where-clause context, comma is a separator, not enlist dyad.
-    if p.qsql_comma_stop && kind == SyntaxKind::Comma {
-        return None;
-    }
-    // Operator followed by `[` is functional form (op[args]), not dyadic.
-    // e.g. `@[tab;col;:;val]` is amend, `$[cond;t;f]` is conditional.
-    if p.nth(1) == Some(SyntaxKind::LBracket) {
-        return None;
+    // `op[args]` is a functional form (`@[t;c;:;v]`, `$[c;t;f]`), not dyadic.
+    if p.nth(1) == Some(LBracket) {
+        return false;
     }
     // Builtin infix verbs: `x mmu y`, `a in b`, `t lj u`, etc.
-    if kind == SyntaxKind::Ident
-        && let Some(t) = p.current_text()
-        && super::keywords::is_builtin_infix(t)
-    {
-        return Some(SyntaxKind::Ident);
+    if kind == Ident {
+        return p
+            .current_text()
+            .is_some_and(super::keywords::is_builtin_infix);
     }
-    match kind {
-        SyntaxKind::Plus
-        | SyntaxKind::Minus
-        | SyntaxKind::Star
-        | SyntaxKind::Percent
-        | SyntaxKind::Bang
-        | SyntaxKind::Amp
-        | SyntaxKind::Pipe
-        | SyntaxKind::Caret
-        | SyntaxKind::Hash
-        | SyntaxKind::Underscore
-        | SyntaxKind::Tilde
-        | SyntaxKind::Dollar
-        | SyntaxKind::At
-        | SyntaxKind::Query
-        | SyntaxKind::Dot
-        | SyntaxKind::Comma
-        | SyntaxKind::Eq
-        | SyntaxKind::NotEq
-        | SyntaxKind::LtEq
-        | SyntaxKind::GtEq
-        | SyntaxKind::Lt
-        | SyntaxKind::Gt
-        | SyntaxKind::CompoundAssign
-        | SyntaxKind::FileOp0
-        | SyntaxKind::FileOp1
-        | SyntaxKind::FileOp2
-        | SyntaxKind::Colon
-        | SyntaxKind::ColonColon
-        | SyntaxKind::Slash
-        | SyntaxKind::Backslash => Some(kind),
-        _ => None,
-    }
+    is_verb(kind) || matches!(kind, Dollar | Colon)
 }
 
-/// Returns `true` if we're at a statement/expression boundary (no more RHS to parse).
+/// At a statement/expression boundary (no more RHS to parse)?
 fn at_expr_boundary(p: &Parser) -> bool {
-    match p.current() {
-        None => true,
-        Some(k) => matches!(
-            k,
-            SyntaxKind::Semi | SyntaxKind::RBrace | SyntaxKind::RBracket | SyntaxKind::RParen
-        ),
-    }
+    matches!(p.current(), None | Some(Semi | RBrace | RBracket | RParen))
 }
 
-/// Returns `true` if juxtaposition (`f x`) should be parsed at the current position.
+/// Should juxtaposition (`f x`) be parsed at the current position?
 fn can_juxtapose(p: &Parser) -> bool {
-    if !can_start_expr(p) || p.has_preceding_newline() {
+    let Some(kind) = p.current() else {
         return false;
-    }
-    if p.qsql_stop && matches!(p.current_text(), Some("from" | "by" | "where")) {
-        return false;
-    }
-    if p.qsql_comma_stop && p.current() == Some(SyntaxKind::Comma) {
-        return false;
-    }
-    true
+    };
+    let can_start_expr = is_scalar_literal(kind)
+        || is_monadic_verb(kind)
+        || matches!(
+            kind,
+            String
+                | FileSymbol
+                | Ident
+                | DottedIdent
+                | LParen
+                | LBrace
+                | LBracket
+                | Dollar
+                | Colon
+                | Each
+        );
+    let at_clause_boundary = (p.qsql_stop
+        && matches!(p.current_text(), Some("from" | "by" | "where")))
+        || (p.qsql_comma_stop && kind == Comma);
+    can_start_expr && !p.has_preceding_newline() && !at_clause_boundary
 }
 
-/// Returns `true` if the current token can start an expression (for juxtaposition).
-/// This includes anything handled by `atom()`.
-fn can_start_expr(p: &Parser) -> bool {
-    matches!(
-        p.current(),
-        Some(
-            // Literals
-            SyntaxKind::Integer
-                | SyntaxKind::Float
-                | SyntaxKind::Boolean
-                | SyntaxKind::String
-                | SyntaxKind::Symbol
-                | SyntaxKind::FileSymbol
-                | SyntaxKind::Date
-                | SyntaxKind::Month
-                | SyntaxKind::Guid
-                | SyntaxKind::Timespan
-                | SyntaxKind::Datetime
-                | SyntaxKind::Minute
-                | SyntaxKind::Second
-                | SyntaxKind::Time
-                | SyntaxKind::Timestamp
-                | SyntaxKind::ByteList
-                // Identifiers
-                | SyntaxKind::Ident
-                | SyntaxKind::DottedIdent
-                // Delimiters
-                | SyntaxKind::LParen
-                | SyntaxKind::LBrace
-                | SyntaxKind::LBracket
-                // Operators (monadic/functional forms)
-                | SyntaxKind::Minus
-                | SyntaxKind::Plus
-                | SyntaxKind::Star
-                | SyntaxKind::Percent
-                | SyntaxKind::Bang
-                | SyntaxKind::Amp
-                | SyntaxKind::Pipe
-                | SyntaxKind::Caret
-                | SyntaxKind::Hash
-                | SyntaxKind::Underscore
-                | SyntaxKind::Tilde
-                | SyntaxKind::Eq
-                | SyntaxKind::Lt
-                | SyntaxKind::Gt
-                | SyntaxKind::NotEq
-                | SyntaxKind::LtEq
-                | SyntaxKind::GtEq
-                | SyntaxKind::At
-                | SyntaxKind::Query
-                | SyntaxKind::Dot
-                | SyntaxKind::Dollar
-                | SyntaxKind::Colon
-                | SyntaxKind::ColonColon
-                | SyntaxKind::Comma
-                | SyntaxKind::CompoundAssign
-                | SyntaxKind::FileOp0
-                | SyntaxKind::FileOp1
-                | SyntaxKind::FileOp2
-                | SyntaxKind::Each
-                | SyntaxKind::EachPrior
-                | SyntaxKind::EachRight
-                | SyntaxKind::EachLeft
-                | SyntaxKind::Slash
-                | SyntaxKind::Backslash
-        )
-    )
-}
-
-/// Returns `true` if `kind` is a scalar literal that can appear in a
-/// space-separated vector (`1 2 3`, `` `a `b `c ``, `0b 1b`, etc.).
-fn is_scalar_literal_kind(kind: SyntaxKind) -> bool {
+/// Scalar literals that can appear in a space-separated vector (`1 2 3`,
+/// `` `a `b `c ``, `0b 1b`). Strings are literals but never vector elements.
+fn is_scalar_literal(kind: SyntaxKind) -> bool {
     matches!(
         kind,
-        SyntaxKind::Integer
-            | SyntaxKind::Float
-            | SyntaxKind::Boolean
-            | SyntaxKind::Symbol
-            | SyntaxKind::Date
-            | SyntaxKind::Month
-            | SyntaxKind::Guid
-            | SyntaxKind::Timespan
-            | SyntaxKind::Datetime
-            | SyntaxKind::Minute
-            | SyntaxKind::Second
-            | SyntaxKind::Time
-            | SyntaxKind::Timestamp
-            | SyntaxKind::ByteList
+        Integer
+            | Float
+            | Boolean
+            | Symbol
+            | Date
+            | Month
+            | Guid
+            | Timespan
+            | Datetime
+            | Minute
+            | Second
+            | Time
+            | Timestamp
+            | ByteList
     )
 }
 
-fn is_scalar_literal(p: &Parser) -> bool {
-    p.current().is_some_and(is_scalar_literal_kind)
+/// Primitive verbs valid in both monadic and dyadic position.
+fn is_verb(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        Plus | Minus
+            | Star
+            | Percent
+            | Bang
+            | Amp
+            | Pipe
+            | Caret
+            | Hash
+            | Underscore
+            | Tilde
+            | At
+            | Query
+            | Dot
+            | Comma
+            | Eq
+            | NotEq
+            | LtEq
+            | GtEq
+            | Lt
+            | Gt
+            | CompoundAssign
+            | FileOp0
+            | FileOp1
+            | FileOp2
+            | ColonColon
+            | Slash
+            | Backslash
+    )
 }
 
-/// Returns `true` if the current token is an adverb / iterator.
+/// Tokens parsed as a monadic `UnaryExpr` prefix.
+fn is_monadic_verb(kind: SyntaxKind) -> bool {
+    is_verb(kind) || matches!(kind, EachPrior | EachRight | EachLeft)
+}
+
+/// Is the current token an adverb / iterator?
 fn is_adverb(p: &Parser) -> bool {
     matches!(
         p.current(),
-        Some(
-            SyntaxKind::Slash
-                | SyntaxKind::Backslash
-                | SyntaxKind::Each
-                | SyntaxKind::EachPrior
-                | SyntaxKind::EachRight
-                | SyntaxKind::EachLeft
-        )
+        Some(Slash | Backslash | Each | EachPrior | EachRight | EachLeft)
     )
-}
-
-#[cfg(test)]
-mod infix_projection_tests {
-    #[test]
-    fn parse_infix_projection() {
-        let parse = crate::parse("1+");
-        let dump = format!("{:#?}", parse.syntax());
-        assert!(dump.contains("InfixProjection"), "got:\n{dump}");
-    }
-
-    #[test]
-    fn parse_full_binary_still_binexpr() {
-        let parse = crate::parse("1+2");
-        let dump = format!("{:#?}", parse.syntax());
-        assert!(dump.contains("BinExpr"), "got:\n{dump}");
-        assert!(!dump.contains("InfixProjection"), "got:\n{dump}");
-    }
-
-    #[test]
-    fn parse_infix_mod_each() {
-        let parse = crate::parse("a +' b");
-        let dump = format!("{:#?}", parse.syntax());
-        assert!(dump.contains("InfixModExpr"), "got:\n{dump}");
-    }
-
-    #[test]
-    fn parse_infix_mod_each_right() {
-        let parse = crate::parse("a +/: b");
-        let dump = format!("{:#?}", parse.syntax());
-        assert!(dump.contains("InfixModExpr"), "got:\n{dump}");
-    }
-}
-
-#[cfg(test)]
-mod composition_signal_tests {
-    #[test]
-    fn parse_composition_bracket_form() {
-        let parse = crate::parse("'[f;g]");
-        let dump = format!("{:#?}", parse.syntax());
-        assert!(dump.contains("Composition"), "got:\n{dump}");
-    }
-
-    #[test]
-    fn parse_signal_expr() {
-        let parse = crate::parse("'`err");
-        let dump = format!("{:#?}", parse.syntax());
-        assert!(dump.contains("SignalExpr"), "got:\n{dump}");
-    }
-}
-
-#[cfg(test)]
-mod literal_tests {
-    use crate::parse;
-
-    #[test]
-    fn parse_temporal_literals_are_atoms() {
-        for (src, kind_name) in [
-            ("0Nm", "Month"),
-            ("0Ng", "Guid"),
-            ("0Nn", "Timespan"),
-            ("12:30", "Minute"),
-            ("12:30:45", "Second"),
-            ("0Nz", "Datetime"),
-            ("0xABCD", "ByteList"),
-        ] {
-            let parse = parse(src);
-            let dump = format!("{:#?}", parse.syntax());
-            assert!(dump.contains(kind_name), "expected {kind_name} in:\n{dump}");
-            assert!(
-                parse.errors.is_empty(),
-                "errors for {src}: {:?}",
-                parse.errors
-            );
-        }
-    }
-
-    #[test]
-    fn parse_file_symbol_makes_file_symbol_expr() {
-        let parse = parse("`:foo.csv");
-        let dump = format!("{:#?}", parse.syntax());
-        assert!(dump.contains("FileSymbolExpr"), "got:\n{dump}");
-        assert!(
-            !dump.contains("LiteralExpr"),
-            "should not be LiteralExpr:\n{dump}"
-        );
-    }
-}
-
-#[cfg(test)]
-mod table_keys_tests {
-    #[test]
-    fn parse_keyed_table() {
-        let parse = crate::parse("([k:1 2] v:3 4)");
-        let dump = format!("{:#?}", parse.syntax());
-        assert!(dump.contains("TableExpr"), "got:\n{dump}");
-        assert!(dump.contains("TableKeys"), "got:\n{dump}");
-    }
-
-    #[test]
-    fn parse_unkeyed_table_no_table_keys() {
-        let parse = crate::parse("([] v:3 4)");
-        let dump = format!("{:#?}", parse.syntax());
-        assert!(dump.contains("TableExpr"), "got:\n{dump}");
-        assert!(
-            !dump.contains("TableKeys"),
-            "should not have TableKeys:\n{dump}"
-        );
-    }
-}
-
-#[cfg(test)]
-mod namespace_tests {
-    use crate::parse;
-
-    #[test]
-    fn parse_bare_namespace() {
-        let parse = parse(".q");
-        let dump = format!("{:#?}", parse.syntax());
-        assert!(dump.contains("Namespace"), "got:\n{dump}");
-    }
-
-    #[test]
-    fn parse_dotted_member_remains_dotted() {
-        let parse = parse(".q.func");
-        let dump = format!("{:#?}", parse.syntax());
-        assert!(
-            !dump.contains("Namespace"),
-            "should not be Namespace:\n{dump}"
-        );
-    }
-
-    #[test]
-    fn parse_return_expr() {
-        let parse = parse("{:42}");
-        let dump = format!("{:#?}", parse.syntax());
-        assert!(dump.contains("ReturnExpr"), "got:\n{dump}");
-    }
-}
-
-#[cfg(test)]
-mod builtin_infix_tests {
-    use crate::parse;
-
-    #[test]
-    fn parse_keyword_as_binary() {
-        for src in ["x mmu y", "a in b", "1 within 2", "t lj u"] {
-            let parse = parse(src);
-            let dump = format!("{:#?}", parse.syntax());
-            assert!(dump.contains("BinExpr"), "{src} → no BinExpr:\n{dump}");
-        }
-    }
-
-    #[test]
-    fn parse_keyword_as_atom_when_alone() {
-        let parse = parse("mmu");
-        let dump = format!("{:#?}", parse.syntax());
-        assert!(dump.contains("IdentExpr"), "got:\n{dump}");
-    }
 }

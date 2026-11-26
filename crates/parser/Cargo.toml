@@ -2,6 +2,8 @@
 name = "q-parser"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 q-lexer = { path = "../lexer" }
@@ -9,5 +11,3 @@ logos = { workspace = true }
 rowan = { workspace = true }
 smol_str = { workspace = true }
 
-[dev-dependencies]
-expect-test = "1"

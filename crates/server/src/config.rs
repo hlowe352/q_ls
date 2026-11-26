@@ -23,21 +23,18 @@ impl Config {
         };
         match serde_json::from_str::<Self>(&text) {
             Ok(cfg) => {
-                let status = if cfg.suppress_unresolved.is_empty() {
-                    format!(
-                        "q-ls: loaded {} (suppress_unresolved: none)",
-                        path.display()
-                    )
+                let mut names: Vec<&str> =
+                    cfg.suppress_unresolved.iter().map(String::as_str).collect();
+                names.sort_unstable();
+                let names = if names.is_empty() {
+                    "none".to_string()
                 } else {
-                    let mut names: Vec<&str> =
-                        cfg.suppress_unresolved.iter().map(String::as_str).collect();
-                    names.sort_unstable();
-                    format!(
-                        "q-ls: loaded {} (suppress_unresolved: {})",
-                        path.display(),
-                        names.join(", ")
-                    )
+                    names.join(", ")
                 };
+                let status = format!(
+                    "q-ls: loaded {} (suppress_unresolved: {names})",
+                    path.display()
+                );
                 (cfg, status)
             }
             Err(e) => (
@@ -48,5 +45,39 @@ impl Config {
                 ),
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_missing_valid_and_invalid() {
+        let dir = std::env::temp_dir().join(format!("q-ls-config-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(".q-ls.json");
+        let _ = std::fs::remove_file(&file);
+
+        let (cfg, status) = Config::load(&dir);
+        assert!(cfg.suppress_unresolved.is_empty() && status.contains("no config"));
+
+        std::fs::write(&file, r#"{"suppress_unresolved": ["b", "a"]}"#).unwrap();
+        let (cfg, status) = Config::load(&dir);
+        assert_eq!(cfg.suppress_unresolved.len(), 2);
+        assert!(status.ends_with("(suppress_unresolved: a, b)"), "{status}");
+
+        std::fs::write(&file, "{}").unwrap();
+        assert!(
+            Config::load(&dir)
+                .1
+                .ends_with("(suppress_unresolved: none)")
+        );
+
+        std::fs::write(&file, "not json").unwrap();
+        let (cfg, status) = Config::load(&dir);
+        assert!(cfg.suppress_unresolved.is_empty() && status.contains("failed to parse"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

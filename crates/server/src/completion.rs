@@ -1,71 +1,37 @@
 use crate::builtins::BUILTINS;
 use crate::document::Document;
 use crate::workspace_index::WorkspaceIndex;
+use std::collections::HashSet;
 #[allow(clippy::wildcard_imports)]
 use tower_lsp_server::ls_types::*;
 
-fn get_prefix(text: &str, offset: usize) -> String {
-    let before = &text[..offset.min(text.len())];
-    let start = before
+/// Builtins, then this document's identifiers, then workspace globals —
+/// each label once, filtered by the identifier prefix before the cursor.
+pub fn complete(doc: &Document, pos: Position, workspace: &WorkspaceIndex) -> Vec<CompletionItem> {
+    let before = &doc.text()[..doc.offset_of(pos)];
+    let prefix = before
         .rfind(|c: char| !c.is_alphanumeric() && c != '_' && c != '.')
-        .map_or(0, |i| i + 1);
-    before[start..].to_string()
-}
+        .map_or(before, |i| &before[i + 1..]);
 
-pub fn complete_with_workspace(
-    doc: &Document,
-    pos: Position,
-    workspace: &WorkspaceIndex,
-) -> Vec<CompletionItem> {
-    let offset = doc.offset_of(pos);
-    let prefix = get_prefix(doc.text(), offset);
-
-    let mut items: Vec<CompletionItem> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    for &(name, detail) in BUILTINS {
-        if name.starts_with(prefix.as_str()) {
-            items.push(CompletionItem {
-                label: name.to_string(),
-                kind: Some(CompletionItemKind::FUNCTION),
-                detail: Some(detail.to_string()),
-                ..Default::default()
-            });
-            seen.insert(name.to_string());
-        }
-    }
-
-    // Document identifiers — pulled from the cached symbol table instead
-    // of re-walking the tree on every keystroke.
-    for ident in doc.sym_table().idents() {
-        if ident.starts_with(prefix.as_str()) && !seen.contains(ident) {
-            seen.insert(ident.to_string());
-            items.push(CompletionItem {
-                label: ident.to_string(),
-                kind: Some(CompletionItemKind::VARIABLE),
-                ..Default::default()
-            });
-        }
-    }
-
-    // Workspace-wide identifiers from other files
-    for ident in workspace.all_idents() {
-        if ident.starts_with(prefix.as_str()) && !seen.contains(ident) {
-            seen.insert(ident.to_string());
-            items.push(CompletionItem {
-                label: ident.to_string(),
-                kind: Some(CompletionItemKind::VARIABLE),
-                ..Default::default()
-            });
-        }
-    }
-
-    items
-}
-
-#[allow(dead_code)]
-pub fn complete(doc: &Document, pos: Position) -> Vec<CompletionItem> {
-    complete_with_workspace(doc, pos, &WorkspaceIndex::default())
+    let builtins = BUILTINS
+        .iter()
+        .map(|&(name, detail)| (name, Some(detail), CompletionItemKind::FUNCTION));
+    let idents = doc
+        .sym_table()
+        .idents()
+        .chain(workspace.all_idents())
+        .map(|name| (name, None, CompletionItemKind::VARIABLE));
+    let mut seen = HashSet::new();
+    builtins
+        .chain(idents)
+        .filter(|(name, ..)| name.starts_with(prefix) && seen.insert(*name))
+        .map(|(name, detail, kind)| CompletionItem {
+            label: name.to_string(),
+            kind: Some(kind),
+            detail: detail.map(str::to_string),
+            ..Default::default()
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -77,14 +43,14 @@ mod tests {
     #[test]
     fn workspace_globals_appear_in_completion() {
         let mut idx = WorkspaceIndex::default();
-        idx.index_file(
+        idx.insert(
             "file:///other.q".parse().unwrap(),
             Document::new("myHelper:{x+1}".to_string(), 0),
         );
 
         let doc = Document::new("myH".to_string(), 0);
         let pos = doc.position_of(3);
-        let items = complete_with_workspace(&doc, pos, &idx);
+        let items = complete(&doc, pos, &idx);
         assert!(
             items.iter().any(|i| i.label == "myHelper"),
             "workspace global must appear in completion: {items:?}"
@@ -96,7 +62,7 @@ mod tests {
         let idx = WorkspaceIndex::default();
         let doc = Document::new("cou".to_string(), 0);
         let pos = doc.position_of(3);
-        let items = complete_with_workspace(&doc, pos, &idx);
+        let items = complete(&doc, pos, &idx);
         assert!(
             items.iter().any(|i| i.label == "count"),
             "builtin count not found: {items:?}"

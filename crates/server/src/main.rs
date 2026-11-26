@@ -12,6 +12,7 @@ mod rename;
 mod semantic;
 mod sym_table;
 mod symbols;
+mod syntax;
 mod workspace_index;
 
 use backend::QLanguageServer;
