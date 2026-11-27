@@ -1,6 +1,7 @@
 use logos::Logos;
 use smol_str::SmolStr;
 
+use crate::grammar::expressions::is_scalar_literal;
 use crate::syntax_kind::SyntaxKind;
 
 #[derive(Debug, Clone)]
@@ -24,7 +25,7 @@ pub enum Event {
         text: SmolStr,
     },
     Finish,
-    /// Not-yet-completed or abandoned marker; emits nothing.
+    /// Not-yet-completed marker, or a parent opened via `forward_parent`; emits nothing.
     Placeholder,
 }
 
@@ -45,7 +46,7 @@ impl LexedToken {
 }
 
 /// An open marker returned by [`Parser::start`]. Must be closed with
-/// [`Marker::complete`] or discarded with [`Marker::abandon`].
+/// [`Marker::complete`].
 pub struct Marker {
     pos: usize,
     /// Drop bomb: catches markers that are silently forgotten.
@@ -76,20 +77,11 @@ impl Marker {
         p.events.push(Event::Finish);
         CompletedMarker { pos: self.pos }
     }
-
-    /// Discard this marker. Events pushed since `start()` are kept; its
-    /// Placeholder is skipped by the sink.
-    pub fn abandon(mut self) {
-        self.completed = true;
-    }
 }
 
 impl Drop for Marker {
     fn drop(&mut self) {
-        assert!(
-            self.completed,
-            "Marker dropped without being completed or abandoned"
-        );
+        assert!(self.completed, "Marker dropped without being completed");
     }
 }
 
@@ -236,31 +228,43 @@ fn split_misplaced_dsl_lines(tokens: &mut Vec<LexedToken>) {
     }
 }
 
-/// Merge `-` directly followed by a number into a negative literal when it
-/// is a sign (start of input, or after whitespace / newline / `(` `[` `{` `;`)
-/// rather than subtraction (after an identifier, number, closer…).
+/// Merge `-` directly followed by a number or time (not a date, boolean,
+/// byte list or guid, which q cannot negate) into a negative literal unless
+/// it directly follows a noun (`x-1`, `f[a]-1`, `1-1` are subtraction;
+/// `x -1`, `x*-1`, `x:-1` are negative literals).
 fn merge_negative_literals(tokens: &mut Vec<LexedToken>) {
     let mut i = 0;
     while i + 1 < tokens.len() {
         let next_kind = tokens[i + 1].kind;
         let is_sign = tokens[i].kind == SyntaxKind::Minus
-            && matches!(next_kind, SyntaxKind::Integer | SyntaxKind::Float)
-            && (i == 0
-                || matches!(
-                    tokens[i - 1].kind,
-                    SyntaxKind::Whitespace
-                        | SyntaxKind::Newline
-                        | SyntaxKind::LParen
-                        | SyntaxKind::LBracket
-                        | SyntaxKind::LBrace
-                        | SyntaxKind::Semi
-                ));
+            && is_scalar_literal(next_kind)
+            && !matches!(
+                next_kind,
+                SyntaxKind::Boolean | SyntaxKind::Date | SyntaxKind::ByteList | SyntaxKind::Guid
+            )
+            && (i == 0 || !ends_noun(tokens[i - 1].kind));
         if is_sign {
             let merged = LexedToken::new(next_kind, &format!("-{}", tokens[i + 1].text));
             tokens.splice(i..=i + 1, [merged]);
         }
         i += 1;
     }
+}
+
+/// Can a token end a noun (so a following `-` is subtraction)?
+fn ends_noun(kind: SyntaxKind) -> bool {
+    is_scalar_literal(kind)
+        || matches!(
+            kind,
+            SyntaxKind::Ident
+                | SyntaxKind::DottedIdent
+                | SyntaxKind::String
+                | SyntaxKind::Symbol
+                | SyntaxKind::FileSymbol
+                | SyntaxKind::RParen
+                | SyntaxKind::RBracket
+                | SyntaxKind::RBrace
+        )
 }
 
 pub struct Parser {
@@ -423,20 +427,38 @@ impl Parser {
     /// Record an error spanning the current token and emit that token as
     /// [`SyntaxKind::Error`] so the tree stays lossless.
     pub fn error(&mut self, message: String) {
-        let (offset, len) = self.non_trivia_idx(0).map_or((0, 0), |i| {
-            let off = self.tokens[..i].iter().map(|t| t.text.len()).sum();
-            (off, self.tokens[i].text.len())
-        });
-        self.errors.push(ParseError {
-            message,
-            offset,
-            len,
-        });
+        let start = self.nt_cursor;
         self.eat_trivia();
         if self.pos < self.tokens.len() {
             self.push_token(Some(SyntaxKind::Error));
             self.nt_cursor += 1;
         }
+        self.error_since(message, start);
+    }
+
+    /// Rank of the next non-trivia token, for [`Self::error_since`].
+    #[must_use]
+    pub fn token_index(&self) -> usize {
+        self.nt_cursor
+    }
+
+    /// Record an error spanning the tokens consumed since `token_index`
+    /// (or the current token if none were), without consuming anything.
+    pub fn error_since(&mut self, message: impl Into<String>, token_index: usize) {
+        let offset = |i: usize| self.tokens[..i].iter().map(|t| t.text.len()).sum::<usize>();
+        let (offset, len) = match (self.nt.get(token_index), self.nt_cursor) {
+            (None, _) => (offset(self.tokens.len()), 0),
+            (Some(&first), cur) => {
+                let last = self.nt[cur.max(token_index + 1) - 1];
+                let start = offset(first);
+                (start, offset(last) + self.tokens[last].text.len() - start)
+            }
+        };
+        self.errors.push(ParseError {
+            message: message.into(),
+            offset,
+            len,
+        });
     }
 
     #[must_use]

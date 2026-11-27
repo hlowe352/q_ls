@@ -34,12 +34,13 @@ pub enum Token {
 
     /// Float literal
     ///
-    /// Covers: `3.14`, `3.14e10`, `3.14f`, `3.14e`, `0n`, `0w`, `0Nf`,
+    /// Covers: `3.14`, `.5`, `3.14e10`, `3.14f`, `3.14e`, `0n`, `0w`, `0Nf`,
     ///         `0Wf`, `0Ne`, `0We`
     #[regex(r"0[nw]", priority = 4)] // generic float null/inf (lower-case)
     #[regex(r"0N[fe]", priority = 5)] // typed float nulls
     #[regex(r"0W[fe]", priority = 5)] // typed float infs
     #[regex(r"[0-9]+\.[0-9]*([eE][0-9]+)?[fe]?")] // decimal float
+    #[regex(r"\.[0-9]+([eE][0-9]+)?[fe]?")] // no leading digit: `.5`
     #[regex(r"[0-9]+[eE][0-9]+[fe]?")] // scientific without dot
     #[regex(r"[0-9]+f")] // integer-form float: `3f`, `100f`
     #[regex(r"[0-9]+e")]
@@ -299,6 +300,7 @@ mod tests {
     ("0Wi", "Integer"),
     ("0Nh", "Integer"),
     ("3.14", "Float"),
+    (".5", "Float"),
     ("3.14e10", "Float"),
     ("3.14f", "Float"),
     ("3f", "Float"),

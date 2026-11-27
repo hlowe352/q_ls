@@ -13,7 +13,7 @@
 //! ```
 //!
 //! # Architecture
-//! - `grammar` — Pratt-style grammar rules (right-to-left, equal precedence)
+//! - `grammar` — grammar rules (noun/verb terms read right to left, no precedence)
 //! - `parser` — event-driven parser driver and token-stream fix-ups
 //! - `sink` — converts events into a rowan `GreenNode`
 //! - `syntax_kind` — all token + node kind discriminants
