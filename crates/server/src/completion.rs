@@ -7,8 +7,10 @@ use tower_lsp_server::ls_types::*;
 
 /// Builtins, then this document's identifiers, then workspace globals —
 /// each label once, filtered by the identifier prefix before the cursor.
+/// The word being typed is only offered if it names something.
 pub fn complete(doc: &Document, pos: Position, workspace: &WorkspaceIndex) -> Vec<CompletionItem> {
-    let before = &doc.text()[..doc.offset_of(pos)];
+    let offset = doc.offset_of(pos);
+    let before = &doc.text()[..offset];
     let prefix = before
         .rfind(|c: char| !c.is_alphanumeric() && c != '_' && c != '.')
         .map_or(before, |i| &before[i + 1..]);
@@ -25,6 +27,11 @@ pub fn complete(doc: &Document, pos: Position, workspace: &WorkspaceIndex) -> Ve
     builtins
         .chain(idents)
         .filter(|(name, ..)| name.starts_with(prefix) && seen.insert(*name))
+        .filter(|(name, ..)| {
+            *name != prefix
+                || doc.sym_table().resolve(offset, name).is_some()
+                || workspace.resolve_global(name).is_some()
+        })
         .map(|(name, detail, kind)| CompletionItem {
             label: name.to_string(),
             kind: Some(kind),
@@ -37,35 +44,28 @@ pub fn complete(doc: &Document, pos: Position, workspace: &WorkspaceIndex) -> Ve
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::Document;
-    use crate::workspace_index::WorkspaceIndex;
+    use crate::workspace_index::tests::doc;
 
+    /// Builtins first, then document names; prefix-filtered, each label once.
+    /// (Workspace names are covered end-to-end in tests/lsp.rs.)
     #[test]
-    fn workspace_globals_appear_in_completion() {
-        let mut idx = WorkspaceIndex::default();
-        idx.insert(
-            "file:///other.q".parse().unwrap(),
-            Document::new("myHelper:{x+1}".to_string(), 0),
+    fn merges_sources_filtered_by_prefix() {
+        let src = "counter:1; counter+1\ncou";
+        let d = doc(src);
+        let items = complete(&d, d.position_of(src.len()), &WorkspaceIndex::default());
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["count", "counter"],
+            "the typed `cou` is not offered"
         );
+        assert_eq!(items[0].kind, Some(CompletionItemKind::FUNCTION));
+        assert_eq!(items[1].kind, Some(CompletionItemKind::VARIABLE));
 
-        let doc = Document::new("myH".to_string(), 0);
-        let pos = doc.position_of(3);
-        let items = complete(&doc, pos, &idx);
-        assert!(
-            items.iter().any(|i| i.label == "myHelper"),
-            "workspace global must appear in completion: {items:?}"
-        );
-    }
-
-    #[test]
-    fn builtin_still_appears() {
-        let idx = WorkspaceIndex::default();
-        let doc = Document::new("cou".to_string(), 0);
-        let pos = doc.position_of(3);
-        let items = complete(&doc, pos, &idx);
-        assert!(
-            items.iter().any(|i| i.label == "count"),
-            "builtin count not found: {items:?}"
-        );
+        // ...but a defined name equal to the prefix still is.
+        let src = "cou:1\ncou";
+        let d = doc(src);
+        let items = complete(&d, d.position_of(src.len()), &WorkspaceIndex::default());
+        assert!(items.iter().any(|i| i.label == "cou"), "{items:?}");
     }
 }

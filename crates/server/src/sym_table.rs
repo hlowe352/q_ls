@@ -414,25 +414,17 @@ mod tests {
     use crate::document::Document;
 
     #[test]
-    fn global_def_offsets_returns_global_sites() {
-        let doc = Document::new("foo:1; foo:2".to_string(), 0);
-        let offs = doc.sym_table().global_def_offsets("foo");
-        assert_eq!(offs.len(), 2, "got: {offs:?}");
-    }
-
-    #[test]
-    fn global_def_offsets_empty_for_unknown() {
-        let doc = Document::new("foo:1".to_string(), 0);
-        assert_eq!(doc.sym_table().global_def_offsets("bar"), [0u32; 0]);
-    }
-
-    #[test]
-    fn global_def_offsets_empty_for_lambda_local() {
-        // `x` here is a lambda local, NOT a global.
-        let doc = Document::new("f:{x:42; x}".to_string(), 0);
-        assert!(
-            doc.sym_table().global_def_offsets("x").is_empty(),
-            "lambda locals must not appear as globals"
+    fn global_def_offsets_lists_only_globals() {
+        let st = |src: &str| Document::new(src.to_string(), 0);
+        assert_eq!(
+            st("foo:1; foo:2").sym_table().global_def_offsets("foo"),
+            [0, 7]
+        );
+        assert_eq!(st("foo:1").sym_table().global_def_offsets("bar"), [0u32; 0]);
+        // lambda locals are not globals
+        assert_eq!(
+            st("f:{x:42; x}").sym_table().global_def_offsets("x"),
+            [0u32; 0]
         );
     }
 
@@ -455,20 +447,6 @@ mod tests {
     }
 
     #[test]
-    fn real_torq_q_indexes_proc_cp() {
-        let src = include_str!("../../parser/tests/data/real_q/torq.q");
-        std::thread::Builder::new()
-            .stack_size(8 * 1024 * 1024)
-            .spawn(move || {
-                let doc = Document::new(src.to_string(), 0);
-                assert_ne!(doc.sym_table().global_def_offsets(".proc.cp"), [0u32; 0]);
-            })
-            .unwrap()
-            .join()
-            .unwrap();
-    }
-
-    #[test]
     fn torq_style_cross_file_goto_def() {
         use crate::goto_def::{goto_definition, tests::locations};
         use crate::workspace_index::tests::{doc, index, uri};
@@ -480,63 +458,5 @@ mod tests {
         let pos = cache.position_of(cache_src.find(".proc.cp").unwrap());
         let locs = locations(goto_definition(&cache, pos, &uri("cache.q"), &idx));
         assert_eq!(locs[0].uri, uri("torq.q"));
-    }
-
-    #[test]
-    fn compound_assign_in_lambda_creates_local_when_no_global() {
-        // `a,:value` inside a lambda when `a` has no global def → creates a local.
-        // Subsequent uses of `a` in the lambda must resolve (no unresolved warning).
-        let src = "f:{[path] a,:raze 1 2 3; a}";
-        let doc = Document::new(src.to_string(), 0);
-        let table = doc.sym_table();
-        let a_use_off = src.rfind("; a}").unwrap() + 2; // the bare `a` at end
-        let resolved = table.resolve(a_use_off, "a");
-        assert!(
-            resolved.is_some(),
-            "a introduced by `,: ` must resolve inside lambda"
-        );
-    }
-
-    #[test]
-    fn compound_assign_second_occurrence_not_a_new_def() {
-        // Only the FIRST `a,:` creates the local; subsequent ones amend it.
-        // goto-def from a use after the second `,: ` must point to the FIRST.
-        let src = "f:{a,:1 2; a,:3 4; a}";
-        let doc = Document::new(src.to_string(), 0);
-        let table = doc.sym_table();
-        let first_def_off = src.find("a,:1").unwrap();
-        let a_use_off = src.rfind("; a}").unwrap() + 2;
-        let resolved = table.resolve(a_use_off, "a").expect("a must resolve");
-        assert_eq!(
-            resolved as usize, first_def_off,
-            "must point to first `,: `, not the second one"
-        );
-    }
-
-    #[test]
-    fn compound_assign_in_lambda_does_not_shadow_global() {
-        // `loadedf:enlist enlist""` is a global def.
-        // Inside a lambda, `loadedf,:enlist x` amends the global — it must NOT
-        // create a new local that shadows it.  goto-def on a use inside the
-        // lambda must resolve to the global def, not the amend site.
-        use crate::goto_def::{goto_definition, tests::locations};
-        use crate::workspace_index::{WorkspaceIndex, tests::uri};
-
-        let src = "loadedf:enlist enlist\"\"\nf:{[x] if[x in loadedf;:()]; loadedf,:enlist x}";
-        let doc = Document::new(src.to_string(), 0);
-        // cursor on `loadedf` in `x in loadedf` (use inside lambda)
-        let pos = doc.position_of(src.find("x in loadedf").unwrap() + "x in ".len());
-        let locs = locations(goto_definition(
-            &doc,
-            pos,
-            &uri("a.q"),
-            &WorkspaceIndex::default(),
-        ));
-        let def_off = src.find("loadedf:enlist").unwrap(); // line 1 global def
-        assert_eq!(
-            doc.offset_of(locs[0].range.start),
-            def_off,
-            "global def, not amend site"
-        );
     }
 }

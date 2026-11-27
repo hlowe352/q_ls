@@ -191,7 +191,7 @@ const SHAPES: &[(&str, &[&str], &[&str])] = &[
     ("select[>price] col from t", &["OrderClause"], &[]),
     ("select a,b from t where c>0", &["WhereClause"], &[]),
     ("select sum a by b from t", &["ByClause"], &[]),
-    ("delete from t where a>0", &["DeleteExpr", "WhereClause"], &[]),
+    ("delete from t where a>0", &["DeleteExpr", "FromClause", "WhereClause"], &[]),
     ("update s:sum v by g from t", &["UpdateExpr", "ByClause"], &[]),
     ("t:select a from t", &["SelectExpr", "BinExpr"], &[]),
     ("0!select a from t", &["SelectExpr"], &[]),

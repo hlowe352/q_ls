@@ -102,123 +102,75 @@ fn is_valid_identifier(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace_index::tests::{doc, index};
+    use crate::workspace_index::tests::{doc, index, uri};
 
-    fn uri() -> Uri {
-        crate::workspace_index::tests::uri("x.q")
+    /// New text of each single-file edit, in source order, renaming the
+    /// identifier at byte `cursor` to `new_name`.
+    fn new_texts(src: &str, cursor: usize, new_name: &str) -> Option<Vec<String>> {
+        let d = doc(src);
+        let pos = d.position_of(cursor);
+        let edit = rename(&d, pos, new_name, &uri("x.q"), &WorkspaceIndex::default())?;
+        let mut edits = edit.changes?.remove(&uri("x.q"))?;
+        edits.sort_by_key(|e| (e.range.start.line, e.range.start.character));
+        Some(edits.into_iter().map(|e| e.new_text).collect())
     }
 
-    /// Single-file rename edits for the doc at `pos`.
-    fn edits(d: &Document, pos: Position, new_name: &str) -> Option<Vec<TextEdit>> {
-        let edit = rename(d, pos, new_name, &uri(), &WorkspaceIndex::default())?;
-        edit.changes?.remove(&uri())
-    }
-
+    /// Which sites are renamed is `find_references`' job (tested there);
+    /// rename must rewrite each site in its own shape.
     #[test]
-    fn prepare_returns_range_for_user_ident() {
-        let doc = Document::new("foo:1; foo+1".to_string(), 0);
-        let pos = doc.position_of(7); // on the second `foo`
-        let r = prepare_rename(&doc, pos).expect("prepare ok");
-        match r {
-            PrepareRenameResponse::RangeWithPlaceholder { placeholder, .. } => {
-                assert_eq!(placeholder, "foo");
-            }
-            _ => panic!("expected RangeWithPlaceholder"),
+    fn rewrites_each_site_in_its_shape() {
+        let cases: &[(&str, &[&str])] = &[
+            ("foo:1; bar:foo+foo", &["tbl", "tbl", "tbl"]),
+            // backtick symbol keeps its tick and namespace
+            (
+                "\\d .cache\ncache:1\nf:{`.cache.cache upsert (1;2)}",
+                &["tbl", "`.cache.tbl"],
+            ),
+            // dotted reference keeps its namespace prefix
+            (
+                "\\d .cache\ncache:1\n\\d .\nshow .cache.cache",
+                &["tbl", ".cache.tbl"],
+            ),
+        ];
+        for (src, want) in cases {
+            let cursor = src.find("foo:").or_else(|| src.find("cache:1")).unwrap();
+            assert_eq!(
+                new_texts(src, cursor, "tbl").unwrap(),
+                *want,
+                "source {src:?}"
+            );
         }
     }
 
     #[test]
-    fn prepare_refuses_builtins() {
-        let doc = Document::new("count x".to_string(), 0);
-        let pos = doc.position_of(0); // on `count`
-        assert!(prepare_rename(&doc, pos).is_none());
-    }
-
-    #[test]
-    fn rename_rewrites_all_uses() {
-        let doc = Document::new("foo:1; bar:foo+foo".to_string(), 0);
-        let pos = doc.position_of(0); // on `foo:` def
-        let edits = edits(&doc, pos, "baz").expect("rename ok");
-        assert_eq!(edits.len(), 3);
-        for e in edits {
-            assert_eq!(e.new_text, "baz");
-        }
-    }
-
-    #[test]
-    fn rename_excludes_unrelated_names() {
-        // `x` in lambda param scope and outer `x:99` are different bindings.
-        let doc = Document::new("x:99; f:{[x] x+1}".to_string(), 0);
-        let pos = doc.position_of(0); // on outer `x`
-        let edits = edits(&doc, pos, "y").expect("rename ok");
-        // Just the outer x:99 def — neither the param nor `x+1` ref.
-        assert_eq!(edits.len(), 1);
-    }
-
-    #[test]
-    fn rename_rewrites_local_rebindings() {
-        // q rebinds the same lambda-local — rename should touch all sites.
-        let doc = Document::new("f:{a:1; a:2; a}".to_string(), 0);
-        let src = doc.text().to_string();
-        let pos = doc.position_of(src.find("a:2").unwrap());
-        let edits = edits(&doc, pos, "b").expect("rename ok");
-        assert_eq!(edits.len(), 3, "expected all 3 a sites, got {edits:#?}");
-    }
-
-    #[test]
-    fn rename_rejects_invalid_new_name() {
-        let doc = Document::new("foo:1".to_string(), 0);
-        let pos = doc.position_of(0);
+    fn refuses_builtins_and_invalid_names() {
+        let builtin = doc("count x");
+        assert!(prepare_rename(&builtin, Position::new(0, 0)).is_none());
+        assert!(new_texts("count x", 0, "tally").is_none());
         for bad in ["1bad", "with space", ""] {
-            assert!(edits(&doc, pos, bad).is_none(), "{bad:?} accepted");
+            assert!(new_texts("foo:1", 0, bad).is_none(), "{bad:?} accepted");
+        }
+        for good in [".ns.x", "a1_b"] {
+            assert!(new_texts("foo:1", 0, good).is_some(), "{good:?} rejected");
         }
     }
 
     #[test]
-    fn rename_preserves_backtick_on_symbol_refs() {
-        // `.cache.cache upsert row` — the symbol token must keep its backtick.
-        let src = "\\d .cache\ncache:1\nf:{`.cache.cache upsert (1;2)}";
-        let doc = Document::new(src.to_string(), 0);
-        let pos = doc.position_of(src.find("cache:1").unwrap());
-        let edits = edits(&doc, pos, "tbl").expect("rename ok");
-        // The symbol edit must produce `` `.cache.tbl ``, not just `tbl`.
-        let sym_edit = edits
-            .iter()
-            .find(|e| e.new_text.starts_with('`'))
-            .expect("must have a symbol edit");
-        assert_eq!(sym_edit.new_text, "`.cache.tbl");
+    fn prepare_returns_identifier_range() {
+        let d = doc("foo:1; foo+1");
+        let resp = prepare_rename(&d, d.position_of(8)).expect("prepare ok");
+        let PrepareRenameResponse::RangeWithPlaceholder { range, placeholder } = resp else {
+            panic!("expected RangeWithPlaceholder");
+        };
+        assert_eq!(placeholder, "foo");
+        assert_eq!(range, Range::new(Position::new(0, 7), Position::new(0, 10)));
     }
 
+    /// Renaming from the definition rewrites uses in other files. (From a
+    /// use site is covered end-to-end in tests/lsp.rs.)
     #[test]
-    fn rename_preserves_dotted_prefix_on_qualified_refs() {
-        // `.cache.cache` dotted-ident refs outside the namespace must
-        // become `.cache.newName`, not just `newName`.
-        let src = "\\d .cache\ncache:1\n\\d .\nshow .cache.cache";
-        let doc = Document::new(src.to_string(), 0);
-        let pos = doc.position_of(src.find("cache:1").unwrap());
-        let edits = edits(&doc, pos, "tbl").expect("rename ok");
-        let dotted_edit = edits
-            .iter()
-            .find(|e| e.new_text.starts_with('.'))
-            .expect("must have a dotted edit");
-        assert_eq!(dotted_edit.new_text, ".cache.tbl");
-    }
-
-    #[test]
-    fn valid_identifier_shapes() {
-        assert!(is_valid_identifier("foo"));
-        assert!(is_valid_identifier(".ns.x"));
-        assert!(is_valid_identifier("a1_b"));
-        assert!(!is_valid_identifier("1foo"));
-        assert!(!is_valid_identifier(""));
-        assert!(!is_valid_identifier("a b"));
-    }
-
-    #[test]
-    fn rename_rewrites_across_files_from_def_and_use() {
-        let a = crate::workspace_index::tests::uri("a.q");
-        let b = crate::workspace_index::tests::uri("b.q");
-        // From the def in a.q, with b.q using it.
+    fn rewrites_uses_in_other_files() {
+        let (a, b) = (uri("a.q"), uri("b.q"));
         let idx = index(&[("b.q", "sharedFn 99")]);
         let edit = rename(
             &doc("sharedFn:{x+1}"),
@@ -231,13 +183,5 @@ mod tests {
         let changes = edit.changes.unwrap();
         assert_eq!(changes[&a][0].new_text, "newFn");
         assert_eq!(changes[&b][0].new_text, "newFn");
-        // From the use in b.q, with the def in a.q.
-        let idx = index(&[("a.q", "sharedFn:{x+1}")]);
-        let edit = rename(&doc("sharedFn 99"), Position::new(0, 0), "newFn", &b, &idx).unwrap();
-        let changes = edit.changes.unwrap();
-        assert!(
-            changes.contains_key(&a) && changes.contains_key(&b),
-            "{changes:?}"
-        );
     }
 }
