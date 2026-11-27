@@ -1,17 +1,10 @@
 # Statements whose parse tree differs from q 4.1 `parse`, by exact (whitespace-collapsed) text.
 # Remove an entry once it matches; the test fails on stale entries.
 
-# Converter limit: a list of two char atoms collapses to a string in q.
-'"a"
-
 # Not a parse rule: q rejects duplicate qSQL column names (`sym` twice).
 stats:{ select sym, avgPx:avg price, minPx:min price, maxPx:max price, totalVol:sum size, numTrades:count i by sym from trade }
 
 # Not checked: q rejects vectors mixing literal types (`1 2f 3`, a date and a long).
 1 -1 -344.11f 5999
 2003.06.01 2034.05.01 2333 552f 1b
-
-# Tree-sitter corpus oddities: q reads a time with a trailing `:` (`325:`).
-100D12:
 2020.01.02 2043.05.12D12: 2061.04.30D10:23 2001.12.25D12:44:53.991
-325:

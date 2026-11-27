@@ -11,8 +11,9 @@ use logos::Logos;
 #[derive(Logos, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[logos(skip r"[ \t]+")] // skip horizontal whitespace only
 #[logos(subpattern ymd = r"[0-9]{4}\.(0[1-9]|1[0-2])\.(0[1-9]|[12][0-9]|3[01])")]
-// Time after `D`/`T`: a bare hour (`D0`), or `hh:mm[:ss[.fff]]`.
-#[logos(subpattern hms = r"([0-9]{1,2}|[0-9]{2}:[0-5][0-9](:[0-5][0-9](\.[0-9]*)?)?)?")]
+// Time after `D`/`T`: a bare hour (`D0`), or `hh:mm:ss.fff` cut short after
+// any colon (`D12:`, `D12:30`).
+#[logos(subpattern hms = r"([0-9]{1,2}|[0-9]{2}:([0-5][0-9](:([0-5][0-9](\.[0-9]*)?)?)?)?)?")]
 pub enum Token {
     // -----------------------------------------------------------------------
     // Literals
@@ -58,16 +59,17 @@ pub enum Token {
     #[regex(r"(?&ymd)T(?&hms)|0[NWnw]z")]
     Datetime,
 
-    /// Minute literal: `12:30`, `12:30u`, `5u`, `0Nu`
-    #[regex(r"[0-9]{2}:[0-5][0-9]u?|[0-9]+u|0[NWnw]u")]
+    /// Minute literal: `12:30`, `12:` and `12:30:` (a trailing colon ends a
+    /// time early), `325:`, `12:30u`, `5u`, `0Nu`
+    #[regex(r"[0-9]{2,}:([0-5][0-9]:?)?u?|[0-9]+u|0[NWnw]u")]
     Minute,
 
-    /// Second literal: `12:30:45`, `5v`, `0Nv`
-    #[regex(r"[0-9]{2}:[0-5][0-9]:[0-5][0-9]v?|[0-9]+v|0[NWnw]v")]
+    /// Second literal: `12:30:45`, `12:30:45:`, `5v`, `0Nv`
+    #[regex(r"[0-9]{2,}:[0-5][0-9]:[0-5][0-9]:?v?|[0-9]+v|0[NWnw]v")]
     Second,
 
     /// Time literal: `12:30:45.678`, `12:30:45t`, `5t`, `0Nt`
-    #[regex(r"[0-9]{2}:[0-5][0-9]:[0-5][0-9](\.[0-9]*t?|t)|[0-9]+t|0[NWnw]t")]
+    #[regex(r"[0-9]{2,}:[0-5][0-9]:[0-5][0-9](\.[0-9]*t?|t)|[0-9]+t|0[NWnw]t")]
     Time,
 
     /// Byte literal: `0x2A` (atom), `0x`, `0x2A3B` (list)
@@ -253,7 +255,7 @@ pub enum Token {
     // -----------------------------------------------------------------------
     /// Unrecognised input, including number-like words that are no literal
     /// (`2b`, `1.5i`). Lowest priority, so only wins as the longest match.
-    #[regex(r"\.?[0-9]([0-9A-Za-z.]|e[-+][0-9]|[0-9]:[0-9])*", priority = 0)]
+    #[regex(r"\.?[0-9]([0-9A-Za-z.]|e[-+][0-9]|[0-9]:[0-9A-Za-z])*", priority = 0)]
     Error,
 }
 
@@ -340,7 +342,6 @@ mod tests {
     ("0: x", "FileOp0 Ident"),
     ("1:", "FileOp1"),
     ("2:", "FileOp2"),
-    ("10:x", "Integer Colon Ident"),
     ("x:0", "Ident Colon Integer"),
     ("`:data.csv", "FileSymbol"),
     ("`:/abs/path", "FileSymbol"),
@@ -426,12 +427,23 @@ mod tests {
     ("x.", "Ident"),
     ("a.1", "Ident"),
     ("1:2", "FileOp1 Integer"),
+    ("12:", "Minute"),
+    ("325:", "Minute"),
+    ("12:30:", "Minute"),
+    ("12:30:45:", "Second"),
+    ("100D12:", "Timespan"),
+    ("2000.01.01D12:", "Timestamp"),
+    ("10: x", "Minute Ident"),
+    ("0:x", "FileOp0 Ident"),
     // Number-like words that are no literal are one error token.
     ("2b", "Error"),
     ("1E5", "Error"),
     ("1.22i", "Error"),
     ("1e22i", "Error"),
     ("12:60", "Error"),
+    ("10:x", "Error"),
+    ("10:1", "Error"),
+    ("12:5", "Error"),
     ("2024.13.01", "Error"),
     ("1..2", "Error"),
     ("12:42:62346.123", "Error"),
