@@ -90,7 +90,7 @@ fn code(src: &str) -> String {
 }
 
 #[test]
-fn script_terminator() {
+fn comments_and_terminator() {
     // Each case checked against q 4.1: a column-0 `\` line outside a block
     // comment ends the script; `/`…`\` blocks, indented `\`, and `\ foo` don't.
     let cases: &[(&str, &[&str], &[&str])] = &[
@@ -104,6 +104,17 @@ fn script_terminator() {
         ("a:1\n/\nb:2\n\\\nc:3\n", &["a:1", "c:3"], &["b:2"]),
         ("a:1\n\t\\\nb:2\n", &["a:1", "b:2"], &[]),
         ("a:1\n\\ foo\nb:2\n", &["a:1", "b:2"], &[]),
+        // `/` comments only at line start or after whitespace; a block opens
+        // and closes only on column-0 `/` and `\\` lines.
+        ("f:+/\ng:1", &["f:+/", "g:1"], &[]),
+        ("x f/ y", &["xf/y"], &[]),
+        ("e:1//c", &["//c"], &[]),
+        ("d:\"a /b\"", &["/b"], &[]),
+        ("b:1 2 3 / note", &["b:123"], &["note"]),
+        ("/note\nx", &["x"], &["note"]),
+        (" /\nx", &["x"], &[]),
+        ("/\nnote\n \\\nmore\n\\\nx", &["x"], &["note", "more"]),
+        ("/\t\nnote\n\\\t\nx", &["x"], &["note"]),
     ];
     for (src, live, dead) in cases {
         let code = code(src);
@@ -171,10 +182,19 @@ fn diagnostics() {
             .collect();
         assert_eq!(spans, [*verb], "{src:?}: {:?}", p.errors);
     }
+    for src in INVALID_LITERALS {
+        let p = parse(src);
+        let spans: Vec<_> = p
+            .errors
+            .iter()
+            .map(|e| &src[e.offset..e.offset + e.len])
+            .collect();
+        assert_eq!(spans, [*src], "{src:?}: {:?}", p.errors);
+    }
     // Bracketed, projected, applied or infix verbs are fine.
     for ok in [
-        "(+/)x", "+/[x]", "x+/y", "x f/ y", "x y/ z", "f:+/", "x in y", "x each", "neg x",
-        "x - -1", "'[f;g] x", "$[a;b;c]",
+        "(+/)x", "+/[x]", "x+/y", "x f/ y", "x f/ 1 2", "x y/ z", "f:+/", "x in y", "x each",
+        "neg x", "x - -1", "'[f;g] x", "$[a;b;c]",
     ] {
         assert!(errors(ok).is_empty(), "{ok:?}: {:?}", errors(ok));
     }
@@ -188,7 +208,15 @@ const PREFIX_VERBS: &[(&str, &str)] = &[
     ("f/:\\:x", "f/:\\:"), ("-':x", "-':"), ("f'x", "f'"), ("y/z", "y/"),
     ("set x", "set"), ("setenv 1", "setenv"),
     ("raze select from each t", "each"), ("select +/price from trade", "+/"),
-    ("1: \"hello\"", "1:"), ("{[a] +1}", "+"),
+    ("1: \"hello\"", "1:"), ("{[a] +1}", "+"), ("+/ x", "+/"), ("+//x", "+//"),
+    ("+/ -1 2 3", "+/"), ("{x}/ 1 2", "{x}/"),
+];
+
+/// Number-like words q rejects as literals: each is one error token.
+#[rustfmt::skip]
+const INVALID_LITERALS: &[&str] = &[
+    "1.22b", "1.22h", "1.22i", "1.22j", "1e22i", "1e2h", "12e12.33", "1.1.2.3.4",
+    "3b", "2032.12.511", "12:42:62346.123", "32D12:3", "0Wg", "1E5", "12:60",
 ];
 
 /// `(source, node/token kinds that must appear, kinds that must not)`.
@@ -486,16 +514,17 @@ const SNAPSHOTS: &[(&str, &str)] = &[
         Symbol "`a"
       LiteralExpr
         Symbol "`b""#),
-    // boolean_vector
+    // booleans_juxtapose: 0b 1b 0b  →  application, as in q (vectors are `010b`)
     ("0b 1b 0b", r#"Root
   ExprStmt
-    VectorExpr
+    ApplyExpr
       LiteralExpr
         Boolean "0b"
-      LiteralExpr
-        Boolean "1b"
-      LiteralExpr
-        Boolean "0b""#),
+      ApplyExpr
+        LiteralExpr
+          Boolean "1b"
+        LiteralExpr
+          Boolean "0b""#),
     // vector_in_assignment: t: 1 2 3 — the user's reported case
     ("t: 1 2 3", r#"Root
   ExprStmt

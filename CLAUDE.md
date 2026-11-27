@@ -17,7 +17,7 @@ cargo run -p q-parser --example print_tree -- file.q   # inspect a parse tree
 # Architecture
 
 - `q-lexer` (logos) → `q-parser` (event-based parser, lossless rowan CST) → `q-ls` (`tower-lsp-server` binary).
-- Parser: `Parser::new` lexes and fixes up the token stream (comments, `\` terminator, `k)`/`p)` lines, negative literals); grammar rules emit `Event`s; `sink::build` turns them into a rowan `GreenNode`.
+- Parser: `Parser::new` lexes with line context (comments, the `\` terminator and `k)`/`p)` lines need it, so `lex` recognises them before logos sees the text), then merges negative literals; grammar rules emit `Event`s; `sink::build` turns them into a rowan `GreenNode`.
 - Server: `WorkspaceIndex` is the only document store, holding open documents (editor text, never overwritten from disk while open) and every indexed `.q` file. Indexing walks the git root with the `ignore` crate, so `.gitignore`/`.ignore` apply; this repo's `.ignore` excludes the parser fixtures.
 - `SymTable` (built per parse) owns name resolution and scoping; features in `goto_def`, `references`, `rename`, `hover`, `completion` and `diagnostics` query it. Shared CST helpers live in `syntax.rs`.
 - Offsets: rowan `TextSize`/`u32` in the CST and for stored definition sites; `usize` byte offsets in `Document`, `ParseError` and feature code; LSP `Position` (UTF-16) only via `Document::offset_of`/`position_of`.

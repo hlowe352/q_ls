@@ -12,8 +12,10 @@ checkPathsCommon[; not in[colName;]@; " ", string[colName], " not"]
 f (+) g + :
 g f+
 g: @[(1b;)@-9!;;(0b;)@] each hd,'m
+if[.replay.segmentedmode; .replay.replaydate:first l:"D"$$[first[r] like "*.gz";-9_-17#;-6_-14#] each string r; if[not 1=count distinct l;.lg.e[`replay;m:"Cannot replay logs from different dates in segmented mode!"];'m]; if[.replay.clean;.replay.cleanhdb .replay.replaydate] ]
 if[any files like "par.txt"; :raze (.z.s[;tname] hsym@) each `$read0 .Q.dd[db;`par.txt]]
 if[not ()~files:key tdir; (hdel .Q.dd[tdir;]@) each files,`]
+if[not .replay.segmentedmode; .replay.replaydate:"D"$$[.replay.zipped;-3_-13#;-10#] string logfile; if[.replay.clean;.replay.cleanhdb .replay.replaydate] ]
 if[not min(`time`sym~2#key flip value@)each t;'`timesym]
 missing: ((), paths) where (check key@) each (), paths
 tyargs:$[10h=abs type args 0;`$1#;]args 0
@@ -24,77 +26,11 @@ tyargs:$[10h=abs type args 0;`$1#;]args 0
 # Not a parse rule: q rejects duplicate qSQL column names (`sym` twice).
 stats:{ select sym, avgPx:avg price, minPx:min price, maxPx:max price, totalVol:sum size, numTrades:count i by sym from trade }
 
-# Lexer gaps (literal forms, identifier segments, `/ ` and `//` comments,
-# `+::`), to fix in the lexer PR.
-$[0W=x[`conns];1b;0b]
-$[0W=x[`conns][`lim];1b;0b]
-$[msgcount < (firstmessage - 1); msgcount+::1; @[`.;`upd;:;.replay.realupd]]
--125.323e-120
-.adv.sr.223.asdf.feadg.edd
-.replay.replayinner[lastmessage+lastmessage<0W;logfile]
-.u.icounts[tab]+::count first x
-0W
-0W=x
-0Wd
-0Wt
-0nf
-0wz
+# Not checked: q rejects vectors mixing literal types (`1 2f 3`, a date and a long).
 1 -1 -344.11f 5999
-1 2 3 4 1e-40 1.3
-1.1.2.3.4
-1.22b
-1.22h
-1.22i
-1.22j
-100D12:
-12:42:62346.123
-12:51:21.
-12e12.33
-1e22i
-1e2h
-2000.01.05D
 2003.06.01 2034.05.01 2333 552f 1b
+
+# Tree-sitter corpus oddities: q reads a time with a trailing `:` (`325:`).
+100D12:
 2020.01.02 2043.05.12D12: 2061.04.30D10:23 2001.12.25D12:44:53.991
-2032.12.511
 325:
-32D12:3
-3b
-:$[(options`sublist)<>0W;(options`sublist) sublist res;res]
-:id+::1
-all 0W=x
-current:.finspace.checkstatus[(`.aws.get_changeset;.finspace.database;changeset[`id]);("COMPLETED";"FAILED");00:01;0wu]
-currentcount+::counter
-dashparams:`o`w`r`limit!(0;0i;0i;0W)
-data:$[not loadparams[`filename] in filesread; [filesread,::loadparams[`filename]; loadparams[`headers] xcol $[0h>type loadparams[`separator];{flip x!y}[loadparams[`headers]];::]@(loadparams[`types];loadparams[`separator])0:rawdata]; flip loadparams[`headers]!(loadparams[`types];first loadparams[`separator])0:rawdata]
-default:`timeout`postback`sublist`getquery`queryoptimisation`postprocessing!(0Wn;();0W;0b;1b;{:x;})
-docompression:compressmaxage[;;0W]
-err.:(::)
-errorcounts[t]+::count first x
-i+::1
-i:0p
-if[.hb.subenabled; upd:{[f;t;x] if[t=`heartbeat; .hb.storeheartbeat[x]]; f . (t;x)}@[value;`upd;{{[t;x]}}]; .dotz.set[`.z.pc;{if[y;.hb.subscribedhandles::.hb.subscribedhandles except y]; x@y}@[value;.dotz.getcommand[`.z.pc];{{[x]}}]]; .timer.rep[.z.p;0wp;0D00:01:00;(`.hb.hbsubscriptions;`);0h;"subscribe to heartbeats";0b]; .servers.connectcustom:{[func;connectiontab] connectiontab:$[`ALL in .hb.CONNECTIONS; connectiontab; select from connectiontab where proctype in .hb.CONNECTIONS]; connectiontab:select from connectiontab where not w in .hb.subscribedhandles; if[count connectiontab; .hb.subscribe each connectiontab`w]; func@connectiontab }@[value;`.servers.connectcustom;{{[x]}}] ]
-if[.replay.segmentedmode; .replay.replaydate:first l:"D"$$[first[r] like "*.gz";-9_-17#;-6_-14#] each string r; if[not 1=count distinct l;.lg.e[`replay;m:"Cannot replay logs from different dates in segmented mode!"];'m]; if[.replay.clean;.replay.cleanhdb .replay.replaydate] ]
-if[@[value;`.ps.initialised;0b]; .ps.publish[`heartbeat;enlist `time`sym`procname`counter`pid`host`port!(.proc.cp[];.proc.proctype;.proc.procname;hbcounter;pid;host;port)]; hbcounter+::1]
-if[basicmode and (messagechunks within (0;-1 + 0W)); .err.ex[`replayinit; "if using basic mode, messagechunks must not be used (it should be set to 0W). basicmode will use .Q.hdpf to overwrite tables at the end of the replay";1]]
-if[l;l enlist (`upd;t;x);i+:1;icounts[t]+::count first x]
-if[messagechunks < 0W; realupd:{[f;t;x] f[t;x]; checkcount[hdbdir;replaydate;1;tempdir]}[realupd]]
-if[not .replay.segmentedmode; .replay.replaydate:"D"$$[.replay.zipped;-3_-13#;-10#] string logfile; if[.replay.clean;.replay.cleanhdb .replay.replaydate] ]
-if[params`comp; .dqe.compcounter[idnum]:( 1+0^.dqe.compcounter[idnum][`counter]; .dqe.compcounter[idnum][`procs],proc; .dqe.compcounter[idnum][`results],$[3<count result;0W;last result])]
-if[segmentedmode and ((0<>firstmessage) or 0W<>lastmessage);.err.ex[`replayinit;"firstmessage must be 0 and lastmessage must be 0W while in segmented mode"];1]
-jcounts[t]+::count first x
-lastmessage:0W
-lastmessage:@[value;`lastmessage;0W]
-messagechunks:0W
-messagechunks:@[value;`messagechunks;0W]
-modifier,::new!(count new)#{-8!.j.j updformat["upd";`tablename`tabledata!(x 1;x 2)]}
-startupdependent:startupdepcyclestypename[;.servers.reqproctypesnotconn;;0W]
-subscribedhandles,::handle
-subscribedhandles,::x
-sum x in (0w;-0w;0W;-0W)
-sum x in(0w;-0w;0W;-0W)
-tablecounts[t]+::count first x
-tpcheckcycles:0W
-tpcheckcycles:@[value;`tpcheckcycles;0W]
-unix_time:floor((`long$.z.p)-1970.01.01D00:00)%1e9
-w,::new!(count new)#()
-wdbcheckcycles:@[value;`wdvcheckcycles;0W]
