@@ -14,14 +14,6 @@ pub fn first_token(node: &SyntaxNode) -> Option<SyntaxToken> {
     tokens(node).find(|t| !t.kind().is_trivia())
 }
 
-/// Text of the first direct `Ident` child token of `node`.
-fn ident_text(node: &SyntaxNode) -> Option<String> {
-    node.children_with_tokens()
-        .filter_map(SyntaxElement::into_token)
-        .find(|t| t.kind() == SyntaxKind::Ident)
-        .map(|t| t.text().to_string())
-}
-
 /// Is `bin` a `BinExpr` whose operator is `:` or `::`?
 pub fn is_assignment(bin: &SyntaxNode) -> bool {
     bin.kind() == SyntaxKind::BinExpr
@@ -41,41 +33,27 @@ pub fn has_ancestor(node: &SyntaxNode, kind: SyntaxKind) -> bool {
     node.ancestors().any(|n| n.kind() == kind)
 }
 
-/// Is `node` inside a qSQL statement? Statement-level qSQL has its own node
-/// kinds; inside lambdas or `$[…]` the parser may emit `ApplyExpr` chains
-/// with `select`/`exec`/`update`/`delete` in function position.
-pub fn in_qsql(node: &SyntaxNode) -> bool {
-    node.ancestors().any(|n| match n.kind() {
-        SyntaxKind::SelectExpr
-        | SyntaxKind::UpdateExpr
-        | SyntaxKind::ExecExpr
-        | SyntaxKind::DeleteExpr => true,
-        SyntaxKind::ApplyExpr => n
-            .first_child()
-            .filter(|f| f.kind() == SyntaxKind::IdentExpr)
-            .and_then(|f| ident_text(&f))
-            .is_some_and(|t| matches!(t.as_str(), "select" | "exec" | "update" | "delete")),
-        _ => false,
-    })
-}
-
-/// Is `node` an `ApplyExpr` whose function is `IdentExpr("from")`?
-pub fn is_from_apply(node: &SyntaxNode) -> bool {
-    node.kind() == SyntaxKind::ApplyExpr
-        && node
-            .first_child()
-            .filter(|f| f.kind() == SyntaxKind::IdentExpr)
-            .and_then(|f| ident_text(&f))
-            .is_some_and(|t| t == "from")
-}
-
-/// Is `node` a qSQL statement node?
-pub fn is_qsql_stmt(node: &SyntaxNode) -> bool {
+fn is_qsql_stmt(kind: SyntaxKind) -> bool {
     matches!(
-        node.kind(),
+        kind,
         SyntaxKind::SelectExpr
             | SyntaxKind::UpdateExpr
             | SyntaxKind::ExecExpr
             | SyntaxKind::DeleteExpr
     )
+}
+
+/// Is `node` inside a qSQL statement (`select`/`exec`/`update`/`delete`)?
+pub fn in_qsql(node: &SyntaxNode) -> bool {
+    node.ancestors().any(|n| is_qsql_stmt(n.kind()))
+}
+
+/// Is `node` in qSQL row context, where bare names are column names? True
+/// when its nearest enclosing qSQL construct is a statement rather than a
+/// `FromClause`, so `from f[x]` is ordinary code but a query nested inside
+/// that `from` has its own columns.
+pub fn in_row_context(node: &SyntaxNode) -> bool {
+    node.ancestors()
+        .find(|n| n.kind() == SyntaxKind::FromClause || is_qsql_stmt(n.kind()))
+        .is_some_and(|n| n.kind() != SyntaxKind::FromClause)
 }

@@ -86,6 +86,8 @@ syntax_kinds! {
         WhereClause,
         /// `by …` clause inside qSQL.
         ByClause,
+        /// `from <table>` clause inside qSQL.
+        FromClause,
         /// System command statement (`\l file.q`, etc.).
         SystemCmdStmt,
         /// `expr[index]` — index / slice expression.

@@ -234,8 +234,7 @@ mod tests {
 
     #[test]
     fn unresolved_skips_expr_level_qsql_columns() {
-        // Inside a lambda, qSQL is parsed as ApplyExpr chains (not SelectExpr etc.).
-        // Column names must still be suppressed.
+        // Column names of qSQL inside a lambda must still be suppressed.
         let src = "evict:{[r] select lastaccess,id,size from cache}";
         let warnings = unresolved_for(src);
         assert!(

@@ -14,9 +14,7 @@ use q_parser::{SyntaxKind, SyntaxNode, SyntaxToken};
 use tower_lsp_server::ls_types::*;
 
 use crate::document::Document;
-use crate::syntax::{
-    has_ancestor, in_qsql, is_assignment_lhs, is_from_apply, is_qsql_stmt, tokens,
-};
+use crate::syntax::{has_ancestor, in_row_context, is_assignment_lhs, tokens};
 use crate::workspace_index::WorkspaceIndex;
 
 pub fn find_references(
@@ -95,14 +93,13 @@ fn location(doc: &Document, uri: &Uri, token: &SyntaxToken) -> Location {
 }
 
 /// Ident/dotted-ident tokens of `doc` that could be variable references:
-/// not qSQL column names (a `from` table is fine) and not column
+/// not qSQL column names (see [`in_row_context`]) and not column
 /// definitions in a table constructor.
 fn candidate_idents(doc: &Document) -> impl Iterator<Item = SyntaxToken> {
     tokens(&doc.parse().syntax()).filter(|t| {
         matches!(t.kind(), SyntaxKind::Ident | SyntaxKind::DottedIdent)
-            && t.parent().is_some_and(|p| {
-                (!in_qsql(&p) || is_qsql_from_table(&p)) && !is_col_def_in_table(&p)
-            })
+            && t.parent()
+                .is_some_and(|p| !in_row_context(&p) && !is_col_def_in_table(&p))
     })
 }
 
@@ -154,7 +151,7 @@ fn scoped_refs(
     // Backtick symbols naming the table in in-place modification contexts.
     let symbols = tokens(&doc.parse().syntax()).filter(|tok| {
         tok.kind() == SyntaxKind::Symbol
-            && is_inplace_table_symbol(tok)
+            && is_table_symbol(tok)
             && tok
                 .text()
                 .strip_prefix('`')
@@ -182,11 +179,10 @@ fn global_refs(doc: &Document, uri: &Uri, name: &str, qualified: &str) -> Vec<Lo
         .collect()
 }
 
-/// True only when a Symbol token is used as a global table reference:
-/// the LHS of `upsert` / `insert`, or the table of a qSQL `from` clause
-/// (statement-level, or the `ApplyExpr` chains the parser emits inside
-/// lambdas). Excludes dict indexing (`` r`id ``), assignment RHS, etc.
-fn is_inplace_table_symbol(token: &SyntaxToken) -> bool {
+/// Is this backtick symbol naming a table in place: the table of a qSQL
+/// `from` clause, or the LHS of `upsert` / `insert`? Excludes dict
+/// indexing (`` r`id ``), assignment RHS, etc.
+fn is_table_symbol(token: &SyntaxToken) -> bool {
     let Some(lit) = token
         .parent()
         .filter(|l| l.kind() == SyntaxKind::LiteralExpr)
@@ -196,50 +192,19 @@ fn is_inplace_table_symbol(token: &SyntaxToken) -> bool {
     let Some(parent) = lit.parent() else {
         return false;
     };
-    let lit_first = parent.first_child().as_ref() == Some(&lit);
     match parent.kind() {
-        _ if is_qsql_stmt(&parent) => true,
+        SyntaxKind::FromClause => true,
         // `` `.t upsert rows `` / `` `.t insert rows ``
         SyntaxKind::BinExpr => {
-            lit_first
+            parent.first_child().as_ref() == Some(&lit)
                 && parent.children_with_tokens().any(|t| {
                     t.as_token().is_some_and(|t| {
                         t.kind() == SyntaxKind::Ident && matches!(t.text(), "upsert" | "insert")
                     })
                 })
         }
-        // `from tbl where …` / `from tbl[args]`: first child of an apply
-        // nested in a qSQL statement or a `from`-apply.
-        SyntaxKind::ApplyExpr if lit_first => parent
-            .parent()
-            .is_some_and(|gp| is_qsql_stmt(&gp) || is_from_apply(&gp)),
-        // `from tbl`: non-first argument of a `from`-apply.
-        SyntaxKind::ApplyExpr => is_from_apply(&parent),
         _ => false,
     }
-}
-
-/// Is an `IdentExpr` the table argument of a qSQL `from` clause? Lets
-/// the table name through the qSQL column-name filter.
-fn is_qsql_from_table(ident_expr: &SyntaxNode) -> bool {
-    if ident_expr.kind() != SyntaxKind::IdentExpr {
-        return false;
-    }
-    let Some(parent) = ident_expr.parent() else {
-        return false;
-    };
-    // `select from .t` — no column list, table is a direct child.
-    if is_qsql_stmt(&parent) {
-        return true;
-    }
-    // `from tbl[args]` (first child of an apply inside a `from`-apply) or
-    // `from tbl` (non-first argument of a `from`-apply).
-    parent.kind() == SyntaxKind::ApplyExpr
-        && if parent.first_child().as_ref() == Some(ident_expr) {
-            parent.parent().is_some_and(|gp| is_from_apply(&gp))
-        } else {
-            is_from_apply(&parent)
-        }
 }
 
 /// Is `ident_expr` the column-name LHS of `col:value` inside a table
@@ -367,7 +332,6 @@ mod tests {
 
     #[test]
     fn symbol_delete_in_lambda_included() {
-        // Inside a lambda the parser emits ApplyExpr chains, not DeleteExpr.
         let src = "\\d .cache\ncache:1\n\\d .\ndrop:{delete from `.cache.cache where id in x}";
         let cursor = src.find("cache:1").unwrap();
         let r = refs(src, cursor, true);
@@ -414,8 +378,7 @@ mod tests {
 
     #[test]
     fn exec_from_table_inside_if_included() {
-        // `exec size from cache` inside if[…] is parsed as an ApplyExpr chain,
-        // not ExecExpr. `cache` must still be detected as the from-table.
+        // `cache` in `exec size from cache` inside if[…] is the from-table.
         let src = "\\d .cache\ncache:1\nf:{if[1b; exec size from cache; 0]}";
         let cursor = src.find("cache:1").unwrap();
         let r = refs(src, cursor, true);
@@ -428,7 +391,7 @@ mod tests {
 
     #[test]
     fn select_from_table_inside_lambda_included() {
-        // `select … from cache` inside a lambda body — parsed as ApplyExpr chain.
+        // `select … from cache` inside a lambda body.
         let src = "\\d .cache\ncache:1\nevict:{[r] r:select lastaccess,id from cache; r}";
         let cursor = src.find("cache:1").unwrap();
         let r = refs(src, cursor, true);
@@ -437,6 +400,18 @@ mod tests {
             r.contains(&tbl_off),
             "select from-table ref inside lambda missing; got {r:?}"
         );
+    }
+
+    #[test]
+    fn from_clause_expression_is_code_but_nested_query_columns_are_not() {
+        // `f` builds the table: a real reference.
+        let src = "f:{x}\nselect from f[1]";
+        let r = refs(src, 0, true);
+        assert!(r.contains(&src.rfind("f[1]").unwrap()), "got {r:?}");
+        // `id` is a column of the query nested in the `from`: not a reference.
+        let src = "id:0j\nselect from `a xasc select id from t";
+        let r = refs(src, 0, true);
+        assert_eq!(r, vec![0], "only the def; got {r:?}");
     }
 
     #[test]
@@ -454,7 +429,7 @@ mod tests {
 
     #[test]
     fn expr_level_qsql_column_not_included_in_refs() {
-        // update inside $[…] is parsed as ApplyExpr chain, not UpdateExpr.
+        // update inside $[…].
         // `id` in the where clause is a column name, not a ref to global id.
         let src = "id:0j\n$[1b; update lastaccess:now from t where id=1; 0]";
         let cursor = src.find("id:0j").unwrap();

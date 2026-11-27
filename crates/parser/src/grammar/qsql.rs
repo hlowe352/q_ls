@@ -64,9 +64,11 @@ pub fn parse_qsql(p: &mut Parser) -> CompletedMarker {
 
     // Table expression: stop juxtaposition at `where`.
     if at_kw(p, "from") {
+        let fm = p.start();
         p.bump();
         let comma = p.qsql_comma_stop;
         with_qsql_flags(p, true, comma, expr);
+        fm.complete(p, SyntaxKind::FromClause);
     }
 
     if at_kw(p, "where") {
