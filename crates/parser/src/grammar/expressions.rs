@@ -9,8 +9,9 @@
 //!
 //! An expression ending in a verb with nothing to its right (`f+`, `+/`) is
 //! *verb-valued*. Applied to one, or as the right operand of a verb, q builds
-//! a composition instead (`g f+`, `x+y+`), except as the value of an
-//! assignment (`f:+/`, `f::+`). Brackets and parentheses delimit their own
+//! a composition instead (`g f+`, `x+y+`), except as the value of a plain
+//! assignment (`f:+/`). `f::+` composes too: in a lambda it reads `f` and
+//! assigns nothing. Brackets and parentheses delimit their own
 //! expressions, so `f[g+]` and `g (x+)` are plain application.
 //!
 //! The only prefix forms are `'x` (signal) and `:x` (return).
@@ -75,7 +76,7 @@ fn rest(p: &mut Parser, lhs: CompletedMarker, verb: bool, start: usize) -> bool 
         expr(p);
         (ApplyExpr, false)
     } else if at_primitive(p) {
-        let assign = p.at(Colon) || p.at(ColonColon);
+        let assign = p.at(Colon);
         p.bump();
         infix(p, assign)
     } else {
