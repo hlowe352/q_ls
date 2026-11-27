@@ -182,6 +182,26 @@ fn diagnostics() {
             .collect();
         assert_eq!(spans, [*verb], "{src:?}: {:?}", p.errors);
     }
+    for (src, item) in BAD_VECTORS {
+        let p = parse(src);
+        let spans: Vec<_> = p
+            .errors
+            .iter()
+            .map(|e| &src[e.offset..e.offset + e.len])
+            .collect();
+        assert_eq!(spans, [*item], "{src:?}: {:?}", p.errors);
+    }
+    for ok in [
+        "1 2j",
+        "0n 1",
+        "0W 1",
+        "1 0Ni",
+        "1 2 3 0D",
+        "12:00 12:00:00",
+        "1.5 2",
+    ] {
+        assert!(errors(ok).is_empty(), "{ok:?}: {:?}", errors(ok));
+    }
     for src in INVALID_LITERALS {
         let p = parse(src);
         let spans: Vec<_> = p
@@ -210,6 +230,14 @@ const PREFIX_VERBS: &[(&str, &str)] = &[
     ("raze select from each t", "each"), ("select +/price from trade", "+/"),
     ("1: \"hello\"", "1:"), ("{[a] +1}", "+"), ("+/ x", "+/"), ("+//x", "+//"),
     ("+/ -1 2 3", "+/"), ("{x}/ 1 2", "{x}/"),
+];
+
+/// Vectors q rejects, with the item the error spans.
+#[rustfmt::skip]
+const BAD_VECTORS: &[(&str, &str)] = &[
+    ("1j 2", "1j"), ("0Ni 1", "0Ni"), ("1e 2", "1e"), ("1.5 2f 3", "2f"),
+    ("12:00 1", "1"), ("0D 1", "1"), ("2000.01.01 1", "1"),
+    ("1 -1 -344.11f 5999", "-344.11f"), ("2003.06.01 2034.05.01 2333", "2333"),
 ];
 
 /// Number-like words q rejects as literals: each is one error token.

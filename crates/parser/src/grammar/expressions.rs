@@ -208,14 +208,32 @@ fn atom(p: &mut Parser) -> Option<(CompletedMarker, bool)> {
 }
 
 /// `1 2 3`: run of same-line scalar literals. Leading trivia is emitted
-/// before opening the node so its range starts at the first literal.
+/// before opening the node so its range starts at the first literal. As in
+/// q, only the last item may carry a type letter (`1 2j`, not `1j 2`), and
+/// a number cannot follow a time (`12:00 1`).
 fn parse_vector(p: &mut Parser) -> CompletedMarker {
     p.eat_trivia();
     let m = p.start();
+    let (mut suffixed, mut seen_time) = (None, false);
     while p.current().is_some_and(is_scalar_literal) && !p.has_preceding_newline() {
+        if let Some(i) = suffixed.take() {
+            p.error_since("only a vector's last item may have a type letter", i);
+        }
+        let (i, number) = (
+            p.token_index(),
+            matches!(p.current(), Some(Integer | Float)),
+        );
+        let typed = number
+            && p.current_text()
+                .is_some_and(|t| t.ends_with(['i', 'j', 'h', 'f', 'e']));
         let em = p.start();
         p.bump();
         em.complete(p, LiteralExpr);
+        if number && seen_time {
+            p.error_since("a vector cannot have a number after a time", i);
+        }
+        seen_time |= !number;
+        suffixed = typed.then_some(i);
     }
     m.complete(p, VectorExpr)
 }
