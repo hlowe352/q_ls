@@ -18,9 +18,11 @@ pub fn complete(doc: &Document, pos: Position, workspace: &WorkspaceIndex) -> Ve
     let builtins = BUILTINS
         .iter()
         .map(|&(name, detail)| (name, Some(detail), CompletionItemKind::FUNCTION));
-    let idents = doc
-        .sym_table()
-        .idents()
+    let bindings = doc.bindings();
+    let names = bindings.names();
+    let idents = names
+        .iter()
+        .map(|n| &doc.text()[n.range])
         .chain(workspace.all_idents())
         .map(|name| (name, None, CompletionItemKind::VARIABLE));
     let mut seen = HashSet::new();
@@ -29,7 +31,9 @@ pub fn complete(doc: &Document, pos: Position, workspace: &WorkspaceIndex) -> Ve
         .filter(|(name, ..)| name.starts_with(prefix) && seen.insert(*name))
         .filter(|(name, ..)| {
             *name != prefix
-                || doc.sym_table().resolve(offset, name).is_some()
+                || names
+                    .iter()
+                    .any(|n| n.is_def() && &doc.text()[n.range] == *name)
                 || workspace.resolve_global(name).is_some()
         })
         .map(|(name, detail, kind)| CompletionItem {

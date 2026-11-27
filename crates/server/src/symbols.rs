@@ -1,5 +1,6 @@
+use crate::binder::Role;
 use crate::document::Document;
-use crate::syntax::{is_assignment, tokens};
+use crate::syntax::tokens;
 use q_parser::{SyntaxKind, SyntaxNode, SyntaxToken};
 #[allow(clippy::wildcard_imports)]
 use tower_lsp_server::ls_types::*;
@@ -22,10 +23,7 @@ pub fn document_symbols(doc: &Document) -> Vec<DocumentSymbol> {
 /// Build a `DocumentSymbol` for an assignment `BinExpr`, including any nested
 /// assignments inside the RHS lambda body as children.
 fn symbol_for_assign(doc: &Document, bin: &SyntaxNode) -> Option<DocumentSymbol> {
-    if !is_assignment(bin) {
-        return None;
-    }
-    let name_tok = first_lhs_name(bin)?;
+    let name_tok = declared_name(doc, bin)?;
     let name = name_tok.text().to_string();
 
     let range = |r: q_parser::TextRange| {
@@ -57,9 +55,14 @@ fn symbol_for_assign(doc: &Document, bin: &SyntaxNode) -> Option<DocumentSymbol>
     })
 }
 
-fn first_lhs_name(bin: &SyntaxNode) -> Option<SyntaxToken> {
-    tokens(&bin.first_child()?)
-        .find(|t| matches!(t.kind(), SyntaxKind::Ident | SyntaxKind::DottedIdent))
+/// The name `bin` declares (`name:`, or a top-level `name::`), if any.
+fn declared_name(doc: &Document, bin: &SyntaxNode) -> Option<SyntaxToken> {
+    let token = tokens(&bin.first_child()?)
+        .find(|t| matches!(t.kind(), SyntaxKind::Ident | SyntaxKind::DottedIdent))?;
+    doc.bindings()
+        .name_at(token.text_range().start().into())
+        .is_some_and(|n| n.role == Role::Declare && n.range == token.text_range())
+        .then_some(token)
 }
 
 /// If the `BinExpr`'s RHS *is* a lambda (possibly wrapped in trivially

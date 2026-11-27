@@ -2,10 +2,11 @@
 //! skipped without one) in several contexts — top level, a lambda, `\d .ns`,
 //! a lambda defined in `.ns` (called there and from the root), and
 //! `system "d .ns"`. The globals q creates or changes must be exactly the
-//! names our symbol table records a global definition for inside the case.
+//! names the binder records a global definition for inside the case.
 
 use std::path::Path;
 
+use crate::binder::Symbol;
 use crate::document::Document;
 
 /// `(prelude, code, names to watch)`. The prelude runs first at the root;
@@ -112,11 +113,11 @@ fn candidates(names: &[&str]) -> Vec<String> {
 /// Candidates our symbol table defines globally inside `code`.
 fn ours(src: &str, code: std::ops::Range<usize>, cands: &[String]) -> Vec<String> {
     let doc = Document::new(src.to_string(), 0);
-    let st = doc.sym_table();
     cands
         .iter()
         .filter(|c| {
-            st.global_def_offsets(c)
+            doc.bindings()
+                .defs(&Symbol::Global(c.as_str().into()))
                 .iter()
                 .any(|&o| code.contains(&(o as usize)))
         })

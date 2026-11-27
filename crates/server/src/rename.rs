@@ -1,32 +1,31 @@
 //! `textDocument/rename` and `textDocument/prepareRename`.
 //!
-//! Reuses [`crate::references::find_references`] to locate every occurrence
-//! of the symbol under the cursor across the workspace, then emits a
-//! `WorkspaceEdit` mapping each file URI to its `TextEdit`s.
+//! Renames every occurrence [`crate::references::find_references`] finds.
 
 use std::collections::HashMap;
 use tower_lsp_server::ls_types::{
     Position, PrepareRenameResponse, Range, TextEdit, Uri, WorkspaceEdit,
 };
 
-use crate::builtins::is_builtin;
 use crate::document::Document;
 use crate::references::find_references;
 use crate::workspace_index::WorkspaceIndex;
 
-/// Validate that the cursor sits on a renameable (non-builtin) identifier
-/// and return its current text + range.
+/// The range and text of the name under the cursor, if any.
 pub fn prepare_rename(doc: &Document, pos: Position) -> Option<PrepareRenameResponse> {
-    let (name, start, end) = doc.ident_at(doc.offset_of(pos))?;
-    (!is_builtin(name)).then(|| PrepareRenameResponse::RangeWithPlaceholder {
-        range: Range::new(doc.position_of(start), doc.position_of(end)),
-        placeholder: name.to_string(),
+    let range = doc.bindings().name_at(doc.offset_of(pos))?.range;
+    Some(PrepareRenameResponse::RangeWithPlaceholder {
+        range: Range::new(
+            doc.position_of(range.start().into()),
+            doc.position_of(range.end().into()),
+        ),
+        placeholder: doc.text()[range].to_string(),
     })
 }
 
-/// Build the `WorkspaceEdit` renaming the symbol at `pos` to `new_name`
-/// across the workspace. `None` if the cursor isn't on a renameable
-/// identifier or `new_name` isn't a valid q identifier.
+/// Rename every occurrence of the symbol at `pos`. Each occurrence keeps its
+/// own namespace prefix: renaming `cache` in `\d .cache` to `tbl` rewrites
+/// `.cache.cache` as `.cache.tbl`.
 pub fn rename(
     doc: &Document,
     pos: Position,
@@ -34,56 +33,27 @@ pub fn rename(
     uri: &Uri,
     workspace: &WorkspaceIndex,
 ) -> Option<WorkspaceEdit> {
-    let cursor = doc.offset_of(pos);
-    let (old_name, _, _) = doc.ident_at(cursor)?;
-    if is_builtin(old_name) || !is_valid_identifier(new_name) {
+    let name = doc.bindings().name_at(doc.offset_of(pos))?;
+    if !is_valid_identifier(new_name) {
         return None;
     }
-
-    // Qualified form (`.cache.cache` for `cache` inside `\d .cache`) and its
-    // namespace prefix (`.cache.`; empty for bare names).
-    let qualified_old = doc
-        .sym_table()
-        .qualified_for(cursor, old_name)
-        .map_or_else(|| old_name.to_string(), |q| q.to_string());
-    let ns_prefix = qualified_old
-        .rsplit_once('.')
-        .map_or(String::new(), |(prefix, _)| format!("{prefix}."));
-
-    let locations = find_references(doc, pos, true, uri, workspace);
-    if locations.is_empty() {
-        return None;
-    }
-
-    // Shape each replacement after the original token text:
-    // `cache` → `new`, `.cache.cache` → `.cache.new`, and a leading
-    // backtick on symbols is preserved.
+    let old = doc.text()[name.range].rsplit('.').next()?.to_string();
     let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
-    for loc in locations {
+    for loc in find_references(doc, pos, true, uri, workspace) {
         let source = if &loc.uri == uri {
-            Some(doc)
+            doc
         } else {
-            workspace.get(&loc.uri)
+            workspace.get(&loc.uri)?
         };
-        let original = source.and_then(|d| {
-            d.text()
-                .get(d.offset_of(loc.range.start)..d.offset_of(loc.range.end))
-        });
-        let (tick, body) = original.map_or(("", ""), |o| {
-            o.strip_prefix('`').map_or(("", o), |body| ("`", body))
-        });
-        let new_text = if body == qualified_old && body != old_name {
-            format!("{tick}{ns_prefix}{new_name}")
-        } else {
-            format!("{tick}{new_name}")
-        };
-        changes.entry(loc.uri.clone()).or_default().push(TextEdit {
+        let text =
+            &source.text()[source.offset_of(loc.range.start)..source.offset_of(loc.range.end)];
+        let prefix = text.strip_suffix(old.as_str()).unwrap_or_default();
+        changes.entry(loc.uri).or_default().push(TextEdit {
             range: loc.range,
-            new_text,
+            new_text: format!("{prefix}{new_name}"),
         });
     }
-
-    Some(WorkspaceEdit {
+    (!changes.is_empty()).then(|| WorkspaceEdit {
         changes: Some(changes),
         ..Default::default()
     })
@@ -124,7 +94,7 @@ mod tests {
             // backtick symbol keeps its tick and namespace
             (
                 "\\d .cache\ncache:1\nf:{`.cache.cache upsert (1;2)}",
-                &["tbl", "`.cache.tbl"],
+                &["tbl", ".cache.tbl"],
             ),
             // dotted reference keeps its namespace prefix
             (
