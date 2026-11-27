@@ -45,4 +45,5 @@ Check behaviour against a real q 4.1 (`q script.q -q`) before changing any of th
   - server: `CASES` in goto-def, references and hover, `UNRESOLVED` in diagnostics.
 - Server tables mark positions inline via `workspace_index::tests::markers`: `«` is the cursor and each `»` an expected site, e.g. `"fn:99;\nf:{[»fn] «fn+1}"`. Other helpers: `workspace_index::tests::{uri, doc, index}`, `goto_def::tests::locations`.
 - `crates/server/tests/lsp.rs` runs the real binary over stdio: document sync, indexing, file watching, config, root detection, and request routing. Cross-file and config behaviour is tested there, not repeated in unit tests.
+- `crates/parser/tests/q_oracle.rs` compares every fixture statement's tree with a real q's `parse` (skipped without `$Q_BIN` / `~/.kx/bin/q`). Add q-checked expressions to `tests/data/q_oracle.q`; known gaps live in `q_oracle_known.txt`, and stale entries fail the test. `parse` proves structure only: check what a form does with `value` before describing it.
 - Coverage: `rm -rf target/llvm-cov-target && cargo llvm-cov --workspace --summary-only`. Stale builds in that directory skew the results badly, so always clear it first.
