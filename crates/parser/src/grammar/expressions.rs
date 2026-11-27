@@ -7,6 +7,12 @@
 //! - noun expr: application (`f x`)
 //! - verb expr: an error — q has no prefix verbs; write `neg x` or `(+/)x`
 //!
+//! An expression ending in a verb with nothing to its right (`f+`, `+/`) is
+//! *verb-valued*. Applied to one, or as the right operand of a verb, q builds
+//! a composition instead (`g f+`, `x+y+`), except as the value of an
+//! assignment (`f:+/`, `f::+`). Brackets and parentheses delimit their own
+//! expressions, so `f[g+]` and `g (x+)` are plain application.
+//!
 //! The only prefix forms are `'x` (signal) and `:x` (return).
 
 use crate::parser::{CompletedMarker, Parser};
@@ -14,15 +20,14 @@ use crate::parser::{CompletedMarker, Parser};
 #[allow(clippy::enum_glob_use)]
 use crate::syntax_kind::SyntaxKind::{self, *};
 
-/// Parse an expression (empty before `;`: `(;1)`, `f[;1]`).
-pub fn expr(p: &mut Parser) {
+/// Parse an expression (empty before `;`: `(;1)`, `f[;1]`), returning
+/// whether it is verb-valued.
+pub fn expr(p: &mut Parser) -> bool {
     if p.at(Semi) {
-        return;
+        return false;
     }
     let start = p.token_index();
-    if let Some((lhs, verb)) = term(p) {
-        rest(p, lhs, verb, start);
-    }
+    term(p).is_some_and(|(lhs, verb)| rest(p, lhs, verb, start))
 }
 
 /// Parse an expression wrapped in an `ExprStmt` (list entries, arguments,
@@ -50,8 +55,8 @@ pub(crate) fn with_qsql_flags<T>(
 }
 
 /// Continue an expression after its first term `lhs` (a verb if `verb`),
-/// which began at token index `start`.
-fn rest(p: &mut Parser, lhs: CompletedMarker, verb: bool, start: usize) {
+/// which began at token index `start`. Returns whether it is verb-valued.
+fn rest(p: &mut Parser, lhs: CompletedMarker, verb: bool, start: usize) -> bool {
     // A `\cmd` on the same line as an expression (`f\x`) is most likely a
     // mistyped scan; system commands only start a line.
     while p.at(SystemCmd) && !at_boundary(p) {
@@ -62,37 +67,45 @@ fn rest(p: &mut Parser, lhs: CompletedMarker, verb: bool, start: usize) {
         ));
     }
     if at_boundary(p) {
-        return;
+        return verb;
     }
     let m = lhs.precede(p);
-    let kind = if verb {
+    let (kind, verb_valued) = if verb {
         p.error_since("q has no prefix verbs: write `(f) x` or `f[x]`", start);
         expr(p);
-        ApplyExpr
+        (ApplyExpr, false)
     } else if at_primitive(p) {
+        let assign = p.at(Colon) || p.at(ColonColon);
         p.bump();
-        infix(p)
+        infix(p, assign)
     } else {
         let start = p.token_index();
         let (t, t_verb) = term(p).expect("a term follows when not at a boundary");
         if t_verb {
-            infix(p)
+            infix(p, false)
+        } else if rest(p, t, false, start) {
+            (Composition, true)
         } else {
-            rest(p, t, false, start);
-            ApplyExpr
+            (ApplyExpr, false)
         }
     };
     m.complete(p, kind);
+    verb_valued
 }
 
 /// After `noun verb`: the right operand, or a projection (`x+`) without one.
-fn infix(p: &mut Parser) -> SyntaxKind {
+/// A verb-valued right operand composes, unless the verb assigns.
+fn infix(p: &mut Parser, assign: bool) -> (SyntaxKind, bool) {
     if at_boundary(p) {
-        InfixProjection
-    } else {
-        expr(p);
-        BinExpr
+        return (InfixProjection, true);
     }
+    let verb_valued = expr(p);
+    let kind = if verb_valued && !assign {
+        Composition
+    } else {
+        BinExpr
+    };
+    (kind, verb_valued)
 }
 
 /// An atom with its `[args]` and adverbs, and whether it is a verb.

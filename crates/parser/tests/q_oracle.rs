@@ -127,7 +127,16 @@ fn to_q(n: &SyntaxNode) -> Option<String> {
                 None => format!("({verb};{lhs})"),
             }
         }
-        K::ApplyExpr => format!("({};{})", to_q(&kids[0])?, to_q(&kids[1])?),
+        K::ApplyExpr => format!("({};{})", function(&kids[0])?, to_q(&kids[1])?),
+        // `g f+` → `(';g;f+)`; `x+y+` → `(';(+;x);y+)`.
+        K::Composition => {
+            let left = match (kids.len(), first()) {
+                (2, None) => function(&kids[0])?,
+                (2, Some(verb)) => format!("({};{})", g(verb), to_q(&kids[0])?),
+                _ => format!("({};{})", to_q(&kids[1])?, to_q(&kids[0])?),
+            };
+            format!("({};{left};{})", g("'"), to_q(kids.last()?)?)
+        }
         K::AdverbExpr => format!("({};{})", g(first()?), to_q(&kids[0])?),
         K::IndexExpr => {
             let mut args = entries(&kids[1])?;
@@ -147,6 +156,19 @@ fn to_q(n: &SyntaxNode) -> Option<String> {
         K::Lambda => flat(n),
         _ => return None,
     })
+}
+
+/// `f` in function position: q writes a parenthesised primitive applied
+/// to one argument in its monadic form (`(-) x` → `(-:;x)`).
+fn function(f: &SyntaxNode) -> Option<String> {
+    let verb = (f.kind() == K::ParenExpr)
+        .then(|| f.first_child()?.first_child())
+        .flatten()
+        .filter(|v| v.kind() == K::VerbExpr);
+    match verb.and_then(|v| tokens(&v).first().cloned()) {
+        Some(t) if !t.text().ends_with(':') => Some(g(&format!("{}:", t.text()))),
+        _ => to_q(f),
+    }
 }
 
 /// Statements to check: top-level ones and every lambda-body statement.

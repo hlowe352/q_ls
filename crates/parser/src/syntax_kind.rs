@@ -57,6 +57,9 @@ syntax_kinds! {
         VerbExpr,
         /// `f x` — application by juxtaposition.
         ApplyExpr,
+        /// `g f+`, `x+y+` — composition: application to, or a verb's right
+        /// operand being, an expression that ends in a verb.
+        Composition,
         /// `expr adverb` — adverb / iterator application.
         AdverbExpr,
         /// `(expr)` — parenthesised expression.

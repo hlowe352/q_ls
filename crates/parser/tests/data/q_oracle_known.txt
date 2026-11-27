@@ -1,24 +1,9 @@
 # Statements whose parse tree differs from q 4.1 `parse`, by exact (whitespace-collapsed) text.
 # Remove an entry once it matches; the test fails on stale entries.
 
-# By design: q turns a run ending in a verb into a composition `(';f;g)`;
-# our tree keeps the application/projection structure.
-(.Q.dd[db;] ,[;tname]@) each files
-0|+
-@[`.;t;@[;`sym;`g#]0#]
-@[updateprocs ("****";enlist",")0:;file; {.lg.e[`procfile;"failed to read process file ",(string x)," : ",y]}[file]]
-Vex:not 0h~type key`.@
-checkPathsCommon[; not in[colName;]@; " ", string[colName], " not"]
-f (+) g + :
-g f+
-g: @[(1b;)@-9!;;(0b;)@] each hd,'m
-if[.replay.segmentedmode; .replay.replaydate:first l:"D"$$[first[r] like "*.gz";-9_-17#;-6_-14#] each string r; if[not 1=count distinct l;.lg.e[`replay;m:"Cannot replay logs from different dates in segmented mode!"];'m]; if[.replay.clean;.replay.cleanhdb .replay.replaydate] ]
-if[any files like "par.txt"; :raze (.z.s[;tname] hsym@) each `$read0 .Q.dd[db;`par.txt]]
-if[not ()~files:key tdir; (hdel .Q.dd[tdir;]@) each files,`]
-if[not .replay.segmentedmode; .replay.replaydate:"D"$$[.replay.zipped;-3_-13#;-10#] string logfile; if[.replay.clean;.replay.cleanhdb .replay.replaydate] ]
-if[not min(`time`sym~2#key flip value@)each t;'`timesym]
-missing: ((), paths) where (check key@) each (), paths
-tyargs:$[10h=abs type args 0;`$1#;]args 0
+# By design: q parses `f::+` as a composition, but evaluating it assigns `f`
+# (checked with `value`), so we keep it an assignment for name resolution.
+f::+
 
 # Converter limit: a list of two char atoms collapses to a string in q.
 '"a"
