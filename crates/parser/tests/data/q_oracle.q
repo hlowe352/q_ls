@@ -163,3 +163,25 @@ f/ x
 (f/) x
 (f/)[x;y]
 f/:x
+/ Composition: an argument or right operand that ends in a verb composes.
+g f+
+x+y+
+f g h+
+x in +
+x,:+
+g @+
+x y+
+f x:y+
+neg x+
+enlist f+
+g x f/
+g x each
+(f g+;1)
+f[g+]
+g (+)
+g (x+)
+f:+/
+a:b+
+f::+
+x f/
+(-) x

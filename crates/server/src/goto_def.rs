@@ -81,6 +81,7 @@ pub mod tests {
         "f:{»a,:1 2; a,:3 4; «a}",                          // ...only the first one
         "»g:1\nf:{[x] if[x in «g;:()]; g,:enlist x}",       // `,:` amends an existing global
         "init:{»n+::1};\nuse:«n",                           // `+::` in lambda is global
+        "init:{»op::+};\nuse:«op",                          // verb-valued `::` still assigns
     ];
 
     #[test]
