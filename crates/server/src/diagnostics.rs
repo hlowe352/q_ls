@@ -188,6 +188,15 @@ mod tests {
     }
 
     #[test]
+    fn unresolved_flags_outer_local_used_in_inner_lambda() {
+        let warnings = unresolved_for("f:{t:1; g:{t+1}; g[]}");
+        assert!(
+            warnings.iter().any(|w| w.contains("`t`")),
+            "got: {warnings:?}"
+        );
+    }
+
+    #[test]
     fn unresolved_skips_builtins() {
         let src = "f:{[x] count x}";
         let warnings = unresolved_for(src);

@@ -88,6 +88,17 @@ pub mod tests {
     }
 
     #[test]
+    fn no_closures_inner_lambda_sees_global_not_outer_param() {
+        // q evaluates `{[a] g:{a+1}; g[]} 1` to 101 with global `a:100`.
+        let src = "a:100;\nf:{[a] g:{a+1}; g[]}";
+        let cursor = src.find("a+1").unwrap();
+        assert_eq!(def_offset(src, cursor, "a"), Some(0));
+        // Without a global, the outer param is not visible either.
+        let src = "f:{[a] g:{a+1}; g[]}";
+        assert_eq!(def_offset(src, src.find("a+1").unwrap(), "a"), None);
+    }
+
+    #[test]
     fn local_in_other_function_is_not_visible() {
         let src = "f:{[x] fn:99; x};\ng:{[y] fn+y}";
         let cursor = src.find("fn+y").unwrap();

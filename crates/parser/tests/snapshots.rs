@@ -70,6 +70,51 @@ fn statement_boundaries() {
     );
 }
 
+/// Non-trivia source text: what the parser treats as code.
+fn code(src: &str) -> String {
+    let p = parse(src);
+    let root = p.syntax();
+    let toks = root
+        .descendants_with_tokens()
+        .filter_map(NodeOrToken::into_token);
+    toks.filter(|t| !t.kind().is_trivia())
+        .map(|t| t.text().to_string())
+        .collect()
+}
+
+#[test]
+fn script_terminator() {
+    // Each case checked against q 4.1: a column-0 `\` line outside a block
+    // comment ends the script; `/`…`\` blocks, indented `\`, and `\ foo` don't.
+    let cases: &[(&str, &[&str], &[&str])] = &[
+        ("a:1\n\\\n/note\nb:2\n", &["a:1"], &["b:2", "note"]),
+        (
+            "a:1\n\\\nb:2\n/\nc:3\n\\\nd:4\n",
+            &["a:1"],
+            &["b:2", "c:3", "d:4"],
+        ),
+        ("a:1\n\\   \nb:2\n", &["a:1"], &["b:2"]),
+        ("a:1\n/\nb:2\n\\\nc:3\n", &["a:1", "c:3"], &["b:2"]),
+        ("a:1\n\t\\\nb:2\n", &["a:1", "b:2"], &[]),
+        ("a:1\n\\ foo\nb:2\n", &["a:1", "b:2"], &[]),
+    ];
+    for (src, live, dead) in cases {
+        let code = code(src);
+        for s in *live {
+            assert!(
+                code.contains(s),
+                "{src:?}: {s} should be code, got {code:?}"
+            );
+        }
+        for s in *dead {
+            assert!(
+                !code.contains(s),
+                "{src:?}: {s} should be ignored, got {code:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn qsql_clause_lists() {
     use q_parser::SyntaxKind;
@@ -137,6 +182,9 @@ const SHAPES: &[(&str, &[&str], &[&str])] = &[
     ("a in b", &["BinExpr"], &[]),
     ("1 within 2", &["BinExpr"], &[]),
     ("t lj u", &["BinExpr"], &[]),
+    ("2 cut x", &["BinExpr"], &["ApplyExpr"]),
+    ("f over x", &["BinExpr"], &["ApplyExpr"]),
+    ("`t set x", &["BinExpr"], &["ApplyExpr"]),
     ("mmu", &["IdentExpr"], &[]),
     ("select[5] col from t", &["LimitClause"], &[]),
     ("select[5;>price] col from t", &["LimitClause", "OrderClause"], &[]),
@@ -144,6 +192,7 @@ const SHAPES: &[(&str, &[&str], &[&str])] = &[
     ("select a,b from t where c>0", &["WhereClause"], &[]),
     ("select sum a by b from t", &["ByClause"], &[]),
     ("delete from t where a>0", &["DeleteExpr", "WhereClause"], &[]),
+    ("update s:sum v by g from t", &["UpdateExpr", "ByClause"], &[]),
     ("t:select a from t", &["SelectExpr", "BinExpr"], &[]),
     ("0!select a from t", &["SelectExpr"], &[]),
     ("select a:x, b:(x,y) from t", &["SelectExpr"], &[]),
@@ -372,16 +421,19 @@ const SNAPSHOTS: &[(&str, &str)] = &[
         Float "2.0"
       LiteralExpr
         Float "3.0""#),
-    // symbol_vector
-    ("`a `b `c", r#"Root
+    // symbol_list: adjacent backtick symbols are one literal
+    ("`a`b`c", r#"Root
   ExprStmt
-    VectorExpr
+    LiteralExpr
+      Symbol "`a`b`c""#),
+    // symbols_with_spaces: application, not a list (q: `` `a `b `` is 'type)
+    ("`a `b", r#"Root
+  ExprStmt
+    ApplyExpr
       LiteralExpr
         Symbol "`a"
       LiteralExpr
-        Symbol "`b"
-      LiteralExpr
-        Symbol "`c""#),
+        Symbol "`b""#),
     // boolean_vector
     ("0b 1b 0b", r#"Root
   ExprStmt

@@ -5,6 +5,8 @@
 //! unresolved-reference diagnostic, and completion.
 //!
 //! Scoping rules (q):
+//! - q has no closures: a lambda sees only its own params/locals and
+//!   globals, never the params or locals of an enclosing lambda.
 //! - Lambda parameters are visible only inside that lambda.
 //! - Implicit `x`/`y`/`z` exist when a lambda has no `[...]` param list.
 //! - Plain `name:` inside a lambda is a local visible only in that lambda.
@@ -26,8 +28,7 @@ pub struct SymTable {
     /// Global defs keyed by name. Each entry is a list of definition byte
     /// offsets, sorted ascending.
     globals: HashMap<SmolStr, Vec<u32>>,
-    /// Every lambda in the file, in DFS order. `parent` indexes back into
-    /// this vec.
+    /// Every lambda in the file, in DFS order.
     lambdas: Vec<LambdaScope>,
     /// All identifier texts seen (idents, dotted idents, namespaces).
     /// Used to feed completion without re-walking the tree.
@@ -40,7 +41,6 @@ pub struct SymTable {
 
 struct LambdaScope {
     range: TextRange,
-    parent: Option<usize>,
     has_param_list: bool,
     /// Lambda parameters, in source order.
     params: Vec<(SmolStr, u32)>,
@@ -104,7 +104,6 @@ impl SymTable {
 
             if kind == SyntaxKind::Lambda {
                 let scope_idx = t.lambdas.len();
-                let parent = scope_stack.last().copied();
                 let plist = node.children().find(|c| c.kind() == SyntaxKind::ParamList);
                 let params = plist.iter().flat_map(|pl| {
                     pl.children_with_tokens()
@@ -114,7 +113,6 @@ impl SymTable {
                 });
                 t.lambdas.push(LambdaScope {
                     range: node.text_range(),
-                    parent,
                     has_param_list: plist.is_some(),
                     params: params.collect(),
                     locals: Vec::new(),
@@ -253,10 +251,10 @@ impl SymTable {
             .find(|&i| off < u32::from(self.lambdas[i].range.end()))
     }
 
-    /// The definition sites of `name` in the innermost scope that binds it
-    /// at `cursor`: lambda params, then locals, then implicit `x`/`y`/`z`
-    /// (only without a `[...]` list), climbing out through enclosing lambdas;
-    /// finally globals, preferring the `\d`-namespace-qualified form.
+    /// The definition sites of `name` visible at `cursor`: the innermost
+    /// lambda's params, then its locals, then implicit `x`/`y`/`z` (only
+    /// without a `[...]` list); otherwise globals, preferring the
+    /// `\d`-namespace-qualified form. Enclosing lambdas are not consulted.
     fn binding(&self, cursor: usize, name: &str) -> Option<Binding<'_>> {
         let named = |list: &[(SmolStr, u32)]| -> Vec<u32> {
             list.iter()
@@ -264,8 +262,7 @@ impl SymTable {
                 .map(|(_, o)| *o)
                 .collect()
         };
-        let mut current = self.innermost_lambda(cursor);
-        while let Some(idx) = current {
+        if let Some(idx) = self.innermost_lambda(cursor) {
             let scope = &self.lambdas[idx];
             let params = named(&scope.params);
             if !params.is_empty() {
@@ -279,7 +276,6 @@ impl SymTable {
                 let start = scope.range.start().into();
                 return Some(Binding::Param(start, vec![start]));
             }
-            current = scope.parent;
         }
 
         // Inside a namespace prefer the qualified global over a root-level

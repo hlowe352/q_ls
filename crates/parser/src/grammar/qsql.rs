@@ -14,15 +14,17 @@ pub fn at_qsql_keyword(p: &Parser) -> bool {
 
 /// Parse a qSQL expression. Call only when [`at_qsql_keyword`] is true.
 ///
-/// `select[n;>col]` limits are select-only; `distinct` and `by` are
-/// select/exec-only; every form takes optional `from` and `where`.
+/// `select[n;>col]` limits are select-only, `distinct` is select/exec-only,
+/// `by` is valid everywhere but `delete`; every form takes optional `from`
+/// and `where`.
 pub fn parse_qsql(p: &mut Parser) -> CompletedMarker {
-    let (kind, has_by) = match p.current_text() {
-        Some("select") => (SyntaxKind::SelectExpr, true),
-        Some("exec") => (SyntaxKind::ExecExpr, true),
-        Some("update") => (SyntaxKind::UpdateExpr, false),
-        _ => (SyntaxKind::DeleteExpr, false),
+    let kind = match p.current_text() {
+        Some("select") => SyntaxKind::SelectExpr,
+        Some("exec") => SyntaxKind::ExecExpr,
+        Some("update") => SyntaxKind::UpdateExpr,
+        _ => SyntaxKind::DeleteExpr,
     };
+    let has_by = kind != SyntaxKind::DeleteExpr;
     let m = p.start();
     p.bump(); // keyword
 
@@ -43,7 +45,7 @@ pub fn parse_qsql(p: &mut Parser) -> CompletedMarker {
         lm.complete(p, SyntaxKind::LimitClause);
     }
 
-    if has_by && at_kw(p, "distinct") {
+    if matches!(kind, SyntaxKind::SelectExpr | SyntaxKind::ExecExpr) && at_kw(p, "distinct") {
         p.bump();
     }
 

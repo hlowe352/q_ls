@@ -20,15 +20,15 @@ pub enum Token {
 
     /// Integer literal (long/int/short/byte suffixes, hex, special nulls/infs)
     ///
-    /// Covers: `42`, `42i`, `42j`, `42h`, `0x2A`, `0Ni`, `0Wi`, `-0Wi`,
-    ///         `0Nj`, `0Wj`, `0Nh`, `0Wh`, `0x[0-9A-Fa-f]{1,3}`
+    /// Covers: `42`, `42i`, `42j`, `42h`, byte atoms `0x2A`, `0Ni`, `0Wi`,
+    ///         `0Nj`, `0Wj`, `0Nh`, `0Wh`
     ///
     /// Note: negative sign is NOT included here; the parser handles unary minus.
     /// Priority 3 keeps hex above the plain decimal regex (default priority 2).
-    #[regex(r"0x[0-9A-Fa-f]{1,3}", priority = 4)] // hex (1-3 digits)
-    #[regex(r"0N[ijhp]", priority = 5)] // typed nulls (guid/timespan/datetime/minute/second handled separately)
+    #[regex(r"0x[0-9A-Fa-f]{1,2}", priority = 4)] // byte atom (1-2 hex digits)
+    #[regex(r"0N[ijh]", priority = 5)] // typed nulls (other types have their own variants)
     #[regex(r"0N", priority = 4)] // bare long null `0N` (longer typed patterns take priority)
-    #[regex(r"0W[ijhp]", priority = 5)] // typed infs
+    #[regex(r"0W[ijh]", priority = 5)] // typed infs
     #[regex(r"[0-9]+[ijh]?")] // plain decimal, optional suffix
     Integer,
 
@@ -46,7 +46,8 @@ pub enum Token {
     // integer-form real: `3e`, `100e` (longest-match ensures `3e10` still hits scientific)
     Float,
 
-    /// Timestamp literal: `2024.01.15D12:30:00.000000000`
+    /// Timestamp literal: `2024.01.15D12:30:00.000000000`, `0Np`, `0Wp`
+    #[regex(r"0[NW]p", priority = 6)]
     #[regex(r"[12][0-9]{3}\.(0[1-9]|1[0-2])\.(0[1-9]|[12][0-9]|3[01])D[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?")]
     Timestamp,
 
@@ -89,8 +90,8 @@ pub enum Token {
     #[regex(r"[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]+")]
     Time,
 
-    /// Byte list literal: `0xABCD`, `0x0011...` (4+ hex chars)
-    #[regex(r"0x[0-9A-Fa-f]{4,}", priority = 6)]
+    /// Byte list literal: `0x2A3`, `0xABCD` (3+ hex digits; 2 per byte)
+    #[regex(r"0x[0-9A-Fa-f]{3,}", priority = 6)]
     ByteList,
 
     /// String literal: `"hello"`, with escape sequences
@@ -101,9 +102,10 @@ pub enum Token {
     #[regex(r"`:[^\s;)\]},]*", priority = 4)]
     FileSymbol,
 
-    /// Symbol literal: `` `sym ``, `` `a.b ``, `` ` `` (null symbol)
-    #[regex(r"`[a-zA-Z_.][a-zA-Z0-9_.]*", priority = 3)]
-    #[token("`")]
+    /// Symbol literal or symbol list: `` `sym ``, `` `1 ``, `` `a:b ``, `` ` ``
+    /// (null), `` `a`b`c `` — adjacent backtick symbols are one literal in q.
+    /// A lone `` `:path `` with `/` etc. is a [`Token::FileSymbol`].
+    #[regex(r"(`[a-zA-Z0-9_.:]*)+", priority = 3)]
     Symbol,
 
     // -----------------------------------------------------------------------
@@ -316,6 +318,12 @@ mod tests {
     ("`hello", "Symbol"),
     ("`", "Symbol"),
     ("`a.b", "Symbol"),
+    ("`a`b`c", "Symbol"),
+    ("``a", "Symbol"),
+    ("`a `b", "Symbol Symbol"),
+    ("`1", "Symbol"),
+    ("`a:b", "Symbol"),
+    ("`a32`2`:ad", "Symbol"),
     ("trade", "Ident"),
     ("x1", "Ident"),
     (".q.func", "DottedIdent"),
@@ -369,14 +377,14 @@ mod tests {
     ("0N", "Integer"),
     ("0Nj", "Integer"),
     ("0Nn", "Timespan"),
-    ("0Np", "Integer"),
+    ("0Np", "Timestamp"),
     ("0Wm", "Month"),
     ("0Wg", "Guid"),
     ("0Wn", "Timespan"),
     ("0Wz", "Datetime"),
     ("0Wu", "Minute"),
     ("0Wv", "Second"),
-    ("0Wp", "Integer"),
+    ("0Wp", "Timestamp"),
     ("#!/usr/bin/env q", "Shebang"),
     ("# !x", "Hash Bang Ident"),
     ("2024.01m", "Month"),
@@ -393,6 +401,7 @@ mod tests {
     ("0xABCD", "ByteList"),
     ("0x0011223344", "ByteList"),
     ("0xAB", "Integer"),
+    ("0x2A3", "ByteList"),
     ("/\nthis is\nblock comment\n\\\n", "CommentBlock"),
     ("/\nuntil end of file", "CommentBlock"),
     ("k)1+2", "DslLine"),

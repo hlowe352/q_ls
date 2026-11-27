@@ -138,7 +138,7 @@ fn atom(p: &mut Parser) -> Option<CompletedMarker> {
     }
     let m = p.start();
     let node = match kind {
-        k if k == String || is_scalar_literal(k) => {
+        k if matches!(k, String | Symbol) || is_scalar_literal(k) => {
             p.bump();
             LiteralExpr
         }
@@ -387,6 +387,7 @@ fn can_juxtapose(p: &Parser) -> bool {
         || matches!(
             kind,
             String
+                | Symbol
                 | FileSymbol
                 | Ident
                 | DottedIdent
@@ -403,15 +404,15 @@ fn can_juxtapose(p: &Parser) -> bool {
     can_start_expr && !p.has_preceding_newline() && !at_clause_boundary
 }
 
-/// Scalar literals that can appear in a space-separated vector (`1 2 3`,
-/// `` `a `b `c ``, `0b 1b`). Strings are literals but never vector elements.
+/// Literals that form a vector when space-separated (`1 2 3`, `0b 1b`).
+/// Strings and symbols are literals but not vector elements: `` `a`b `` is
+/// one token, and `` `a `b `` is application.
 fn is_scalar_literal(kind: SyntaxKind) -> bool {
     matches!(
         kind,
         Integer
             | Float
             | Boolean
-            | Symbol
             | Date
             | Month
             | Guid
