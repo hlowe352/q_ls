@@ -1,10 +1,6 @@
 # Statements whose parse tree differs from q 4.1 `parse`, by exact (whitespace-collapsed) text.
 # Remove an entry once it matches; the test fails on stale entries.
 
-# By design: q parses `f::+` as a composition, but evaluating it assigns `f`
-# (checked with `value`), so we keep it an assignment for name resolution.
-f::+
-
 # Not a parse rule: q rejects duplicate qSQL column names (`sym` twice).
 stats:{ select sym, avgPx:avg price, minPx:min price, maxPx:max price, totalVol:sum size, numTrades:count i by sym from trade }
 

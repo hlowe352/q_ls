@@ -237,7 +237,7 @@ const SHAPES: &[(&str, &[&str], &[&str])] = &[
     ("x,:+", &["Composition"], &["BinExpr"]),
     ("f x:y+", &["Composition", "BinExpr"], &[]),
     ("f:+/", &["BinExpr"], &["Composition"]),
-    ("f::+", &["BinExpr"], &["Composition"]),
+    ("f::+", &["Composition"], &["BinExpr"]),
     ("g (x+)", &["ApplyExpr"], &["Composition"]),
     ("f[g+]", &["IndexExpr"], &["Composition"]),
     ("'`err", &["SignalExpr"], &[]),
