@@ -17,7 +17,7 @@ cargo run -p q-parser --example print_tree -- file.q   # inspect a parse tree
 # Architecture
 
 - `q-lexer` (logos) → `q-parser` (event-based parser, lossless rowan CST) → `q-ls` (`tower-lsp-server` binary).
-- Parser: `Parser::new` lexes with line context (comments, the `\` terminator and `k)`/`p)` lines need it, so `lex` recognises them before logos sees the text), then merges negative literals; grammar rules emit `Event`s; `sink::build` turns them into a rowan `GreenNode`.
+- Parser: `Parser::new` lexes with line context (comments, the `\` terminator and `k)`/`p)` lines need it, so `lex` recognises them before logos sees the text, as it does a number's `-` sign); grammar rules emit `Event`s; `sink::build` turns them into a rowan `GreenNode`.
 - Server: `WorkspaceIndex` is the only document store, holding open documents (editor text, never overwritten from disk while open) and every indexed `.q` file. Indexing walks the git root with the `ignore` crate, so `.gitignore`/`.ignore` apply; this repo's `.ignore` excludes the parser fixtures.
 - `binder::Bindings` (built per parse) is the only place names get meaning: every name token's role (use, param, declare, amend) and symbol (a lambda local, or one qualified global). Features look up the cursor's name with `name_at` and read it; they never classify tokens themselves. The cursor's CST token is `Document::token_at`. Shared CST helpers live in `syntax.rs`.
 - Offsets: rowan `TextSize`/`u32` in the CST and for stored definition sites; `usize` byte offsets in `Document`, `ParseError` and feature code; LSP `Position` (UTF-16) only via `Document::offset_of`/`position_of`.

@@ -111,7 +111,8 @@ impl CompletedMarker {
 /// - a column-0 `/` line opens a block comment closed by a column-0 `\` line;
 /// - outside one, a column-0 `\` line ends the script;
 /// - a `/` at line start or after whitespace comments to end of line;
-/// - `k)` / `p)` at line start make the rest of the line a `DslLine`.
+/// - `k)` / `p)` at line start make the rest of the line a `DslLine`;
+/// - a `-` is a number's sign unless it follows a noun.
 fn lex(source: &str) -> Vec<LexedToken> {
     let mut tokens = Vec::new();
     let mut lexer = q_lexer::Token::lexer(source);
@@ -141,7 +142,25 @@ fn lex(source: &str) -> Vec<LexedToken> {
             lexer.bump(start - pos + len);
         } else if let Some(result) = lexer.next() {
             let kind = result.map_or(SyntaxKind::Error, SyntaxKind::from_token);
-            tokens.push(LexedToken::new(kind, lexer.slice()));
+            let span = lexer.span();
+            // `-` right before a number or time is its sign unless it follows
+            // a noun (`x-1`, `f[a]-1` subtract; `x -1`, `x*-1` are literals).
+            // q cannot negate dates or guids.
+            let sign = is_scalar_literal(kind)
+                && !matches!(kind, SyntaxKind::Date | SyntaxKind::Guid)
+                && tokens.last().is_some_and(|t| t.kind == SyntaxKind::Minus)
+                && !tokens
+                    .iter()
+                    .rev()
+                    .nth(1)
+                    .is_some_and(|t| ends_noun(t.kind));
+            if sign {
+                tokens.pop();
+            }
+            tokens.push(LexedToken::new(
+                kind,
+                &source[span.start - usize::from(sign)..span.end],
+            ));
         } else {
             return tokens;
         }
@@ -159,26 +178,6 @@ fn block_comment_len(rest: &str) -> usize {
         len += line.len();
     }
     rest.len()
-}
-
-/// Merge `-` directly followed by a number or time (not a date or guid,
-/// which q cannot negate) into a negative literal unless
-/// it directly follows a noun (`x-1`, `f[a]-1`, `1-1` are subtraction;
-/// `x -1`, `x*-1`, `x:-1` are negative literals).
-fn merge_negative_literals(tokens: &mut Vec<LexedToken>) {
-    let mut i = 0;
-    while i + 1 < tokens.len() {
-        let next_kind = tokens[i + 1].kind;
-        let is_sign = tokens[i].kind == SyntaxKind::Minus
-            && is_scalar_literal(next_kind)
-            && !matches!(next_kind, SyntaxKind::Date | SyntaxKind::Guid)
-            && (i == 0 || !ends_noun(tokens[i - 1].kind));
-        if is_sign {
-            let merged = LexedToken::new(next_kind, &format!("-{}", tokens[i + 1].text));
-            tokens.splice(i..=i + 1, [merged]);
-        }
-        i += 1;
-    }
 }
 
 /// Can a token end a noun (so a following `-` is subtraction)?
@@ -220,8 +219,7 @@ impl Parser {
     /// Lex `source` and apply the token-stream fix-ups q's grammar needs.
     #[must_use]
     pub fn new(source: &str) -> Self {
-        let mut tokens = lex(source);
-        merge_negative_literals(&mut tokens);
+        let tokens = lex(source);
 
         let nt = (0..tokens.len())
             .filter(|&i| !tokens[i].kind.is_trivia())
