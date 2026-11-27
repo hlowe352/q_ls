@@ -41,8 +41,7 @@ topN:{[n]
 
 / Running stats
 stats:{
-  select sym,
-    avgPx:avg price,
+  select avgPx:avg price,
     minPx:min price,
     maxPx:max price,
     totalVol:sum size,
