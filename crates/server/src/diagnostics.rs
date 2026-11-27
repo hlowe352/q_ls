@@ -81,7 +81,8 @@ fn unindented_close_warnings(doc: &Document) -> impl Iterator<Item = Diagnostic>
 
 /// Warn on uses of a global defined neither in this file nor in the
 /// workspace, unless the config's `suppress_unresolved` names it. A
-/// namespace (`.u`) is defined once anything under it is (`.u.x`).
+/// namespace (`.u`) is defined once anything under it is (`.u.x`), and
+/// `t.c` is a column of global `t`.
 fn unresolved_reference_warnings<'a>(
     doc: &'a Document,
     workspace: &'a WorkspaceIndex,
@@ -93,9 +94,16 @@ fn unresolved_reference_warnings<'a>(
             return None;
         };
         let text = &doc.text()[name.range];
+        let defined = |q: &str| {
+            !bindings.defs(&Symbol::Global(q.into())).is_empty()
+                || workspace.resolve_global(q).is_some()
+        };
+        // `t.c` reads column `c` of global `t` (in its namespace, `.ns.t`).
+        let head = text.split_once('.').filter(|(h, _)| !h.is_empty());
+        let column_of = head.map(|(_, c)| &qualified[..qualified.len() - c.len() - 1]);
         let resolved = name.is_def()
-            || !bindings.defs(&name.symbol).is_empty()
-            || workspace.resolve_global(qualified).is_some()
+            || defined(qualified)
+            || column_of.is_some_and(defined)
             || config.suppress_unresolved.contains(text)
             || (qualified.starts_with('.') && {
                 let member = format!("{qualified}.");
@@ -150,6 +158,9 @@ mod tests {
         (".q.id .Q.dd .z.s .q .z", &[]),                    // builtin namespaces
         (".u.x:1; show .u", &[]),                           // a namespace with members
         ("show .u", &[".u"]),
+        ("t:([]age:1 2); t.age", &[]),                      // a column of global `t`
+        ("\\d .ns\nu:([]c:3 4)\nu.c", &[]),
+        ("missing.age", &["missing.age"]),
         ("use:.app.cfg", &[".app.cfg"]),
         (".app.cfg:1; use:.app.cfg", &[]),
         ("system \"d .test\"\nval:42\nshow .test.val", &[]),
