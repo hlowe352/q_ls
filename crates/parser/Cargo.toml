@@ -11,3 +11,5 @@ logos = { workspace = true }
 rowan = { workspace = true }
 smol_str = { workspace = true }
 
+[dev-dependencies]
+q-test-support = { path = "../test-support" }

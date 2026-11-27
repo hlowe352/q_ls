@@ -77,8 +77,10 @@ pub mod tests {
         "{[p] (»a;b;c):p; «a+b+c}",                         // list-pattern binding
         "\\d .cache\n»trackperf:{[id] id}\nadd:{«trackperf[1]}\n\\d .",
         "\\d .cache\n»trackperf:{[id] id}\n\\d .\nuse:«.cache.trackperf",
-        "f:{[path] »a,:raze 1 2 3; «a}",                    // `,:` introduces a local
-        "f:{»a,:1 2; a,:3 4; «a}",                          // ...only the first one
+        "f:{[path] »a,:raze 1 2 3; «a}",                    // `,:` on a non-local amends a global
+        "f:{a,:1 2; »a,:3 4; «a}",                          // ...last amend before use
+        "f:{a:0; »a,:1; «a}",                               // `,:` on a local stays local
+        "f:{[»a] a::5; «a}",                                // `::` on a param assigns the param
         "»g:1\nf:{[x] if[x in «g;:()]; g,:enlist x}",       // `,:` amends an existing global
         "init:{»n+::1};\nuse:«n",                           // `+::` in lambda is global
         "init:{op::+};\nuse:«op",                           // `op::+` composes: no definition
