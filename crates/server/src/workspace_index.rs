@@ -16,7 +16,7 @@ impl WorkspaceIndex {
     /// Add or replace `uri`, re-indexing its globals.
     pub fn insert(&mut self, uri: Uri, doc: Document) {
         self.remove(&uri);
-        for (name, offsets) in doc.sym_table().global_entries() {
+        for (name, offsets) in doc.bindings().globals() {
             let sites = self.globals.entry(SmolStr::new(name)).or_default();
             sites.extend(offsets.iter().map(|&off| (uri.clone(), off)));
         }
@@ -26,7 +26,7 @@ impl WorkspaceIndex {
     /// Remove `uri` and its globals, returning the document if present.
     pub fn remove(&mut self, uri: &Uri) -> Option<Document> {
         let doc = self.files.remove(uri)?;
-        for (name, _) in doc.sym_table().global_entries() {
+        for (name, _) in doc.bindings().globals() {
             if let Some(sites) = self.globals.get_mut(name) {
                 sites.retain(|(u, _)| u != uri);
                 if sites.is_empty() {

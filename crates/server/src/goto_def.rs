@@ -1,27 +1,31 @@
+use crate::binder::Symbol;
 use crate::document::Document;
 use crate::workspace_index::WorkspaceIndex;
 #[allow(clippy::wildcard_imports)]
 use tower_lsp_server::ls_types::*;
 
-/// Same-file lexical resolution first, then workspace-wide globals.
+/// The name's nearest definition in this file, else its definitions
+/// elsewhere in the workspace.
 pub fn goto_definition(
     doc: &Document,
     pos: Position,
     uri: &Uri,
     workspace: &WorkspaceIndex,
 ) -> Option<GotoDefinitionResponse> {
-    let offset = doc.offset_of(pos);
-    let (name, _, _) = doc.ident_at(offset)?;
+    let bindings = doc.bindings();
+    let name = bindings.name_at(doc.offset_of(pos))?;
     let location = |uri: &Uri, d: &Document, off: u32| {
         let p = d.position_of(off as usize);
         Location::new(uri.clone(), Range::new(p, p))
     };
-
-    if let Some(def) = doc.sym_table().resolve(offset, name) {
+    if let Some(def) = bindings.definition(name) {
         return Some(GotoDefinitionResponse::Scalar(location(uri, doc, def)));
     }
+    let Symbol::Global(qualified) = &name.symbol else {
+        return None;
+    };
     let locations: Vec<Location> = workspace
-        .resolve_global(name)?
+        .resolve_global(qualified)?
         .iter()
         .filter_map(|(u, off)| Some(location(u, workspace.get(u)?, *off)))
         .collect();
@@ -80,7 +84,7 @@ pub mod tests {
         "f:{[path] »a,:raze 1 2 3; «a}",                    // `,:` on a non-local amends a global
         "f:{a,:1 2; »a,:3 4; «a}",                          // ...last amend before use
         "f:{a:0; »a,:1; «a}",                               // `,:` on a local stays local
-        "f:{[»a] a::5; «a}",                                // `::` on a param assigns the param
+        "f:{[a] »a::5; «a}",                                // `::` on a param assigns the param
         "»g:1\nf:{[x] if[x in «g;:()]; g,:enlist x}",       // `,:` amends an existing global
         "init:{»n+::1};\nuse:«n",                           // `+::` in lambda is global
         "init:{op::+};\nuse:«op",                           // `op::+` composes: no definition
@@ -115,5 +119,20 @@ pub mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    #[test]
+    fn cross_file_definition_is_namespace_qualified() {
+        use crate::workspace_index::tests::index;
+        // `f` inside `\d .ns` is `.ns.f`, defined in b.q — not root `f`.
+        let idx = index(&[("b.q", "\\d .ns\nf:{x}\n\\d ."), ("c.q", "f:0")]);
+        let src = "\\d .ns\nuse:f 1";
+        let d = doc(src);
+        let pos = d.position_of(src.find("f 1").unwrap());
+        let locs = locations(goto_definition(&d, pos, &uri("a.q"), &idx));
+        assert_eq!(
+            locs.iter().map(|l| &l.uri).collect::<Vec<_>>(),
+            [&uri("b.q")]
+        );
     }
 }

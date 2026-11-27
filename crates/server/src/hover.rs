@@ -1,17 +1,13 @@
+use crate::binder::Symbol;
 use crate::builtins::{OPERATORS, lookup_doc};
 use crate::document::Document;
-use crate::syntax::has_ancestor;
 use crate::workspace_index::WorkspaceIndex;
-use q_parser::{SyntaxKind, TextSize};
+use q_parser::SyntaxKind;
 #[allow(clippy::wildcard_imports)]
 use tower_lsp_server::ls_types::*;
 
 pub fn hover(doc: &Document, pos: Position, workspace: &WorkspaceIndex) -> Option<Hover> {
     let offset = doc.offset_of(pos);
-    let text = doc.text();
-    if offset >= text.len() {
-        return None;
-    }
     let markdown = |value: String| {
         Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
@@ -21,62 +17,31 @@ pub fn hover(doc: &Document, pos: Position, workspace: &WorkspaceIndex) -> Optio
             range: None,
         })
     };
-
-    // Text after a backtick is a symbol (`` `.cache.cache ``, `` `:file ``):
-    // never a builtin or operator.
-    let after_tick = |i: usize| i > 0 && text.as_bytes()[i - 1] == b'`';
-    let Some((name, start, _)) = doc.ident_at(offset) else {
-        // No identifier under the cursor: maybe a single-char operator.
-        let op = text[offset..].chars().next()?.to_string();
-        return (!after_tick(offset))
-            .then(|| operator_doc(&op))
-            .flatten()
-            .and_then(markdown);
-    };
-    if !after_tick(start) {
-        if let Some(detail) = lookup_doc(name) {
-            return markdown(format!("**{name}** - {detail}"));
-        }
-        if let Some(doc_str) = operator_doc(name) {
-            return markdown(doc_str);
-        }
-    }
-
-    let table = doc.sym_table();
-    if table.resolve(offset, name).is_some() {
-        // Column definitions in a table constructor look like globals but
-        // are column names; don't namespace-qualify them.
-        let display = if cursor_in_table_expr(doc, offset) {
-            None
-        } else {
-            table.qualified_for(offset, name)
+    let Some(name) = doc.bindings().name_at(offset) else {
+        // Not a name: a builtin's or operator's documentation.
+        let token = doc.token_at(offset)?;
+        let text = token.text();
+        return match token.kind() {
+            SyntaxKind::Ident | SyntaxKind::DottedIdent => {
+                lookup_doc(text).and_then(|detail| markdown(format!("**{text}** - {detail}")))
+            }
+            _ => operator_doc(text).and_then(markdown),
         };
-        return markdown(match display {
-            Some(q) if q != name => format!("`{name}` → **`{q}`**"),
-            _ => format!("**`{name}`**"),
-        });
-    }
-
-    // Not resolvable in this file — try workspace globals, qualified with
-    // the active namespace.
-    let ns = table.active_ns_at(offset);
-    let lookup = if !ns.is_empty() && !name.starts_with('.') {
-        format!("{ns}.{name}")
-    } else {
-        name.to_string()
     };
-    workspace
-        .resolve_global(&lookup)
-        .and_then(|_| markdown(format!("**`{lookup}`** *(workspace)*")))
-}
-
-#[allow(clippy::cast_possible_truncation)]
-fn cursor_in_table_expr(doc: &Document, offset: usize) -> bool {
-    let root = doc.parse().syntax();
-    root.token_at_offset(TextSize::from(offset as u32))
-        .left_biased()
-        .and_then(|t| t.parent())
-        .is_some_and(|n| has_ancestor(&n, SyntaxKind::TableExpr))
+    let text = &doc.text()[name.range];
+    match &name.symbol {
+        Symbol::Local { .. } => markdown(format!("**`{text}`**")),
+        Symbol::Global(q) if !doc.bindings().defs(&name.symbol).is_empty() => {
+            markdown(if q == text {
+                format!("**`{text}`**")
+            } else {
+                format!("`{text}` → **`{q}`**")
+            })
+        }
+        Symbol::Global(q) => workspace
+            .resolve_global(q)
+            .and_then(|_| markdown(format!("**`{q}`** *(workspace)*"))),
+    }
 }
 
 fn operator_doc(op: &str) -> Option<String> {
@@ -106,9 +71,11 @@ mod tests {
         ("read0 `«:f.txt", None),                                     // `:` of a symbol isn't an operator
         ("f:1; «f", Some("**`f`**")),
         ("«ghost", None),
+        ("f:1 / «f", None),                                            // comments and strings
+        ("f:1; \"«f\"", None),                                          // hold no names
         ("\\d .cache\n«cache:1\n\\d .", Some("`cache` → **`.cache.cache`**")), // namespace-qualified
         ("\\d .cache\ncache:1\n\\d .\n`«.cache.cache upsert 2", Some("**`.cache.cache`**")),
-        ("\\d .cache\nid:0j\ncache:([«id:`u#`long$()] size:`long$())\n\\d .", Some("**`id`**")), // column, not .cache.id
+        ("\\d .cache\nid:0j\ncache:([«id:`u#`long$()] size:`long$())\n\\d .", None), // a column, not a name
         ("\\d .cache\nid:0j\nadd:{[id] «id+1}\n\\d .", Some("**`id`**")), // param shadows .cache.id
     ];
 

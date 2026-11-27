@@ -1,4 +1,5 @@
 mod backend;
+mod binder;
 #[cfg(test)]
 mod binding_oracle;
 mod builtins;
@@ -12,7 +13,6 @@ mod line_index;
 mod references;
 mod rename;
 mod semantic;
-mod sym_table;
 mod symbols;
 mod syntax;
 mod workspace_index;

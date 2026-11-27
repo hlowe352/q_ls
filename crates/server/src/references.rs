@@ -1,22 +1,19 @@
 //! `textDocument/references` — find all references to the symbol under
 //! the cursor.
 //!
-//! "Same symbol" here means: same name, same scope. Multiple rebindings of
-//! a name within one scope (`a:1; a:2; a`) are treated as one symbol with
-//! several def sites — they all get returned, and rename rewrites all of
-//! them. A name with the same spelling but a different scope (an outer
-//! global vs. a lambda parameter) is a *different* symbol and is excluded.
+//! "Same symbol" is the binder's: rebindings in one scope (`a:1; a:2; a`)
+//! are one symbol; the same spelling in another scope is another symbol.
 
-use std::collections::HashSet;
-
-use q_parser::{SyntaxKind, SyntaxNode, SyntaxToken};
+use q_parser::TextRange;
 #[allow(clippy::wildcard_imports)]
 use tower_lsp_server::ls_types::*;
 
+use crate::binder::Symbol;
 use crate::document::Document;
-use crate::syntax::{has_ancestor, in_row_context, is_assignment_lhs, tokens};
 use crate::workspace_index::WorkspaceIndex;
 
+/// Every occurrence of the symbol under the cursor: in this document, and
+/// for a global in every other workspace file.
 pub fn find_references(
     doc: &Document,
     pos: Position,
@@ -24,195 +21,32 @@ pub fn find_references(
     uri: &Uri,
     workspace: &WorkspaceIndex,
 ) -> Vec<Location> {
-    let cursor = doc.offset_of(pos);
-    let table = doc.sym_table();
-    let Some((name, _, _)) = doc.ident_at(cursor) else {
+    let Some(name) = doc.bindings().name_at(doc.offset_of(pos)) else {
         return Vec::new();
     };
-    let name = name.to_string();
-
-    // All def sites of `name` in the scope the cursor lives in. If there is
-    // none here, a workspace-known global still gets a cross-file scan.
-    let def_offsets: HashSet<u32> = table.def_offsets_for(cursor, &name).into_iter().collect();
-    let is_workspace_global = workspace.resolve_global(&name).is_some();
-    if def_offsets.is_empty() && !is_workspace_global {
-        return Vec::new();
-    }
-
-    // Qualified form (`.cache.cache` for `cache` inside `\d .cache`), used
-    // to match dotted idents and backtick symbols.
-    let qualified = table
-        .qualified_for(cursor, &name)
-        .map_or_else(|| name.clone(), |q| q.to_string());
-
-    let mut out = if def_offsets.is_empty() {
-        Vec::new()
-    } else {
-        scoped_refs(
-            doc,
-            uri,
-            &name,
-            &qualified,
-            &def_offsets,
-            include_declaration,
-        )
-    };
-
-    // Cross-file only for globals: either no local def at all (a use whose
-    // def lives elsewhere), or a local def that is in the global table
-    // (not a lambda param/local).
-    let g_name = table.global_def_offsets(&name);
-    let g_qual = table.global_def_offsets(&qualified);
-    let cursor_on_global = def_offsets.is_empty()
-        || def_offsets
-            .iter()
-            .any(|off| g_name.contains(off) || g_qual.contains(off));
-    let is_local_global = !g_name.is_empty() || !g_qual.is_empty();
-
-    if cursor_on_global && (is_local_global || is_workspace_global) {
-        if def_offsets.is_empty() {
-            out.extend(global_refs(doc, uri, &name, &qualified));
-        }
-        // O(total tokens × files) — add an inverted index if this gets slow.
-        for (other_uri, other_doc) in workspace.files().filter(|(u, _)| *u != uri) {
-            out.extend(global_refs(other_doc, other_uri, &name, &qualified));
-        }
-    }
-    out
-}
-
-fn location(doc: &Document, uri: &Uri, token: &SyntaxToken) -> Location {
-    let r = token.text_range();
-    Location::new(
-        uri.clone(),
-        Range::new(
-            doc.position_of(r.start().into()),
-            doc.position_of(r.end().into()),
-        ),
-    )
-}
-
-/// Ident/dotted-ident tokens of `doc` that could be variable references:
-/// not qSQL column names (see [`in_row_context`]) and not column
-/// definitions in a table constructor.
-fn candidate_idents(doc: &Document) -> impl Iterator<Item = SyntaxToken> {
-    tokens(&doc.parse().syntax()).filter(|t| {
-        matches!(t.kind(), SyntaxKind::Ident | SyntaxKind::DottedIdent)
-            && t.parent()
-                .is_some_and(|p| !in_row_context(&p) && !is_col_def_in_table(&p))
-    })
-}
-
-/// Is the token a plain reference expression (not a parameter declaration)?
-fn is_ident_ref(token: &SyntaxToken) -> bool {
-    token.parent().is_some_and(|p| {
-        matches!(p.kind(), SyntaxKind::IdentExpr | SyntaxKind::Namespace)
-            && !has_ancestor(&p, SyntaxKind::ParamList)
-    })
-}
-
-/// References in `doc` that resolve to one of `def_offsets`.
-fn scoped_refs(
-    doc: &Document,
-    uri: &Uri,
-    name: &str,
-    qualified: &str,
-    def_offsets: &HashSet<u32>,
-    include_declaration: bool,
-) -> Vec<Location> {
-    let table = doc.sym_table();
-    // Also match the bare last component of a qualified name, so refs from
-    // `.cache.cache` find bare `cache` uses inside `\d .cache`; resolution
-    // against `def_offsets` still enforces correctness.
-    let q = if qualified.starts_with('.') {
-        qualified
-    } else {
-        name
-    };
-    let bare = q
-        .rsplit('.')
-        .next()
-        .filter(|b| !b.is_empty() && *b != name && *b != qualified);
-
-    let idents = candidate_idents(doc).filter(|tok| {
-        let text = tok.text();
-        if text != name && text != qualified && Some(text) != bare {
-            return false;
-        }
-        let off: u32 = tok.text_range().start().into();
-        if def_offsets.contains(&off) {
-            return include_declaration;
-        }
-        is_ident_ref(tok)
-            && table
-                .resolve(off as usize, text)
-                .is_some_and(|d| def_offsets.contains(&d))
-    });
-    // Backtick symbols naming the table in in-place modification contexts.
-    let symbols = tokens(&doc.parse().syntax()).filter(|tok| {
-        tok.kind() == SyntaxKind::Symbol
-            && is_table_symbol(tok)
-            && tok
-                .text()
-                .strip_prefix('`')
-                .is_some_and(|s| s == name || s == qualified)
-    });
-    let mut out: Vec<SyntaxToken> = idents.chain(symbols).collect();
-    out.sort_by_key(|t| t.text_range().start());
-    out.iter().map(|t| location(doc, uri, t)).collect()
-}
-
-/// References in `doc` to the *global* `name`: tokens that resolve to a
-/// global def in `doc`, or don't resolve locally at all (cross-file use).
-fn global_refs(doc: &Document, uri: &Uri, name: &str, qualified: &str) -> Vec<Location> {
-    let table = doc.sym_table();
-    candidate_idents(doc)
-        .filter(|tok| {
-            let text = tok.text();
-            (text == name || text == qualified)
-                && is_ident_ref(tok)
-                && table
-                    .resolve(tok.text_range().start().into(), text)
-                    .is_none_or(|r| table.global_def_offsets(text).contains(&r))
+    let symbol = &name.symbol;
+    let others = workspace
+        .files()
+        .filter(|(u, _)| *u != uri && matches!(symbol, Symbol::Global(_)));
+    std::iter::once((uri, doc))
+        .chain(others)
+        .flat_map(|(u, d)| {
+            d.bindings()
+                .occurrences(symbol)
+                .filter(|n| include_declaration || !n.is_def())
+                .map(move |n| location(d, u, n.range))
         })
-        .map(|t| location(doc, uri, &t))
         .collect()
 }
 
-/// Is this backtick symbol naming a table in place: the table of a qSQL
-/// `from` clause, or the LHS of `upsert` / `insert`? Excludes dict
-/// indexing (`` r`id ``), assignment RHS, etc.
-fn is_table_symbol(token: &SyntaxToken) -> bool {
-    let Some(lit) = token
-        .parent()
-        .filter(|l| l.kind() == SyntaxKind::LiteralExpr)
-    else {
-        return false;
-    };
-    let Some(parent) = lit.parent() else {
-        return false;
-    };
-    match parent.kind() {
-        SyntaxKind::FromClause => true,
-        // `` `.t upsert rows `` / `` `.t insert rows ``
-        SyntaxKind::BinExpr => {
-            parent.first_child().as_ref() == Some(&lit)
-                && parent.children_with_tokens().any(|t| {
-                    t.as_token().is_some_and(|t| {
-                        t.kind() == SyntaxKind::Ident && matches!(t.text(), "upsert" | "insert")
-                    })
-                })
-        }
-        _ => false,
-    }
-}
-
-/// Is `ident_expr` the column-name LHS of `col:value` inside a table
-/// constructor (`([id:...] ...)`)? Column definitions aren't references.
-fn is_col_def_in_table(ident_expr: &SyntaxNode) -> bool {
-    ident_expr.kind() == SyntaxKind::IdentExpr
-        && is_assignment_lhs(ident_expr)
-        && has_ancestor(ident_expr, SyntaxKind::TableExpr)
+fn location(doc: &Document, uri: &Uri, range: TextRange) -> Location {
+    Location::new(
+        uri.clone(),
+        Range::new(
+            doc.position_of(range.start().into()),
+            doc.position_of(range.end().into()),
+        ),
+    )
 }
 
 #[cfg(test)]
@@ -251,10 +85,10 @@ mod tests {
         "»a:1; «»a:2; »a",
         "a:1«; b:2;",                                       // not on an identifier
         // Tables named by backtick symbols in upsert / from clauses
-        "\\d .cache\n«»cache:1\n\\d .\n»`.cache.cache upsert 2",
-        "\\d .cache\n«»cache:1\n\\d .\ndelete from »`.cache.cache where 1b",
-        "\\d .cache\n«»cache:1\n\\d .\nupdate x:now from »`.cache.cache where 1b",
-        "\\d .cache\n«»cache:1\n\\d .\ndrop:{delete from »`.cache.cache where id in x}",
+        "\\d .cache\n«»cache:1\n\\d .\n`».cache.cache upsert 2",
+        "\\d .cache\n«»cache:1\n\\d .\ndelete from `».cache.cache where 1b",
+        "\\d .cache\n«»cache:1\n\\d .\nupdate x:now from `».cache.cache where 1b",
+        "\\d .cache\n«»cache:1\n\\d .\ndrop:{delete from `».cache.cache where id in x}",
         "\\d .cache\n«»cache:1\n\\d .\nr:select id from ».cache.cache where 1b",
         // Qualified and bare forms are the same symbol
         "\\d .cache\n»cache:1\nf:{exec size from »cache}\n\\d .\nshow «».cache.cache",

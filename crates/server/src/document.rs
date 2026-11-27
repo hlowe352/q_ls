@@ -1,34 +1,34 @@
-use q_parser::Parse;
+use q_parser::{Parse, SyntaxToken, TextSize};
 #[allow(clippy::wildcard_imports)]
 use tower_lsp_server::ls_types::*;
 
+use crate::binder::Bindings;
 use crate::line_index::LineIndex;
-use crate::sym_table::SymTable;
 
 pub struct Document {
     text: String,
     version: i32,
     parse: Parse,
     line_index: LineIndex,
-    sym_table: SymTable,
+    bindings: Bindings,
 }
 
 impl Document {
     pub fn new(text: String, version: i32) -> Self {
         let parse = q_parser::parse(&text);
         let line_index = LineIndex::new(&text);
-        let sym_table = SymTable::build(&parse.syntax());
+        let bindings = Bindings::build(&parse.syntax());
         Self {
             text,
             version,
             parse,
             line_index,
-            sym_table,
+            bindings,
         }
     }
 
-    pub fn sym_table(&self) -> &SymTable {
-        &self.sym_table
+    pub fn bindings(&self) -> &Bindings {
+        &self.bindings
     }
 
     pub fn version(&self) -> i32 {
@@ -63,7 +63,7 @@ impl Document {
 
         self.version = version;
         self.parse = q_parser::parse(&self.text);
-        self.sym_table = SymTable::build(&self.parse.syntax());
+        self.bindings = Bindings::build(&self.parse.syntax());
     }
 
     pub fn offset_of(&self, pos: Position) -> usize {
@@ -74,29 +74,17 @@ impl Document {
         self.line_index.position(&self.text, offset)
     }
 
-    /// Identifier text spanning byte `offset`, plus its `[start, end)` byte
-    /// range. q identifiers are runs of `[A-Za-z0-9_.]`. Returns `None` if
-    /// `offset` falls outside any such run.
-    pub fn ident_at(&self, offset: usize) -> Option<(&str, usize, usize)> {
-        if offset > self.text.len() {
-            return None;
-        }
-        let bytes = self.text.as_bytes();
-        let mut start = offset;
-        let mut end = offset;
-        while start > 0 && is_ident_byte(bytes[start - 1]) {
-            start -= 1;
-        }
-        while end < bytes.len() && is_ident_byte(bytes[end]) {
-            end += 1;
-        }
-        if start == end {
-            return None;
-        }
-        Some((&self.text[start..end], start, end))
+    /// The non-trivia token at byte `offset`, or ending there (a cursor
+    /// just after a name).
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn token_at(&self, offset: usize) -> Option<SyntaxToken> {
+        let at = self
+            .parse
+            .syntax()
+            .token_at_offset(TextSize::from(offset as u32));
+        at.clone()
+            .right_biased()
+            .filter(|t| !t.kind().is_trivia())
+            .or_else(|| at.left_biased().filter(|t| !t.kind().is_trivia()))
     }
-}
-
-fn is_ident_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_' || b == b'.'
 }

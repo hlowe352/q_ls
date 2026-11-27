@@ -14,19 +14,15 @@ pub fn first_token(node: &SyntaxNode) -> Option<SyntaxToken> {
     tokens(node).find(|t| !t.kind().is_trivia())
 }
 
-/// Is `bin` a `BinExpr` whose operator is `:` or `::`?
-pub fn is_assignment(bin: &SyntaxNode) -> bool {
-    bin.kind() == SyntaxKind::BinExpr
-        && bin
-            .children_with_tokens()
-            .filter_map(SyntaxElement::into_token)
-            .any(|t| matches!(t.kind(), SyntaxKind::Colon | SyntaxKind::ColonColon))
-}
-
-/// Is `node` the LHS of an assignment — i.e. a definition, not a reference?
+/// Is `node` the left side of a `:` or `::` assignment?
 pub fn is_assignment_lhs(node: &SyntaxNode) -> bool {
-    node.parent()
-        .is_some_and(|p| is_assignment(&p) && p.first_child().as_ref() == Some(node))
+    node.parent().is_some_and(|p| {
+        p.kind() == SyntaxKind::BinExpr
+            && p.first_child().as_ref() == Some(node)
+            && p.children_with_tokens()
+                .filter_map(SyntaxElement::into_token)
+                .any(|t| matches!(t.kind(), SyntaxKind::Colon | SyntaxKind::ColonColon))
+    })
 }
 
 pub fn has_ancestor(node: &SyntaxNode, kind: SyntaxKind) -> bool {
@@ -41,11 +37,6 @@ fn is_qsql_stmt(kind: SyntaxKind) -> bool {
             | SyntaxKind::ExecExpr
             | SyntaxKind::DeleteExpr
     )
-}
-
-/// Is `node` inside a qSQL statement (`select`/`exec`/`update`/`delete`)?
-pub fn in_qsql(node: &SyntaxNode) -> bool {
-    node.ancestors().any(|n| is_qsql_stmt(n.kind()))
 }
 
 /// Is `node` in qSQL row context, where bare names are column names? True

@@ -7,9 +7,10 @@
 use q_parser::{SyntaxKind, SyntaxToken};
 use tower_lsp_server::ls_types::{SemanticToken, SemanticTokenModifier, SemanticTokenType};
 
+use crate::binder::{Bindings, Role};
 use crate::builtins::is_builtin;
 use crate::document::Document;
-use crate::syntax::{has_ancestor, is_assignment_lhs, tokens};
+use crate::syntax::tokens;
 
 /// Token-type legend, in the order LSP indices reference. Keep this aligned
 /// with `TYPE_*` consts below — `legend()` returns it for capability
@@ -55,7 +56,7 @@ pub fn semantic_tokens(doc: &Document) -> Vec<SemanticToken> {
     let mut prev_start: u32 = 0;
 
     for tok in tokens(&root) {
-        let Some((ty, modifiers)) = classify_token(&tok) else {
+        let Some((ty, modifiers)) = classify_token(&tok, doc.bindings()) else {
             continue;
         };
 
@@ -106,7 +107,7 @@ pub fn semantic_tokens(doc: &Document) -> Vec<SemanticToken> {
 /// Classify a single token. Returns `(type_index, modifiers_bitset)` or
 /// `None` if the token shouldn't be highlighted (whitespace, structural
 /// punctuation we leave to the editor's grammar).
-fn classify_token(tok: &SyntaxToken) -> Option<(u32, u32)> {
+fn classify_token(tok: &SyntaxToken, bindings: &Bindings) -> Option<(u32, u32)> {
     #[allow(clippy::wildcard_imports, clippy::enum_glob_use)]
     use SyntaxKind::*;
     let kind = tok.kind();
@@ -127,32 +128,30 @@ fn classify_token(tok: &SyntaxToken) -> Option<(u32, u32)> {
             Some((TYPE_OPERATOR, 0))
         }
 
-        Ident | DottedIdent => Some(classify_ident(tok)),
+        Ident | DottedIdent => Some(classify_ident(tok, bindings)),
 
         _ => None,
     }
 }
 
-fn classify_ident(tok: &SyntaxToken) -> (u32, u32) {
-    let text = tok.text();
-
-    // Built-ins (verbs, qSQL keywords, control words, namespaces).
-    if is_builtin(text) {
+fn classify_ident(tok: &SyntaxToken, bindings: &Bindings) -> (u32, u32) {
+    if is_builtin(tok.text()) {
         return (TYPE_FUNCTION, MOD_DEFAULT_LIBRARY);
     }
-
-    let Some(parent) = tok.parent() else {
-        return (TYPE_VARIABLE, 0);
-    };
-    if parent.kind() == SyntaxKind::Namespace {
-        // Bare namespace (`.app` parsed as Namespace).
-        (TYPE_NAMESPACE, 0)
-    } else if has_ancestor(&parent, SyntaxKind::ParamList) {
-        (TYPE_PARAMETER, MOD_DECLARATION)
-    } else if is_assignment_lhs(&parent) {
-        (TYPE_VARIABLE, MOD_DECLARATION)
-    } else {
-        (TYPE_VARIABLE, 0)
+    if tok
+        .parent()
+        .is_some_and(|p| p.kind() == SyntaxKind::Namespace)
+    {
+        return (TYPE_NAMESPACE, 0);
+    }
+    let role = bindings
+        .name_at(tok.text_range().start().into())
+        .filter(|n| n.range == tok.text_range())
+        .map(|n| n.role);
+    match role {
+        Some(Role::Param) => (TYPE_PARAMETER, MOD_DECLARATION),
+        Some(Role::Declare) => (TYPE_VARIABLE, MOD_DECLARATION),
+        _ => (TYPE_VARIABLE, 0),
     }
 }
 

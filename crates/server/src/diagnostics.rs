@@ -1,7 +1,7 @@
-use crate::builtins::is_builtin;
+use crate::binder::Symbol;
 use crate::config::Config;
 use crate::document::Document;
-use crate::syntax::{first_token, has_ancestor, in_qsql, is_assignment_lhs, tokens};
+use crate::syntax::tokens;
 use crate::workspace_index::WorkspaceIndex;
 use q_parser::SyntaxKind;
 #[allow(clippy::wildcard_imports)]
@@ -79,38 +79,30 @@ fn unindented_close_warnings(doc: &Document) -> impl Iterator<Item = Diagnostic>
     })
 }
 
-/// Warn on identifier references that resolve neither in this file nor in
-/// the workspace. Skips definition sites (assignment LHS, parameter
-/// lists), qSQL column names (bound by row context), q built-ins, and
-/// names in the config's `suppress_unresolved`.
+/// Warn on uses of a global defined neither in this file nor in the
+/// workspace, unless the config's `suppress_unresolved` names it.
 fn unresolved_reference_warnings<'a>(
     doc: &'a Document,
     workspace: &'a WorkspaceIndex,
     config: &'a Config,
 ) -> impl Iterator<Item = Diagnostic> + 'a {
-    let table = doc.sym_table();
-    doc.parse().syntax().descendants().filter_map(move |node| {
-        if !matches!(node.kind(), SyntaxKind::IdentExpr | SyntaxKind::Namespace)
-            || in_qsql(&node)
-            || is_assignment_lhs(&node)
-            || has_ancestor(&node, SyntaxKind::ParamList)
-        {
+    let bindings = doc.bindings();
+    bindings.names().iter().filter_map(move |name| {
+        let Symbol::Global(qualified) = &name.symbol else {
             return None;
-        }
-        let token = first_token(&node)?;
-        let name = token.text();
-        let off: usize = token.text_range().start().into();
-        let resolved = is_builtin(name)
-            || config.suppress_unresolved.contains(name)
-            || table.resolve(off, name).is_some()
-            || workspace.resolve_global(name).is_some();
+        };
+        let text = &doc.text()[name.range];
+        let resolved = name.is_def()
+            || !bindings.defs(&name.symbol).is_empty()
+            || workspace.resolve_global(qualified).is_some()
+            || config.suppress_unresolved.contains(text);
         (!resolved).then(|| {
             diagnostic(
                 doc,
-                off,
-                name.len(),
+                name.range.start().into(),
+                text.len(),
                 DiagnosticSeverity::WARNING,
-                format!("unresolved reference `{name}`"),
+                format!("unresolved reference `{text}`"),
             )
         })
     })
@@ -143,8 +135,9 @@ mod tests {
         ("f:1; f", &[]),                                    // top-level def
         ("newName: 42", &[]),                               // assignment LHS is a def
         ("f:{t:1; g:{t+1}; g[]}", &["t"]),                  // no closures
-        ("select sym, px from t", &[]),                     // qSQL columns and table
-        ("evict:{[r] select lastaccess,id,size from cache}", &[]),
+        ("select sym, px from t", &["t"]),                  // columns aren't names; `t` is
+        ("t:([]sym:`a;px:1); select sym, px from t", &[]),
+        ("evict:{[r] select lastaccess,id,size from cache}", &["cache"]),
         (".q.id .Q.dd .z.s", &[]),                          // builtin namespaces
         ("use:.app.cfg", &[".app.cfg"]),
         (".app.cfg:1; use:.app.cfg", &[]),
