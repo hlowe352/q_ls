@@ -4,7 +4,6 @@
 # Not a parse rule: q rejects duplicate qSQL column names (`sym` twice).
 stats:{ select sym, avgPx:avg price, minPx:min price, maxPx:max price, totalVol:sum size, numTrades:count i by sym from trade }
 
-# Not checked: q rejects vectors mixing literal types (`1 2f 3`, a date and a long).
-1 -1 -344.11f 5999
-2003.06.01 2034.05.01 2333 552f 1b
+# Not modelled: q applies a date to a following timestamp vector rather than
+# joining them into one vector.
 2020.01.02 2043.05.12D12: 2061.04.30D10:23 2001.12.25D12:44:53.991
