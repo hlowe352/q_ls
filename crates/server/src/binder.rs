@@ -13,6 +13,8 @@
 //!   `name::` assigns the root. A name containing a dot is never local.
 //! - `::`, `+:`, `+::` and `a[i]:` amend: they change the local if the name
 //!   is one, else the global.
+//! - A backtick symbol before `set`, `upsert` or `insert` (or first in
+//!   `` set[`a;1] ``) assigns that global; `` `..name `` is a root name.
 //!
 //! Builtins, qSQL column names and table-constructor column names are not
 //! names.
@@ -136,8 +138,8 @@ impl Lambda {
 /// its lambda.
 struct Pending {
     token: SyntaxToken,
-    /// Bytes of a symbol token's backtick to skip.
-    skip: u32,
+    /// A backtick symbol: always a global; its range skips the tick.
+    symbol: bool,
     role: Role,
     lambda: Option<usize>,
     ns: SmolStr,
@@ -185,12 +187,12 @@ impl Builder {
                     if let Some(token) = first_token(&node).filter(|t| is_name(&node, t)) {
                         let off = token.text_range().start().into();
                         let role = self.targets.get(&off).copied().unwrap_or(Role::Use);
-                        self.push(token, 0, role, lambda, &ns);
+                        self.push(token, false, role, lambda, &ns);
                     }
                 }
                 SyntaxKind::LiteralExpr => {
-                    if let Some(token) = table_symbol(&node) {
-                        self.push(token, 1, Role::Use, lambda, &ns);
+                    if let Some((token, role)) = named_symbol(&node) {
+                        self.push(token, true, role, lambda, &ns);
                     }
                 }
                 _ => {}
@@ -213,7 +215,7 @@ impl Builder {
         for token in params.iter().flat_map(SyntaxNode::children_with_tokens) {
             if let Some(t) = token.into_token().filter(|t| t.kind() == SyntaxKind::Ident) {
                 lambda.locals.insert(SmolStr::new(t.text()));
-                self.push(t, 0, Role::Param, Some(idx), ns);
+                self.push(t, false, Role::Param, Some(idx), ns);
             }
         }
         self.lambdas.push(lambda);
@@ -270,14 +272,14 @@ impl Builder {
     fn push(
         &mut self,
         token: SyntaxToken,
-        skip: u32,
+        symbol: bool,
         role: Role,
         lambda: Option<usize>,
         ns: &SmolStr,
     ) {
         self.pending.push(Pending {
             token,
-            skip,
+            symbol,
             role,
             lambda,
             ns: ns.clone(),
@@ -288,11 +290,13 @@ impl Builder {
     fn resolve(self) -> Bindings {
         let mut out = Bindings::default();
         for p in self.pending {
-            let text = &p.token.text()[p.skip as usize..];
+            let skip = u32::from(p.symbol);
+            let text = &p.token.text()[skip as usize..];
             let start: u32 = p.token.text_range().start().into();
-            let range = TextRange::new((start + p.skip).into(), p.token.text_range().end());
+            let range = TextRange::new((start + skip).into(), p.token.text_range().end());
             let local = p.lambda.filter(|&l| {
-                p.role == Role::Param || (!text.contains('.') && self.lambdas[l].has_local(text))
+                p.role == Role::Param
+                    || (!p.symbol && !text.contains('.') && self.lambdas[l].has_local(text))
             });
             let symbol = match local {
                 Some(l) => Symbol::Local {
@@ -341,26 +345,34 @@ fn is_name(node: &SyntaxNode, token: &SyntaxToken) -> bool {
         && (!has_ancestor(node, SyntaxKind::TableExpr) || !is_assignment_lhs(node))
 }
 
-/// The backtick symbol of `lit` if it names a table: a qSQL `from`, or the
-/// left of `upsert` / `insert`.
-fn table_symbol(lit: &SyntaxNode) -> Option<SyntaxToken> {
+/// A backtick symbol naming a global, with its role: the table of a qSQL
+/// `from` (a use), or the first argument of `set`, `upsert` or `insert`,
+/// which assign it (`` `t upsert x ``, `` set[`a;1] ``).
+fn named_symbol(lit: &SyntaxNode) -> Option<(SyntaxToken, Role)> {
     let token =
         first_token(lit).filter(|t| t.kind() == SyntaxKind::Symbol && t.text().len() > 1)?;
     let parent = lit.parent()?;
-    let names_table = match parent.kind() {
-        SyntaxKind::FromClause => true,
-        SyntaxKind::BinExpr => {
-            parent.first_child().as_ref() == Some(lit)
-                && parent
-                    .children_with_tokens()
-                    .filter_map(SyntaxElement::into_token)
-                    .any(|t| {
-                        t.kind() == SyntaxKind::Ident && matches!(t.text(), "upsert" | "insert")
-                    })
+    let verb = match parent.kind() {
+        SyntaxKind::FromClause => return Some((token, Role::Use)),
+        // `` `t verb x ``
+        SyntaxKind::BinExpr if parent.first_child().as_ref() == Some(lit) => parent
+            .children_with_tokens()
+            .filter_map(SyntaxElement::into_token)
+            .find(|t| t.kind() == SyntaxKind::Ident)?,
+        // `verb[`t;x]`
+        SyntaxKind::ExprStmt => {
+            let args = parent
+                .parent()
+                .filter(|a| a.kind() == SyntaxKind::ArgList)?;
+            let call = args
+                .parent()
+                .filter(|c| c.kind() == SyntaxKind::IndexExpr)?;
+            (args.children().next().as_ref() == Some(&parent)).then_some(())?;
+            first_token(&call)?
         }
-        _ => false,
+        _ => return None,
     };
-    names_table.then_some(token)
+    matches!(verb.text(), "set" | "upsert" | "insert").then_some((token, Role::Amend))
 }
 
 /// The namespace `node` switches to: `\d .ns` / `\d .`, or
@@ -390,9 +402,12 @@ fn namespace_change(node: &SyntaxNode) -> Option<SmolStr> {
     }
 }
 
-/// `name` qualified by namespace `ns` unless it starts with a dot.
+/// `name` qualified by namespace `ns`, unless it starts with a dot; a
+/// leading `..` names the root (`` `..qs `` is `qs` inside any `\d`).
 fn qualify(name: &str, ns: &str) -> SmolStr {
-    if ns.is_empty() || name.starts_with('.') {
+    if let Some(root) = name.strip_prefix("..") {
+        SmolStr::new(root)
+    } else if ns.is_empty() || name.starts_with('.') {
         SmolStr::new(name)
     } else {
         SmolStr::new(format!("{ns}.{name}"))

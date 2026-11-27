@@ -40,6 +40,12 @@ const CASES: &[(&str, &str, &[&str])] = &[
     ("", ".ns.z:1", &[".ns.z"]),
     ("", "{a::1}[]", &["a"]),
     ("", "a:1;{a::2}[]", &["a"]),
+    ("", "`t upsert ([]c:1 2)", &["t"]),
+    ("", "`t insert ([]c:1 2)", &["t"]),
+    ("", "set[`a;1]", &["a"]),
+    ("", "`.x.y set 1", &[".x.y"]),
+    ("", "`..r set 1", &["r"]),
+    ("", "a:0;`a set 1", &["a"]),
 ];
 
 /// Cases where our symbol table deliberately differs from q, with why.
@@ -57,13 +63,13 @@ const KNOWN: &[(&str, Ctx, &str)] = &[
     // target for the whole line.
     ("a:1;a::2", Ctx::Ns, "one target per name per top-level line"),
     ("a:1;a::2", Ctx::SystemD, "one target per name per top-level line"),
-    // `set` is not modelled (its namespace is decided at run time).
-    ("`a set 1", Ctx::Top, "set not modelled"),
-    ("`a set 1", Ctx::Lambda, "set not modelled"),
-    ("`a set 1", Ctx::Ns, "set not modelled"),
-    ("`a set 1", Ctx::NsLambda, "set not modelled"),
-    ("`a set 1", Ctx::NsLambdaFromRoot, "set not modelled"),
-    ("`a set 1", Ctx::SystemD, "set not modelled"),
+    // A symbol's namespace is the caller's, decided when the call runs: a
+    // lambda written in `.ns` but called from the root sets the root name.
+    ("`a set 1", Ctx::NsLambdaFromRoot, "symbol namespace is decided at run time"),
+    ("`t upsert ([]c:1 2)", Ctx::NsLambdaFromRoot, "symbol namespace is decided at run time"),
+    ("`t insert ([]c:1 2)", Ctx::NsLambdaFromRoot, "symbol namespace is decided at run time"),
+    ("set[`a;1]", Ctx::NsLambdaFromRoot, "symbol namespace is decided at run time"),
+    ("a:0;`a set 1", Ctx::NsLambdaFromRoot, "symbol namespace is decided at run time"),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
