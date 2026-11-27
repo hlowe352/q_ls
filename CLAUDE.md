@@ -1,43 +1,48 @@
-# Code Style
+# Workflow
 
-- All Rust code must be formatted with `cargo fmt`. Run before committing.
-- All Rust code must be clean under `cargo clippy --workspace --all-targets -- -D warnings -W clippy::pedantic`. Fix warnings rather than suppressing them unless there is a documented reason. The `-D warnings` matches CI (`RUSTFLAGS=-D warnings`) so warnings that would fail the build are caught locally.
-
-- The toolchain is pinned in `rust-toolchain.toml` (CI installs the same one). Bump it deliberately, fixing any new lints in the same PR.
-- The workspace index honours `.gitignore`/`.ignore`; parser fixtures are excluded via `.ignore`.
-
-# Git Workflow
-
-- Never use `git worktree add`. Always use `git checkout -b` for new branches.
-- `main` is branch-protected — all changes go through pull requests.
-
-# Running Tests
+- `main` is branch-protected: every change goes through a pull request.
+- Never use `git worktree add`; branch with `git checkout -b`.
+- The toolchain is pinned in `rust-toolchain.toml` and CI installs the same one. Bump it deliberately and fix any new lints in that PR.
+- Before committing, all of these must pass (CI runs them with `RUSTFLAGS=-D warnings`):
 
 ```sh
-cargo test --workspace                                        # all tests
-cargo run -p q-parser --example print_tree -- file.q         # inspect parse tree
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings -W clippy::pedantic
+cargo test --workspace --all-targets
+cargo run -p q-parser --example print_tree -- file.q   # inspect a parse tree
 ```
 
-# Architecture Quick Reference
+- Fix clippy warnings rather than suppressing them; an `#[allow]` needs a comment saying why.
 
-- 3 crates: `q-lexer` (logos), `q-parser` (rowan CST), `q-ls` (tower-lsp server)
-- Parser emits `Event` stream → `Sink` converts to rowan `GreenNode`
-- All text offsets are `u32` internally (`TextSize` / `rowan`); widen to `usize` only at LSP boundaries
+# Architecture
 
-# Parser Gotchas
+- `q-lexer` (logos) → `q-parser` (event-based Pratt parser, lossless rowan CST) → `q-ls` (`tower-lsp-server` binary).
+- Parser: `Parser::new` lexes and fixes up the token stream (comments, `\` terminator, `k)`/`p)` lines, negative literals); grammar rules emit `Event`s; `sink::build` turns them into a rowan `GreenNode`.
+- Server: `WorkspaceIndex` is the only document store, holding open documents (editor text, never overwritten from disk while open) and every indexed `.q` file. Indexing walks the git root with the `ignore` crate, so `.gitignore`/`.ignore` apply; this repo's `.ignore` excludes the parser fixtures.
+- `SymTable` (built per parse) owns name resolution and scoping; features in `goto_def`, `references`, `rename`, `hover`, `completion` and `diagnostics` query it. Shared CST helpers live in `syntax.rs`.
+- Offsets: rowan `TextSize`/`u32` in the CST and for stored definition sites; `usize` byte offsets in `Document`, `ParseError` and feature code; LSP `Position` (UTF-16) only via `Document::offset_of`/`position_of`.
 
-**Trivia** — rowan attaches whitespace/comments as leading trivia on the *next* non-trivia token. `node.first_token()` may return a whitespace token. Always use a `find(|t| !t.kind().is_trivia())` scan when extracting names or offsets from nodes.
+# q semantics the code relies on
 
-**Right-to-left evaluation** — q has no operator precedence; all operators are right-associative. The Pratt parser uses `(l_bp=1, r_bp=0)` throughout. Do not add precedence tiers.
+Check behaviour against a real q 4.1 (`q script.q -q`) before changing any of these. Intuition about q edge cases is often wrong.
 
-**Contextual qSQL keywords** — `select`, `exec`, `update`, `delete`, `from`, `by`, `where` are plain `Ident` tokens. Detection is always `p.current_text() == Some("keyword")`. There are no reserved-word token variants.
+- **Right to left, no precedence**: the Pratt parser uses `(l_bp=1, r_bp=0)` throughout. Do not add precedence tiers.
+- **No closures**: a lambda sees only its own params/locals and globals, never an enclosing lambda's names (`{[a] g:{a+1}; g[]}` reads the global `a`).
+- **qSQL keywords are contextual**: `select exec update delete from by where` are plain `Ident` tokens, detected with `p.current_text() == Some("…")`. A name is a qSQL column iff its nearest enclosing qSQL construct is the statement rather than its `FromClause` (`syntax::in_row_context`), so `from f[x]` is ordinary code.
+- **Script terminator**: a column-0 line that is only `\`, outside a `/` … `\` block comment, ends the file. An indented `\` or `\ foo` is code.
+- **Symbols**: `` `a`b`c `` (no spaces) is one literal token; `` `a `b `` is application. Numeric and temporal literals separated by spaces form a vector (`1 2 3`).
 
-**Parser state flags** — `qsql_stop` and `qsql_comma_stop` on `Parser` control juxtaposition and comma parsing in qSQL clause context. Only change them through `with_qsql_flags` (grammar/expressions.rs), which restores the previous values; bracketed sub-parsers (`parse_paren`, `parse_lambda`, `parse_bracketed`) run with both cleared so flags never leak into nested expressions.
+# Parser gotchas
+
+- **Trivia**: rowan attaches whitespace/comments as leading trivia of the *next* token, so `node.first_token()` may be whitespace. Use `syntax::first_token` (first non-trivia token) when extracting names or offsets.
+- **qSQL flags**: `qsql_stop` / `qsql_comma_stop` change how juxtaposition and commas parse inside qSQL clauses. Only change them through `with_qsql_flags` (grammar/expressions.rs), which restores the old values; bracketed sub-parsers run with both cleared so they never leak into nested expressions.
 
 # Tests
 
-- Table-driven: add parser inputs to `CLEAN` (crates/parser/tests/corpus.rs), CST shapes to `SNAPSHOTS`/`SHAPES` (tests/snapshots.rs), lexer cases to `CASES` (lexer/src/token.rs).
-- Server unit tables use markers (`workspace_index::tests::markers`): `«` = cursor, `»` = each expected site, e.g. goto-def `CASES`, references `CASES`, hover `CASES`, diagnostics `UNRESOLVED`. Assert exact results, not "contains".
-- `crates/server/tests/lsp.rs` drives the real binary over stdio (document sync, indexing, file watching, config, root detection, request routing). Cross-file and config behaviour is tested there, not duplicated in unit tests.
-- Server test helpers: `workspace_index::tests::{uri, doc, index, markers}` and `goto_def::tests::locations`.
-- Coverage: `rm -rf target/llvm-cov-target && cargo llvm-cov --workspace --summary-only`. Stale builds in that directory skew results badly, so always clear it first.
+- Prefer tables that assert exact results:
+  - lexer: `CASES` in `lexer/src/token.rs`;
+  - parser: `CLEAN` in `parser/tests/corpus.rs`, `SNAPSHOTS`/`SHAPES` in `parser/tests/snapshots.rs`;
+  - server: `CASES` in goto-def, references and hover, `UNRESOLVED` in diagnostics.
+- Server tables mark positions inline via `workspace_index::tests::markers`: `«` is the cursor and each `»` an expected site, e.g. `"fn:99;\nf:{[»fn] «fn+1}"`. Other helpers: `workspace_index::tests::{uri, doc, index}`, `goto_def::tests::locations`.
+- `crates/server/tests/lsp.rs` runs the real binary over stdio: document sync, indexing, file watching, config, root detection, and request routing. Cross-file and config behaviour is tested there, not repeated in unit tests.
+- Coverage: `rm -rf target/llvm-cov-target && cargo llvm-cov --workspace --summary-only`. Stale builds in that directory skew the results badly, so always clear it first.
