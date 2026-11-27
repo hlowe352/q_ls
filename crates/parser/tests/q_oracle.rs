@@ -16,10 +16,10 @@ use q_parser::{SyntaxElement, SyntaxKind as K, SyntaxNode, SyntaxToken};
 
 /// q helpers. `G` turns a glyph or name into what `parse` puts in its tree
 /// (verbs and keywords as values, other names as symbols); `N` renders a
-/// tree so q's symbol-vector collapsing can't hide or invent differences.
+/// tree with lists of same-type atoms collapsed, as q collapses ours.
 const DRIVER: &str = r#"
 G:{x:(),x;$[x~(),":";first parse"a:1";any x~/:(),/:("/";"\\";"'";"':";"/:";"\\:");first parse"f",x;parse x]};
-N:{$[0h=type x;"(",(";"sv N each x),")";11h=type x;$[1=count x;",",.Q.s1 x;"(",(";"sv .Q.s1 each x),")"];.Q.s1 x]};
+N:{$[11h=t:type x;$[1=count x;",",.Q.s1 x;"(",(";"sv .Q.s1 each x),")"];0h<>t;.Q.s1 x;(1<count x)&(1=count distinct u)&all 0>u:type each x;N raze x;"(",(";"sv N each x),")"]};
 P:{@[parse;(),x;{`QERR}]};
 T:{[i;s;o] p:P s; $[`QERR~p; -1"QONLY\t",string i; not(N p)~N v:@[value;o;{`OERR}]; -1"DIFF\t",string[i],"\t",.Q.s1[p],"\t",.Q.s1 v; ::]};
 E:{[i;s] if[not`QERR~P s; -1"OURSONLY\t",string i]};
