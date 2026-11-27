@@ -16,7 +16,7 @@ cargo run -p q-parser --example print_tree -- file.q   # inspect a parse tree
 
 # Architecture
 
-- `q-lexer` (logos) → `q-parser` (event-based Pratt parser, lossless rowan CST) → `q-ls` (`tower-lsp-server` binary).
+- `q-lexer` (logos) → `q-parser` (event-based parser, lossless rowan CST) → `q-ls` (`tower-lsp-server` binary).
 - Parser: `Parser::new` lexes and fixes up the token stream (comments, `\` terminator, `k)`/`p)` lines, negative literals); grammar rules emit `Event`s; `sink::build` turns them into a rowan `GreenNode`.
 - Server: `WorkspaceIndex` is the only document store, holding open documents (editor text, never overwritten from disk while open) and every indexed `.q` file. Indexing walks the git root with the `ignore` crate, so `.gitignore`/`.ignore` apply; this repo's `.ignore` excludes the parser fixtures.
 - `SymTable` (built per parse) owns name resolution and scoping; features in `goto_def`, `references`, `rename`, `hover`, `completion` and `diagnostics` query it. Shared CST helpers live in `syntax.rs`.
@@ -26,7 +26,7 @@ cargo run -p q-parser --example print_tree -- file.q   # inspect a parse tree
 
 Check behaviour against a real q 4.1 (`q script.q -q`) before changing any of these. Intuition about q edge cases is often wrong.
 
-- **Right to left, no precedence**: the Pratt parser uses `(l_bp=1, r_bp=0)` throughout. Do not add precedence tiers.
+- **Right to left, no precedence, no prefix verbs**: an expression is a run of terms (atom + `[args]`/adverbs). A term ending in an adverb, or a bare primitive (`+`, `in`), is a verb; anything else is a noun. noun verb → infix (`x f/ y`), noun noun → application, verb with an argument → error (`-x`, `+/x`; q needs `neg x`, `(+/)x`). Only `'x` and `:x` are prefix. Do not add precedence.
 - **No closures**: a lambda sees only its own params/locals and globals, never an enclosing lambda's names (`{[a] g:{a+1}; g[]}` reads the global `a`).
 - **qSQL keywords are contextual**: `select exec update delete from by where` are plain `Ident` tokens, detected with `p.current_text() == Some("…")`. A name is a qSQL column iff its nearest enclosing qSQL construct is the statement rather than its `FromClause` (`syntax::in_row_context`), so `from f[x]` is ordinary code.
 - **Script terminator**: a column-0 line that is only `\`, outside a `/` … `\` block comment, ends the file. An indented `\` or `\ foo` is code.

@@ -32,8 +32,10 @@ fn tree(src: &str) -> String {
     dump(&p.syntax())
 }
 
+/// Number of top-level statements in `src`, which must parse cleanly.
 fn count_stmts(src: &str) -> usize {
-    tree(src).matches("ExprStmt").count()
+    tree(src);
+    parse(src).syntax().children().count()
 }
 
 #[test]
@@ -61,6 +63,11 @@ fn statement_boundaries() {
     // Indented next line continues the statement; column 0 starts a new one.
     assert_eq!(count_stmts("f x\n    +y"), 1);
     assert_eq!(count_stmts("f x\ng y"), 2);
+    // ... whatever the line starts with (checked against q 4.1).
+    assert_eq!(count_stmts("b:til 3\n[1]"), 2);
+    assert_eq!(count_stmts("c:{x}\n'[f;g]"), 2);
+    assert_eq!(count_stmts("d:1\n,[2;3]"), 2);
+    assert_eq!(count_stmts("e:1\n -1"), 1);
     assert!(count_stmts("x:1\n/\nblock\nstuff\n\\\ny:2\n") >= 2);
     assert!(
         tree("select a from (select b from t)")
@@ -153,17 +160,48 @@ fn diagnostics() {
     );
     for ok in ["f\\", "\\l file.q", "x:1\n\\l file.q"] {
         assert!(errors(ok).is_empty(), "{ok:?}: {:?}", errors(ok));
+    } // q has no prefix verbs (q 4.1 `parse` rejects each); the error spans
+    // the verb term.
+    for (src, verb) in PREFIX_VERBS {
+        let p = parse(src);
+        let spans: Vec<_> = p
+            .errors
+            .iter()
+            .map(|e| &src[e.offset..e.offset + e.len])
+            .collect();
+        assert_eq!(spans, [*verb], "{src:?}: {:?}", p.errors);
+    }
+    // Bracketed, projected, applied or infix verbs are fine.
+    for ok in [
+        "(+/)x", "+/[x]", "x+/y", "x f/ y", "x y/ z", "f:+/", "x in y", "x each", "neg x",
+        "x - -1", "'[f;g] x", "$[a;b;c]",
+    ] {
+        assert!(errors(ok).is_empty(), "{ok:?}: {:?}", errors(ok));
     }
 }
+
+/// `(source, verb term the prefix-verb error spans)`.
+#[rustfmt::skip]
+const PREFIX_VERBS: &[(&str, &str)] = &[
+    ("-x", "-"), ("+ 1", "+"), ("#x", "#"), ("::x", "::"), ("x - - y", "-"),
+    ("x*-y", "-"), ("+/x", "+/"), ("+/1 2 3", "+/"), ("+\\'x", "+\\'"),
+    ("f/:\\:x", "f/:\\:"), ("-':x", "-':"), ("f'x", "f'"), ("y/z", "y/"),
+    ("set x", "set"), ("setenv 1", "setenv"),
+    ("raze select from each t", "each"), ("select +/price from trade", "+/"),
+    ("1: \"hello\"", "1:"), ("{[a] +1}", "+"),
+];
 
 /// `(source, node/token kinds that must appear, kinds that must not)`.
 #[rustfmt::skip]
 const SHAPES: &[(&str, &[&str], &[&str])] = &[
     ("1+", &["InfixProjection"], &[]),
     ("1+2", &["BinExpr"], &["InfixProjection"]),
-    ("a +' b", &["InfixModExpr"], &[]),
-    ("a +/: b", &["InfixModExpr"], &[]),
-    ("'[f;g]", &["Composition"], &[]),
+    ("a +' b", &["BinExpr", "AdverbExpr"], &[]),
+    ("a +/: b", &["BinExpr", "AdverbExpr"], &[]),
+    ("x+/", &["InfixProjection", "AdverbExpr"], &["BinExpr"]),
+    ("'[f;g]", &["IndexExpr", "VerbExpr"], &[]),
+    ("x:'y", &["BinExpr", "AdverbExpr"], &["SignalExpr"]),
+    ("'x+1", &["SignalExpr", "BinExpr"], &[]),
     ("'`err", &["SignalExpr"], &[]),
     ("0Nm", &["Month"], &[]),
     ("0Ng", &["Guid"], &[]),
@@ -196,7 +234,7 @@ const SHAPES: &[(&str, &[&str], &[&str])] = &[
     ("t:select a from t", &["SelectExpr", "BinExpr"], &[]),
     ("0!select a from t", &["SelectExpr"], &[]),
     ("select a:x, b:(x,y) from t", &["SelectExpr"], &[]),
-    ("select +/price from t", &["SelectExpr", "AdverbExpr"], &[]),
+    ("select (+/)price from t", &["SelectExpr", "AdverbExpr"], &[]),
     ("k)1+2", &["DslStmt"], &[]),
     ("p)select * from t", &["DslStmt"], &[]),
     // `p)` mid-expression closes a paren; it is not a DSL escape.
@@ -250,78 +288,92 @@ const SNAPSHOTS: &[(&str, &str)] = &[
       IdentExpr
         Ident "f"
       EachLeft "\\:""#),
-    // adverb_over_on_builtin: +/  →  AdverbExpr(UnaryExpr(+), /)
+    // adverb_over_on_builtin: +/  →  AdverbExpr(VerbExpr(+), /)
     ("+/", r#"Root
   ExprStmt
     AdverbExpr
-      UnaryExpr
+      VerbExpr
         Plus "+"
       Slash "/""#),
-    // adverb_scan_on_builtin: +\  →  AdverbExpr(UnaryExpr(+), \)
+    // adverb_scan_on_builtin: +\  →  AdverbExpr(VerbExpr(+), \)
     ("+\\", r#"Root
   ExprStmt
     AdverbExpr
-      UnaryExpr
+      VerbExpr
         Plus "+"
       Backslash "\\""#),
-    // over_applied_to_list: +/x  →  ApplyExpr(AdverbExpr(UnaryExpr(+), /), IdentExpr(x))
-    ("+/x", r#"Root
+    // over_applied_to_args: +/[x]  →  IndexExpr(AdverbExpr(VerbExpr(+), /), [x])
+    ("+/[x]", r#"Root
   ExprStmt
-    ApplyExpr
+    IndexExpr
       AdverbExpr
-        UnaryExpr
+        VerbExpr
           Plus "+"
         Slash "/"
-      IdentExpr
-        Ident "x""#),
-    // each_applied_to_function_and_arg: count'x  →  ApplyExpr(AdverbExpr(IdentExpr(count), '), IdentExpr(x))
-    ("count'x", r#"Root
+      ArgList
+        LBracket "["
+        ExprStmt
+          IdentExpr
+            Ident "x"
+        RBracket "]""#),
+    // derived_infix: x f'y  →  BinExpr(x, AdverbExpr(f, '), y)
+    ("x f'y", r#"Root
   ExprStmt
-    ApplyExpr
+    BinExpr
+      IdentExpr
+        Ident "x"
       AdverbExpr
         IdentExpr
-          Ident "count"
+          Ident "f"
         Each "'"
       IdentExpr
-        Ident "x""#),
-    // infix_mod_over: 1+/2  →  InfixModExpr(1, +, /, 2)
+        Ident "y""#),
+    // infix_over: 1+/2  →  BinExpr(1, AdverbExpr(VerbExpr(+), /), 2)
     ("1+/2", r#"Root
   ExprStmt
-    InfixModExpr
+    BinExpr
       LiteralExpr
         Integer "1"
-      Plus "+"
-      Slash "/"
+      AdverbExpr
+        VerbExpr
+          Plus "+"
+        Slash "/"
       LiteralExpr
         Integer "2""#),
-    // infix_mod_each_right: x,/:y  →  InfixModExpr(x, ,, /:, y)
+    // infix_each_right: x,/:y  →  BinExpr(x, AdverbExpr(VerbExpr(,), /:), y)
     ("x,/:y", r#"Root
   ExprStmt
-    InfixModExpr
+    BinExpr
       IdentExpr
         Ident "x"
-      Comma ","
-      EachRight "/:"
+      AdverbExpr
+        VerbExpr
+          Comma ","
+        EachRight "/:"
       IdentExpr
         Ident "y""#),
-    // infix_mod_each_left: x,\:y  →  InfixModExpr(x, ,, \:, y)
+    // infix_each_left: x,\:y  →  BinExpr(x, AdverbExpr(VerbExpr(,), \:), y)
     ("x,\\:y", r#"Root
   ExprStmt
-    InfixModExpr
+    BinExpr
       IdentExpr
         Ident "x"
-      Comma ","
-      EachLeft "\\:"
+      AdverbExpr
+        VerbExpr
+          Comma ","
+        EachLeft "\\:"
       IdentExpr
         Ident "y""#),
-    // infix_mod_each_prior: x-':y  →  InfixModExpr(x, -, ':, y)
+    // infix_each_prior: x-':y  →  BinExpr(x, AdverbExpr(VerbExpr(-), ':), y)
     ("x-':y", r#"Root
   ExprStmt
-    InfixModExpr
+    BinExpr
       IdentExpr
         Ident "x"
-      Minus "-"
-      EachPrior "':"
+      AdverbExpr
+        VerbExpr
+          Minus "-"
+        EachPrior "':"
       IdentExpr
         Ident "y""#),
     // chained_adverbs_over_each_left: f/\:  →  AdverbExpr(AdverbExpr(IdentExpr(f), /), \:)

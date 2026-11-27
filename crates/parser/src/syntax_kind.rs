@@ -50,11 +50,12 @@ syntax_kinds! {
         ParamList,
         /// `[expr;expr;...]` — call argument list.
         ArgList,
-        /// `left op right` — binary (dyadic) expression.
+        /// `x verb y` — infix application. The verb is a direct token for a
+        /// primitive (`x+y`, `x in y`), else a node (`x f/ y`, `x+/y`).
         BinExpr,
-        /// `op expr` — unary (monadic) expression.
-        UnaryExpr,
-        /// `f[args]` or `f x` — function application.
+        /// A bare primitive verb (`+`, `(-)`, `'` in `'[f;g]`).
+        VerbExpr,
+        /// `f x` — application by juxtaposition.
         ApplyExpr,
         /// `expr adverb` — adverb / iterator application.
         AdverbExpr,
@@ -64,8 +65,6 @@ syntax_kinds! {
         ListExpr,
         /// `1 2 3` — space-separated homogeneous scalar vector.
         VectorExpr,
-        /// `$[cond;true;false]` — conditional expression.
-        CondExpr,
         /// Identifier reference.
         IdentExpr,
         /// Any literal value.
@@ -90,20 +89,10 @@ syntax_kinds! {
         FromClause,
         /// System command statement (`\l file.q`, etc.).
         SystemCmdStmt,
-        /// `expr[index]` — index / slice expression.
+        /// `f[args]` — bracket application (also `if[…]`, `$[…]`, `'[f;g]`).
         IndexExpr,
-        /// `if[cond;expr;...]` — if control word.
-        IfExpr,
-        /// `do[n;expr;...]` — do control word.
-        DoExpr,
-        /// `while[cond;expr;...]` — while control word.
-        WhileExpr,
-        /// `1+` — binary operator with no RHS, treated as a projection.
+        /// `x+`, `x f/` — infix verb with no right operand (a projection).
         InfixProjection,
-        /// `'[f;g]` — function composition (bracket form).
-        Composition,
-        /// `f' x`, `f/: y` — infix function with adverb modifier.
-        InfixModExpr,
         /// `select[5]` / `select[5;>col]` — qSQL limit clause.
         LimitClause,
         /// `>col` / `<col` inside a limit clause.
