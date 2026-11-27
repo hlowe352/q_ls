@@ -1,0 +1,5 @@
+# Pinned so local builds and CI use the same rustc/clippy; bump deliberately
+# (new stable releases add lints that otherwise break CI without a code change).
+[toolchain]
+channel = "1.100.0"
+components = ["clippy", "rustfmt"]

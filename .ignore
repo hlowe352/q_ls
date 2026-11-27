@@ -1,0 +1,4 @@
+# Parser test fixtures: keep them out of q-ls's workspace index (and rg).
+# git still tracks them; `rg --no-ignore` searches them.
+crates/parser/tests/data/
+test_data/
