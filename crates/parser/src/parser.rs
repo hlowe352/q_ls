@@ -151,8 +151,9 @@ fn is_at_line_start(tokens: &[LexedToken], i: usize) -> bool {
 ///
 /// 1. A `/` at line start or after whitespace (`expr   /note`) starts a line
 ///    comment running to end of line (the lexer only knows `/ text`).
-/// 2. A bare `\` at line start opens a terminal comment block running to the
-///    next `/` at line start (inclusive) or EOF.
+/// 2. A line that is exactly `\` (column 0, trailing whitespace allowed)
+///    outside a block comment ends the script: the rest of the file is one
+///    `CommentBlock`. (Block comments `/` … `\` are lexed earlier.)
 fn normalize_slash_comments(tokens: &mut Vec<LexedToken>) {
     let mut i = 0;
     while i < tokens.len() {
@@ -166,11 +167,14 @@ fn normalize_slash_comments(tokens: &mut Vec<LexedToken>) {
                 .position(|t| t.kind == SyntaxKind::Newline)
                 .map_or(tokens.len(), |n| i + n);
             Some((SyntaxKind::LineComment, end))
-        } else if kind == SyntaxKind::Backslash && line_start {
-            let end = (i + 1..tokens.len())
-                .find(|&j| tokens[j].kind == SyntaxKind::Slash && is_at_line_start(tokens, j))
-                .map_or(tokens.len(), |j| j + 1);
-            Some((SyntaxKind::CommentBlock, end))
+        } else if kind == SyntaxKind::Backslash
+            && (i == 0 || tokens[i - 1].kind == SyntaxKind::Newline)
+            && tokens[i + 1..]
+                .iter()
+                .find(|t| t.kind != SyntaxKind::Whitespace)
+                .is_none_or(|t| t.kind == SyntaxKind::Newline)
+        {
+            Some((SyntaxKind::CommentBlock, tokens.len()))
         } else {
             None
         };
@@ -281,8 +285,8 @@ impl Parser {
     #[must_use]
     pub fn new(source: &str) -> Self {
         let mut tokens = lex(source);
-        normalize_slash_comments(&mut tokens);
         collapse_block_comments(&mut tokens);
+        normalize_slash_comments(&mut tokens);
         split_misplaced_dsl_lines(&mut tokens);
         merge_negative_literals(&mut tokens);
 

@@ -1,14 +1,16 @@
 //! Builtin keyword recognition for q.
 //!
-//! Lifted from tree-sitter-q `builtin_infix_func` (grammar.js:285-314).
+//! Lifted from tree-sitter-q `builtin_infix_func` (grammar.js:285-314), plus
+//! `cut over prior rotate scan set xgroup` (verified infix in q 4.1).
 //! Keep alphabetised for greppability and binary-search correctness.
 
 const BUILTIN_INFIX: &[&str] = &[
-    "and", "asof", "bin", "binr", "cor", "cov", "cross", "div", "dsave", "each", "ema", "except",
-    "fby", "ij", "ijf", "in", "insert", "inter", "like", "lj", "ljf", "lsq", "mavg", "mcount",
-    "mdev", "mmax", "mmin", "mmu", "mod", "msum", "or", "peach", "pj", "scov", "setenv", "ss",
-    "sublist", "sv", "uj", "ujf", "union", "upsert", "vs", "wavg", "within", "wsum", "xasc",
-    "xbar", "xcol", "xcols", "xdesc", "xexp", "xkey", "xlog", "xprev", "xrank",
+    "and", "asof", "bin", "binr", "cor", "cov", "cross", "cut", "div", "dsave", "each", "ema",
+    "except", "fby", "ij", "ijf", "in", "insert", "inter", "like", "lj", "ljf", "lsq", "mavg",
+    "mcount", "mdev", "mmax", "mmin", "mmu", "mod", "msum", "or", "over", "peach", "pj", "prior",
+    "rotate", "scan", "scov", "set", "setenv", "ss", "sublist", "sv", "uj", "ujf", "union",
+    "upsert", "vs", "wavg", "within", "wsum", "xasc", "xbar", "xcol", "xcols", "xdesc", "xexp",
+    "xgroup", "xkey", "xlog", "xprev", "xrank",
 ];
 
 /// True if `text` names a builtin q verb that is conventionally used infix.
