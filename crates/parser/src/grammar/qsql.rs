@@ -51,14 +51,22 @@ pub fn parse_qsql(p: &mut Parser) -> CompletedMarker {
 
     let at_clause_end =
         at_kw(p, "from") || (has_by && at_kw(p, "by")) || p.at_end() || p.at(SyntaxKind::Semi);
-    if !at_clause_end {
-        parse_column_list(p);
-    }
+    let columns = if at_clause_end {
+        Vec::new()
+    } else {
+        parse_column_list(p, &[])
+    };
 
     if has_by && at_kw(p, "by") {
         let bm = p.start();
         p.bump();
-        parse_column_list(p);
+        // q rejects a select column and a group with the same name.
+        let taken = if kind == SyntaxKind::SelectExpr {
+            columns
+        } else {
+            Vec::new()
+        };
+        parse_column_list(p, &taken);
         bm.complete(p, SyntaxKind::ByClause);
     }
 
@@ -75,7 +83,7 @@ pub fn parse_qsql(p: &mut Parser) -> CompletedMarker {
         let wm = p.start();
         p.bump();
         let stop = p.qsql_stop;
-        with_qsql_flags(p, stop, true, |p| comma_separated(p, false));
+        with_qsql_flags(p, stop, true, |p| comma_separated(p, false, &[]));
         wm.complete(p, SyntaxKind::WhereClause);
     }
 
@@ -83,25 +91,42 @@ pub fn parse_qsql(p: &mut Parser) -> CompletedMarker {
 }
 
 /// Comma-separated column expressions, stopping at qSQL keywords.
-fn parse_column_list(p: &mut Parser) {
+fn parse_column_list(p: &mut Parser, taken: &[String]) -> Vec<String> {
     let m = p.start();
-    with_qsql_flags(p, true, true, |p| comma_separated(p, true));
+    let names = with_qsql_flags(p, true, true, |p| comma_separated(p, true, taken));
     m.complete(p, SyntaxKind::ColumnList);
+    names
 }
 
 /// Parse `expr, expr, ...` until a statement end (or, if `stop_at_kw`, a
-/// `from`/`by`/`where` keyword).
-fn comma_separated(p: &mut Parser, stop_at_kw: bool) {
+/// `from`/`by`/`where` keyword), returning the items' names; an item named
+/// in `taken` is an error.
+fn comma_separated(p: &mut Parser, stop_at_kw: bool, taken: &[String]) -> Vec<String> {
+    let mut names = Vec::new();
     loop {
         let at_kw = stop_at_kw && (at_kw(p, "from") || at_kw(p, "by") || at_kw(p, "where"));
         if at_kw || p.at_end() || p.at(SyntaxKind::Semi) {
             break;
         }
+        // An item's name, if explicit (`a:x`) or a bare column (`a.b` is `b`).
+        let start = p.token_index();
+        let explicit = p.nth(1) == Some(SyntaxKind::Colon);
+        let name = p
+            .at(SyntaxKind::Ident)
+            .then(|| p.current_text().unwrap_or_default());
+        let name = name.and_then(|n| n.rsplit('.').next()).map(String::from);
         expr(p);
+        if let Some(name) = name.filter(|_| explicit || p.token_index() == start + 1) {
+            if taken.contains(&name) {
+                p.error_since(format!("`{name}` names both a column and a group"), start);
+            }
+            names.push(name);
+        }
         if !p.eat(SyntaxKind::Comma) {
             break;
         }
     }
+    names
 }
 
 /// Is the current token the contextual keyword `kw`?

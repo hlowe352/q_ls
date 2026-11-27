@@ -191,6 +191,27 @@ fn diagnostics() {
             .collect();
         assert_eq!(spans, [*item], "{src:?}: {:?}", p.errors);
     }
+    // A select column and a group can't share a name (q 4.1).
+    for (src, item) in [
+        ("select a by a from t", "a"),
+        ("select x:b by y,x:c from t", "x:c"),
+        ("select sym, px:avg price by sym from trade", "sym"),
+    ] {
+        let p = parse(src);
+        let spans: Vec<_> = p
+            .errors
+            .iter()
+            .map(|e| &src[e.offset..e.offset + e.len])
+            .collect();
+        assert_eq!(spans, [item], "{src:?}: {:?}", p.errors);
+    }
+    for ok in [
+        "select a,a from t",
+        "exec a by a from t",
+        "select a by b:a from t",
+    ] {
+        assert!(errors(ok).is_empty(), "{ok:?}: {:?}", errors(ok));
+    }
     for ok in [
         "1 2j",
         "0n 1",
