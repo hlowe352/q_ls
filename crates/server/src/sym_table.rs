@@ -9,12 +9,16 @@
 //!   globals, never the params or locals of an enclosing lambda.
 //! - Lambda parameters are visible only inside that lambda.
 //! - Implicit `x`/`y`/`z` exist when a lambda has no `[...]` param list.
-//! - Plain `name:` inside a lambda is a local visible only in that lambda.
-//! - `name::` (double-colon) and dotted `name.foo:` are globals visible
-//!   anywhere in the file, regardless of which lambda they textually live in.
-//! - Plain `name:` at top level (no enclosing lambda) is also a global.
+//! - Locals are fixed when a lambda compiles: a name is local iff it is a
+//!   parameter or the target of a plain `name:` anywhere in the body. Every
+//!   other assignment (`::`, `+:`, `+::`, `a[i]:`) changes that local if
+//!   there is one, else the global. A name containing a dot is always global.
+//! - Every assignment at top level (no enclosing lambda) is global.
 //! - `\d .ns` / `\d .` changes the active namespace; bare globals defined or
-//!   referenced in that region are implicitly qualified as `.ns.name`.
+//!   referenced in that region are implicitly qualified as `.ns.name`, except
+//!   that a top-level `name::` assigns the root.
+//!
+//! Each rule is checked against a real q in `binding_oracle`.
 
 use std::collections::{HashMap, HashSet};
 
@@ -61,10 +65,9 @@ impl SymTable {
         let mut t = SymTable::default();
         let mut scope_stack: Vec<usize> = Vec::new();
         let mut active_ns = SmolStr::default(); // "" = root; ".foo" = namespace .foo
-        // Deferred compound-assigns inside lambdas: (scope_idx, name, offset, active_ns).
-        // Resolved in a second pass: only recorded as locals if the name has no
-        // global def (meaning the compound-assign introduces the binding).
-        let mut deferred_compound: Vec<(usize, SmolStr, u32, SmolStr)> = Vec::new();
+        // Lambda assignments other than `name:`, as (scope, name, offset,
+        // namespace): local or global is known once the lambda's locals are.
+        let mut amends: Vec<(usize, SmolStr, u32, SmolStr)> = Vec::new();
         let mut work: Vec<Step> = vec![Step::Visit(root.clone())];
 
         while let Some(step) = work.pop() {
@@ -121,7 +124,7 @@ impl SymTable {
                 // PopScope runs after all children have been processed.
                 work.push(Step::PopScope);
             } else if kind == SyntaxKind::BinExpr {
-                t.record_bin_expr(&node, &scope_stack, &active_ns, &mut deferred_compound);
+                t.record_bin_expr(&node, &scope_stack, &active_ns, &mut amends);
             }
 
             // Push children in reverse so leftmost is visited first.
@@ -131,22 +134,25 @@ impl SymTable {
             }
         }
 
-        // Second pass: resolve deferred compound-assigns inside lambdas.
-        // Rules:
-        //   (a) If the name resolves to a global (bare or namespace-qualified),
-        //       the compound-assign amends that global — don't create a local.
-        //   (b) Only the FIRST compound-assign per (scope, name) introduces the
-        //       local binding; subsequent ones amend the already-created local.
-        let mut seen_local = HashSet::new();
-        for (scope_idx, name, off, ns) in deferred_compound {
-            let qualified = qualify(&name, true, &ns);
-            if t.globals.contains_key(&name) || t.globals.contains_key(&qualified) {
-                continue; // amends a global
+        for (idx, name, off, ns) in amends {
+            let scope = &mut t.lambdas[idx];
+            let local = scope
+                .params
+                .iter()
+                .chain(&scope.locals)
+                .any(|(n, _)| *n == name)
+                || (!scope.has_param_list && matches!(name.as_str(), "x" | "y" | "z"));
+            if local {
+                scope.locals.push((name, off));
+            } else {
+                t.globals.entry(qualify(&name, &ns)).or_default().push(off);
             }
-            // Only the first compound-assign in this scope creates the binding.
-            if seen_local.insert((scope_idx, name.clone())) {
-                t.lambdas[scope_idx].locals.push((name, off));
-            }
+        }
+        for scope in &mut t.lambdas {
+            scope.locals.sort_by_key(|(_, o)| *o);
+        }
+        for offsets in t.globals.values_mut() {
+            offsets.sort_unstable();
         }
 
         t
@@ -157,7 +163,7 @@ impl SymTable {
         bin: &SyntaxNode,
         stack: &[usize],
         active_ns: &str,
-        deferred_compound: &mut Vec<(usize, SmolStr, u32, SmolStr)>,
+        amends: &mut Vec<(usize, SmolStr, u32, SmolStr)>,
     ) {
         // Column definitions inside a table constructor are not variables.
         if has_ancestor(bin, SyntaxKind::TableExpr) {
@@ -175,50 +181,41 @@ impl SymTable {
         else {
             return;
         };
-        // `::` and `+::` assign globally.
-        let is_double_colon = op.text().ends_with("::");
-        let in_lambda = stack.last().copied();
         let Some(lhs) = bin.first_child() else { return };
         let is_name =
             |t: &SyntaxToken| matches!(t.kind(), SyntaxKind::Ident | SyntaxKind::DottedIdent);
-
-        // List-pattern: `(a; b:type; c):rhs`. Each element binds at the
-        // outer assign's scope (`::` is unusual here but legal: global).
-        if matches!(lhs.kind(), SyntaxKind::ListExpr | SyntaxKind::ParenExpr) {
-            for entry in lhs.children() {
-                if let Some(tok) = tokens(&entry).find(is_name) {
-                    let is_global = is_double_colon || in_lambda.is_none();
-                    self.bind(&tok, is_global, in_lambda, active_ns);
-                }
-            }
-            return;
-        }
-
-        // Single-name assign: `name:` or `.ns.name:`.
-        let Some(tok) = first_token(&lhs).filter(is_name) else {
-            return;
+        // `name:` and list patterns `(a;b):` declare; the rest amend.
+        let pattern = matches!(lhs.kind(), SyntaxKind::ListExpr | SyntaxKind::ParenExpr);
+        let declares = op.kind() == SyntaxKind::Colon && lhs.kind() != SyntaxKind::IndexExpr;
+        let targets: Vec<SyntaxToken> = if pattern {
+            lhs.children()
+                .filter_map(|entry| tokens(&entry).find(is_name))
+                .collect()
+        } else {
+            first_token(&lhs).filter(is_name).into_iter().collect()
         };
-        let is_global =
-            is_double_colon || tok.kind() == SyntaxKind::DottedIdent || in_lambda.is_none();
-        if let (SyntaxKind::CompoundAssign, Some(idx), false) = (op.kind(), in_lambda, is_global) {
-            // Local only if no global def exists — resolved after pass 1.
-            let name = qualify(tok.text(), is_global, active_ns);
+        for tok in targets {
+            let name = SmolStr::new(tok.text());
             let off = tok.text_range().start().into();
-            deferred_compound.push((idx, name, off, SmolStr::new(active_ns)));
-            return;
-        }
-        self.bind(&tok, is_global, in_lambda, active_ns);
-    }
-
-    /// Record `tok` as a global (namespace-qualified unless already dotted)
-    /// or as a local of the enclosing lambda.
-    fn bind(&mut self, tok: &SyntaxToken, is_global: bool, in_lambda: Option<usize>, ns: &str) {
-        let name = qualify(tok.text(), is_global, ns);
-        let off = tok.text_range().start().into();
-        if is_global {
-            self.globals.entry(name).or_default().push(off);
-        } else if let Some(idx) = in_lambda {
-            self.lambdas[idx].locals.push((name, off));
+            match stack.last().copied() {
+                // A top-level `name::` assigns the root, ignoring `\d`.
+                None if op.kind() == SyntaxKind::ColonColon => {
+                    self.globals.entry(name).or_default().push(off);
+                }
+                None => self
+                    .globals
+                    .entry(qualify(&name, active_ns))
+                    .or_default()
+                    .push(off),
+                Some(_) if name.contains('.') => {
+                    self.globals
+                        .entry(qualify(&name, active_ns))
+                        .or_default()
+                        .push(off);
+                }
+                Some(idx) if declares => self.lambdas[idx].locals.push((name, off)),
+                Some(idx) => amends.push((idx, name, off, SmolStr::new(active_ns))),
+            }
         }
     }
 
@@ -363,9 +360,9 @@ enum Binding<'a> {
     Global(&'a [u32]),
 }
 
-/// Qualify a global `name` with `ns` unless it is already dotted.
-fn qualify(name: &str, is_global: bool, ns: &str) -> SmolStr {
-    if is_global && !ns.is_empty() && !name.starts_with('.') {
+/// Qualify a global `name` with `ns` unless it starts with a dot.
+fn qualify(name: &str, ns: &str) -> SmolStr {
+    if !ns.is_empty() && !name.starts_with('.') {
         SmolStr::new(format!("{ns}.{name}"))
     } else {
         SmolStr::new(name)

@@ -1,4 +1,6 @@
 mod backend;
+#[cfg(test)]
+mod binding_oracle;
 mod builtins;
 mod completion;
 mod config;
