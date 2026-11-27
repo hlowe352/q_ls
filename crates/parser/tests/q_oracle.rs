@@ -2,15 +2,14 @@
 //! converted from our CST into the parse tree q's `parse` would build
 //! (`x+y` → `(+;`x;`y)`), and a real q compares the two with `~`.
 //!
-//! Needs a q binary (`$Q_BIN`, else `~/.kx/bin/q`) and is skipped without
+//! Needs a q binary (see `q_test_support::q_bin`) and is skipped without
 //! one. Mismatches q shares with us by design, or that await a fix, are
 //! listed in `tests/data/q_oracle_known.txt`; a listed statement that now
 //! matches fails the test too, so the list only shrinks.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::path::Path;
 
 use q_parser::{SyntaxElement, SyntaxKind as K, SyntaxNode, SyntaxToken};
 
@@ -24,13 +23,6 @@ P:{@[parse;(),x;{`QERR}]};
 T:{[i;s;o] p:P s; $[`QERR~p; -1"QONLY\t",string i; not(N p)~N v:@[value;o;{`OERR}]; -1"DIFF\t",string[i],"\t",.Q.s1[p],"\t",.Q.s1 v; ::]};
 E:{[i;s] if[not`QERR~P s; -1"OURSONLY\t",string i]};
 "#;
-
-fn q_bin() -> Option<PathBuf> {
-    std::env::var_os("Q_BIN")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".kx/bin/q")))
-        .filter(|p| p.is_file())
-}
 
 /// A q string literal.
 fn qstr(s: &str) -> String {
@@ -220,7 +212,7 @@ fn fixture_sources() -> Vec<String> {
 
 #[test]
 fn parse_trees_match_q() {
-    let Some(q) = q_bin() else {
+    let Some(q) = q_test_support::q_bin() else {
         eprintln!("skipping: no q binary (set Q_BIN)");
         return;
     };
@@ -246,22 +238,7 @@ fn parse_trees_match_q() {
         }
         .unwrap();
     }
-    script.push_str("-1\"DONE\";\nexit 0\n");
-    let path = std::env::temp_dir().join(format!("q_oracle_{}.q", std::process::id()));
-    std::fs::write(&path, script).unwrap();
-    let out = Command::new(&q)
-        .arg(&path)
-        .arg("-q")
-        .stdin(Stdio::null())
-        .output()
-        .expect("run q");
-    std::fs::remove_file(&path).unwrap();
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.lines().any(|l| l == "DONE"),
-        "q did not finish:\n{stdout}\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let stdout = q_test_support::run_q(&q, &script).unwrap_or_else(|e| panic!("q failed:\n{e}"));
 
     let known_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/q_oracle_known.txt");
     let known: BTreeSet<String> = std::fs::read_to_string(&known_path)
@@ -272,7 +249,7 @@ fn parse_trees_match_q() {
         .collect();
     let mut seen = BTreeSet::new();
     let mut unexpected = Vec::new();
-    for line in stdout.lines().filter(|l| *l != "DONE") {
+    for line in stdout.lines() {
         let mut parts = line.splitn(4, '\t');
         let (Some(what), Some(i)) = (parts.next(), parts.next()) else {
             continue;

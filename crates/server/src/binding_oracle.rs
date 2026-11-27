@@ -1,12 +1,10 @@
-//! Binding oracle: each case runs in a real q (`$Q_BIN`, else `~/.kx/bin/q`;
+//! Binding oracle: each case runs in a real q (see `q_test_support::q_bin`;
 //! skipped without one) in several contexts — top level, a lambda, `\d .ns`,
 //! a lambda defined in `.ns` (called there and from the root), and
 //! `system "d .ns"`. The globals q creates or changes must be exactly the
 //! names our symbol table records a global definition for inside the case.
 
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::path::Path;
 
 use crate::document::Document;
 
@@ -128,30 +126,15 @@ fn ours(src: &str, code: std::ops::Range<usize>, cands: &[String]) -> Vec<String
 
 /// Candidates q creates or changes running `src`.
 fn theirs(q: &Path, src: &str, cands: &[String]) -> Result<Vec<String>, String> {
-    static RUN: AtomicUsize = AtomicUsize::new(0);
     let syms = format!("`{}", cands.join("`"));
     // The prelude is `src`'s first line; snapshot right after it.
     let (prelude, rest) = src.split_once('\n').unwrap();
     let script = format!(
         "{prelude}\n.oracle.get:{{@[get;x;{{`oracle_missing}}]}};\n\
          .oracle.c:(),{syms};\n.oracle.b:.oracle.get each .oracle.c;\n{rest}\\d .\n\
-         -1 \"CHANGED \",/:string .oracle.c where not .oracle.b~'.oracle.get each .oracle.c;\n\
-         -1 \"DONE\";\nexit 0\n"
+         -1 \"CHANGED \",/:string .oracle.c where not .oracle.b~'.oracle.get each .oracle.c;"
     );
-    let run = RUN.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("binding_oracle_{}_{run}.q", std::process::id()));
-    std::fs::write(&path, &script).unwrap();
-    let out = Command::new(q)
-        .arg(&path)
-        .arg("-q")
-        .stdin(Stdio::null())
-        .output()
-        .expect("run q");
-    std::fs::remove_file(&path).unwrap();
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    if !stdout.lines().any(|l| l == "DONE") {
-        return Err(format!("{stdout}{}", String::from_utf8_lossy(&out.stderr)));
-    }
+    let stdout = q_test_support::run_q(q, &script)?;
     Ok(stdout
         .lines()
         .filter_map(|l| l.strip_prefix("CHANGED "))
@@ -159,16 +142,9 @@ fn theirs(q: &Path, src: &str, cands: &[String]) -> Result<Vec<String>, String> 
         .collect())
 }
 
-fn q_bin() -> Option<PathBuf> {
-    std::env::var_os("Q_BIN")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".kx/bin/q")))
-        .filter(|p| p.is_file())
-}
-
 #[test]
 fn bindings_match_q() {
-    let Some(q) = q_bin() else {
+    let Some(q) = q_test_support::q_bin() else {
         eprintln!("skipping: no q binary (set Q_BIN)");
         return;
     };

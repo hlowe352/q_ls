@@ -417,6 +417,7 @@ dependencies = [
  "ignore",
  "q-lexer",
  "q-parser",
+ "q-test-support",
  "serde",
  "serde_json",
  "smol_str",
@@ -430,9 +431,14 @@ version = "0.1.0"
 dependencies = [
  "logos",
  "q-lexer",
+ "q-test-support",
  "rowan",
  "smol_str",
 ]
+
+[[package]]
+name = "q-test-support"
+version = "0.1.0"
 
 [[package]]
 name = "quote"

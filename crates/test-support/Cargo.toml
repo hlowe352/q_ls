@@ -1,0 +1,8 @@
+[package]
+name = "q-test-support"
+description = "Test-only helpers for running a real q"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
