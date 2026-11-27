@@ -40,13 +40,14 @@ jobs:
         # Use cargo install without --locked so rustix (a cargo-fuzz dep) can
         # be resolved to a version compatible with current nightly. The
         # rust-cache step above caches ~/.cargo/bin between runs.
-        run: cargo install cargo-fuzz
+        run: cargo +nightly install cargo-fuzz
 
       - name: fuzz parse target
         working-directory: crates/parser
         env:
           MAX_TIME: ${{ inputs.max_total_time }}
-        run: cargo fuzz run parse tests/data/real_q -- -max_total_time=$MAX_TIME -timeout=10
+        # `+nightly` overrides the repo's pinned stable (rust-toolchain.toml).
+        run: cargo +nightly fuzz run parse tests/data/real_q -- -max_total_time=$MAX_TIME -timeout=10
 
       - name: upload crashes
         if: failure()

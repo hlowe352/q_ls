@@ -75,11 +75,7 @@ impl QLanguageServer {
         let state = Arc::clone(&self.state);
         let client = self.client.clone();
         tokio::spawn(async move {
-            let scan = tokio::task::spawn_blocking(move || {
-                let mut files = Vec::new();
-                collect_q_files(&root, &mut files);
-                files
-            });
+            let scan = tokio::task::spawn_blocking(move || collect_q_files(&root));
             let files = match scan.await {
                 Ok(files) => files,
                 Err(e) => {
@@ -381,21 +377,20 @@ fn find_git_root(path: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-/// Recursively parse every `.q` file under `dir`, keyed by canonical URI.
-fn collect_q_files(dir: &Path, out: &mut Vec<(Uri, Document)>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for path in entries.flatten().map(|e| e.path()) {
-        if path.is_dir() {
-            collect_q_files(&path, out);
-        } else if path.extension().is_some_and(|e| e == "q")
-            && let Ok(text) = std::fs::read_to_string(&path)
-            && let Some(uri) = path.canonicalize().ok().and_then(Uri::from_file_path)
-        {
-            out.push((uri, Document::new(text, 0)));
-        }
-    }
+/// Parse every `.q` file under `root`, keyed by canonical URI. Honours
+/// `.gitignore`/`.ignore` files and skips hidden directories, the same way
+/// ripgrep does.
+fn collect_q_files(root: &Path) -> Vec<(Uri, Document)> {
+    ignore::WalkBuilder::new(root)
+        .build()
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "q"))
+        .filter_map(|e| {
+            let text = std::fs::read_to_string(e.path()).ok()?;
+            let uri = Uri::from_file_path(e.path().canonicalize().ok()?)?;
+            Some((uri, Document::new(text, 0)))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -403,23 +398,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn collect_q_files_and_git_root() {
+    fn collect_q_files_honours_ignores_and_finds_git_root() {
         let root = std::env::temp_dir().join(format!("q-ls-backend-{}", std::process::id()));
-        let sub = root.join("my dir");
-        std::fs::create_dir_all(sub.join(".git")).unwrap();
-        std::fs::write(sub.join("a.q"), "a:1").unwrap();
-        std::fs::write(sub.join("notes.txt"), "x").unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        for (path, text) in [
+            (".git/x.q", "x:1"),
+            (".gitignore", "ignored/\n"),
+            (".ignore", "fixtures/\n"),
+            ("my dir/a.q", "a:1"),
+            ("my dir/notes.txt", "x"),
+            ("ignored/b.q", "b:1"),
+            ("fixtures/c.q", "c:1"),
+            (".hidden/d.q", "d:1"),
+        ] {
+            let path = root.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
 
-        let mut files = Vec::new();
-        collect_q_files(&root, &mut files);
-        assert_eq!(files.len(), 1);
-        let uri = files[0].0.as_str();
+        let files = collect_q_files(&root);
+        let uris: Vec<&str> = files.iter().map(|(u, _)| u.as_str()).collect();
+        assert_eq!(uris.len(), 1, "only my dir/a.q expected: {uris:?}");
         assert!(
-            uri.ends_with("my%20dir/a.q"),
-            "spaces percent-encoded: {uri}"
+            uris[0].ends_with("my%20dir/a.q"),
+            "spaces percent-encoded: {uris:?}"
         );
 
-        assert_eq!(find_git_root(&sub.join("a.q")), Some(sub.clone()));
+        assert_eq!(find_git_root(&root.join("my dir/a.q")), Some(root.clone()));
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

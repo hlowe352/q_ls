@@ -3,6 +3,9 @@
 - All Rust code must be formatted with `cargo fmt`. Run before committing.
 - All Rust code must be clean under `cargo clippy --workspace --all-targets -- -D warnings -W clippy::pedantic`. Fix warnings rather than suppressing them unless there is a documented reason. The `-D warnings` matches CI (`RUSTFLAGS=-D warnings`) so warnings that would fail the build are caught locally.
 
+- The toolchain is pinned in `rust-toolchain.toml` (CI installs the same one). Bump it deliberately, fixing any new lints in the same PR.
+- The workspace index honours `.gitignore`/`.ignore`; parser fixtures are excluded via `.ignore`.
+
 # Git Workflow
 
 - Never use `git worktree add`. Always use `git checkout -b` for new branches.
