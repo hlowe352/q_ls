@@ -141,7 +141,7 @@ fn atom(p: &mut Parser) -> Option<(CompletedMarker, bool)> {
     }
     let m = p.start();
     let (node, verb) = match kind {
-        k if matches!(k, String | Symbol) || is_scalar_literal(k) => {
+        k if matches!(k, String | Symbol | Boolean | ByteList) || is_scalar_literal(k) => {
             p.bump();
             (LiteralExpr, false)
         }
@@ -184,7 +184,7 @@ fn atom(p: &mut Parser) -> Option<(CompletedMarker, bool)> {
                     p.current_text().unwrap_or("\\...")
                 )
             } else {
-                format!("unexpected token: {kind:?}")
+                format!("unexpected `{}`", p.current_text().unwrap_or_default())
             };
             p.error(msg);
             (Error, false)
@@ -328,15 +328,14 @@ fn at_boundary(p: &Parser) -> bool {
         || (p.qsql_comma_stop && p.at(Comma))
 }
 
-/// Literals that form a vector when space-separated (`1 2 3`, `0b 1b`).
-/// Strings and symbols are literals but not vector elements: `` `a`b `` is
-/// one token, and `` `a `b `` is application.
+/// Literals that form a vector when space-separated (`1 2 3`). Other
+/// literals juxtapose as application: `` `a `b ``, `1b 0b`, `0x01 0x02`
+/// (their vectors are single tokens: `` `a`b ``, `10b`, `0x0102`).
 pub(crate) fn is_scalar_literal(kind: SyntaxKind) -> bool {
     matches!(
         kind,
         Integer
             | Float
-            | Boolean
             | Date
             | Month
             | Guid
@@ -346,7 +345,6 @@ pub(crate) fn is_scalar_literal(kind: SyntaxKind) -> bool {
             | Second
             | Time
             | Timestamp
-            | ByteList
     )
 }
 

@@ -175,7 +175,8 @@ impl SymTable {
         else {
             return;
         };
-        let is_double_colon = op.kind() == SyntaxKind::ColonColon;
+        // `::` and `+::` assign globally.
+        let is_double_colon = op.text().ends_with("::");
         let in_lambda = stack.last().copied();
         let Some(lhs) = bin.first_child() else { return };
         let is_name =
@@ -199,7 +200,7 @@ impl SymTable {
         };
         let is_global =
             is_double_colon || tok.kind() == SyntaxKind::DottedIdent || in_lambda.is_none();
-        if let (SyntaxKind::CompoundAssign, Some(idx)) = (op.kind(), in_lambda) {
+        if let (SyntaxKind::CompoundAssign, Some(idx), false) = (op.kind(), in_lambda, is_global) {
             // Local only if no global def exists — resolved after pass 1.
             let name = qualify(tok.text(), is_global, active_ns);
             let off = tok.text_range().start().into();

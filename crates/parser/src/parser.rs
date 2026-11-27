@@ -105,131 +105,64 @@ impl CompletedMarker {
     }
 }
 
-/// Lex `source`, re-inserting the whitespace logos skips as `Whitespace`.
+/// Lex `source`, re-inserting the whitespace logos skips. Comments and DSL
+/// lines depend on line context the lexer can't see, so they are recognised
+/// here, before the text they cover is lexed:
+/// - a column-0 `/` line opens a block comment closed by a column-0 `\` line;
+/// - outside one, a column-0 `\` line ends the script;
+/// - a `/` at line start or after whitespace comments to end of line;
+/// - `k)` / `p)` at line start make the rest of the line a `DslLine`.
 fn lex(source: &str) -> Vec<LexedToken> {
     let mut tokens = Vec::new();
     let mut lexer = q_lexer::Token::lexer(source);
-    let mut last_end = 0;
-    while let Some(result) = lexer.next() {
-        let span = lexer.span();
-        if span.start > last_end {
-            tokens.push(LexedToken::new(
-                SyntaxKind::Whitespace,
-                &source[last_end..span.start],
-            ));
+    loop {
+        let pos = lexer.span().end;
+        let rest = source[pos..].trim_start_matches([' ', '\t']);
+        let start = source.len() - rest.len();
+        if start > pos {
+            tokens.push(LexedToken::new(SyntaxKind::Whitespace, &source[pos..start]));
         }
-        let kind = result.map_or(SyntaxKind::Error, SyntaxKind::from_token);
-        tokens.push(LexedToken::new(kind, &source[span.clone()]));
-        last_end = span.end;
-    }
-    if last_end < source.len() {
-        tokens.push(LexedToken::new(SyntaxKind::Whitespace, &source[last_end..]));
-    }
-    tokens
-}
-
-/// Is token `i` preceded on its line only by whitespace?
-fn is_at_line_start(tokens: &[LexedToken], i: usize) -> bool {
-    let from = tokens[..i]
-        .iter()
-        .rposition(|t| t.kind == SyntaxKind::Newline)
-        .map_or(0, |p| p + 1);
-    tokens[from..i]
-        .iter()
-        .all(|t| t.kind == SyntaxKind::Whitespace)
-}
-
-/// Fix up slash/backslash comments the lexer can't see:
-///
-/// 1. A `/` at line start or after whitespace (`expr   /note`) starts a line
-///    comment running to end of line (the lexer only knows `/ text`).
-/// 2. A line that is exactly `\` (column 0, trailing whitespace allowed)
-///    outside a block comment ends the script: the rest of the file is one
-///    `CommentBlock`. (Block comments `/` … `\` are lexed earlier.)
-fn normalize_slash_comments(tokens: &mut Vec<LexedToken>) {
-    let mut i = 0;
-    while i < tokens.len() {
-        let kind = tokens[i].kind;
-        let line_start = is_at_line_start(tokens, i);
-        let end = if kind == SyntaxKind::Slash
-            && (line_start || (i > 0 && tokens[i - 1].kind == SyntaxKind::Whitespace))
-        {
-            let end = tokens[i..]
-                .iter()
-                .position(|t| t.kind == SyntaxKind::Newline)
-                .map_or(tokens.len(), |n| i + n);
-            Some((SyntaxKind::LineComment, end))
-        } else if kind == SyntaxKind::Backslash
-            && (i == 0 || tokens[i - 1].kind == SyntaxKind::Newline)
-            && tokens[i + 1..]
-                .iter()
-                .find(|t| t.kind != SyntaxKind::Whitespace)
-                .is_none_or(|t| t.kind == SyntaxKind::Newline)
-        {
-            Some((SyntaxKind::CommentBlock, tokens.len()))
+        let line = &rest[..rest.find(['\r', '\n']).unwrap_or(rest.len())];
+        let line_start = pos == 0 || source[..pos].ends_with('\n');
+        let col0 = line_start && start == pos;
+        let special = if col0 && line.trim_end() == "/" {
+            Some((SyntaxKind::CommentBlock, block_comment_len(rest)))
+        } else if col0 && line.trim_end() == "\\" {
+            Some((SyntaxKind::CommentBlock, rest.len()))
+        } else if rest.starts_with('/') && (line_start || start > pos) {
+            Some((SyntaxKind::LineComment, line.len()))
+        } else if line_start && (rest.starts_with("k)") || rest.starts_with("p)")) {
+            Some((SyntaxKind::DslLine, line.len()))
         } else {
             None
         };
-        if let Some((kind, end)) = end {
-            let text: String = tokens[i..end].iter().map(|t| t.text.as_str()).collect();
-            tokens.splice(i..end, [LexedToken::new(kind, &text)]);
-        }
-        i += 1;
-    }
-}
-
-/// The `CommentBlock` regex can over-match past its closing `\` line; split
-/// off and re-lex anything after the first closing line.
-fn collapse_block_comments(tokens: &mut Vec<LexedToken>) {
-    let mut i = 0;
-    while i < tokens.len() {
-        if tokens[i].kind == SyntaxKind::CommentBlock {
-            let text = tokens[i].text.clone();
-            let mut end = 0;
-            let close = text
-                .split_inclusive('\n')
-                .enumerate()
-                .find_map(|(idx, line)| {
-                    end += line.len();
-                    (idx > 0 && line.trim() == "\\").then_some(end)
-                });
-            if let Some(end) = close
-                && end < text.len()
-            {
-                tokens[i].text = SmolStr::new(&text[..end]);
-                let tail = tokens.split_off(i + 1);
-                tokens.extend(lex(&text[end..]));
-                tokens.extend(tail);
-            }
-        }
-        i += 1;
-    }
-}
-
-/// The lexer matches `k)…` / `p)…` anywhere, but q only treats them as DSL
-/// escapes at line start. Split mid-line matches (e.g. the `p)` in
-/// `(3#p),fn`) back into `Ident` + `RParen` + re-lexed rest.
-fn split_misplaced_dsl_lines(tokens: &mut Vec<LexedToken>) {
-    let mut i = 0;
-    while i < tokens.len() {
-        if tokens[i].kind == SyntaxKind::DslLine && !is_at_line_start(tokens, i) {
-            let text = tokens[i].text.clone();
-            let mut split = vec![
-                LexedToken::new(SyntaxKind::Ident, &text[..1]),
-                LexedToken::new(SyntaxKind::RParen, &text[1..2]),
-            ];
-            split.extend(lex(&text[2..]));
-            tokens.splice(i..=i, split);
-            // Skip Ident + RParen; a nested `p)` in the rest is re-checked.
-            i += 2;
+        if let Some((kind, len)) = special {
+            tokens.push(LexedToken::new(kind, &rest[..len]));
+            lexer.bump(start - pos + len);
+        } else if let Some(result) = lexer.next() {
+            let kind = result.map_or(SyntaxKind::Error, SyntaxKind::from_token);
+            tokens.push(LexedToken::new(kind, lexer.slice()));
         } else {
-            i += 1;
+            return tokens;
         }
     }
 }
 
-/// Merge `-` directly followed by a number or time (not a date, boolean,
-/// byte list or guid, which q cannot negate) into a negative literal unless
+/// Length of the block comment opening `rest`: through the first later line
+/// that is exactly `\` in column 0 (trailing whitespace allowed), else all.
+fn block_comment_len(rest: &str) -> usize {
+    let mut len = 0;
+    for (i, line) in rest.split_inclusive('\n').enumerate() {
+        if i > 0 && line.trim_end() == "\\" {
+            return len + line.trim_end_matches(['\r', '\n']).len();
+        }
+        len += line.len();
+    }
+    rest.len()
+}
+
+/// Merge `-` directly followed by a number or time (not a date or guid,
+/// which q cannot negate) into a negative literal unless
 /// it directly follows a noun (`x-1`, `f[a]-1`, `1-1` are subtraction;
 /// `x -1`, `x*-1`, `x:-1` are negative literals).
 fn merge_negative_literals(tokens: &mut Vec<LexedToken>) {
@@ -238,10 +171,7 @@ fn merge_negative_literals(tokens: &mut Vec<LexedToken>) {
         let next_kind = tokens[i + 1].kind;
         let is_sign = tokens[i].kind == SyntaxKind::Minus
             && is_scalar_literal(next_kind)
-            && !matches!(
-                next_kind,
-                SyntaxKind::Boolean | SyntaxKind::Date | SyntaxKind::ByteList | SyntaxKind::Guid
-            )
+            && !matches!(next_kind, SyntaxKind::Date | SyntaxKind::Guid)
             && (i == 0 || !ends_noun(tokens[i - 1].kind));
         if is_sign {
             let merged = LexedToken::new(next_kind, &format!("-{}", tokens[i + 1].text));
@@ -258,6 +188,8 @@ fn ends_noun(kind: SyntaxKind) -> bool {
             kind,
             SyntaxKind::Ident
                 | SyntaxKind::DottedIdent
+                | SyntaxKind::Boolean
+                | SyntaxKind::ByteList
                 | SyntaxKind::String
                 | SyntaxKind::Symbol
                 | SyntaxKind::FileSymbol
@@ -289,9 +221,6 @@ impl Parser {
     #[must_use]
     pub fn new(source: &str) -> Self {
         let mut tokens = lex(source);
-        collapse_block_comments(&mut tokens);
-        normalize_slash_comments(&mut tokens);
-        split_misplaced_dsl_lines(&mut tokens);
         merge_negative_literals(&mut tokens);
 
         let nt = (0..tokens.len())

@@ -10,89 +10,68 @@ use logos::Logos;
 #[allow(clippy::duplicated_attributes)]
 #[derive(Logos, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[logos(skip r"[ \t]+")] // skip horizontal whitespace only
+#[logos(subpattern ymd = r"[0-9]{4}\.(0[1-9]|1[0-2])\.(0[1-9]|[12][0-9]|3[01])")]
+// Time after `D`/`T`: a bare hour (`D0`), or `hh:mm[:ss[.fff]]`.
+#[logos(subpattern hms = r"([0-9]{1,2}|[0-9]{2}:[0-5][0-9](:[0-5][0-9](\.[0-9]*)?)?)?")]
 pub enum Token {
     // -----------------------------------------------------------------------
     // Literals
     // -----------------------------------------------------------------------
+    // Numbers and times. `0[NWnw]` + a type letter is that type's null or
+    // infinity. Any other number-like word is one `Error` token (`2b`,
+    // `1.5i`, `12:60`), as in q, rather than a literal followed by a name.
     /// Boolean literal: `0b`, `1b`, `010101b`
     #[regex(r"[01]+b")]
     Boolean,
 
-    /// Integer literal (long/int/short/byte suffixes, hex, special nulls/infs)
-    ///
-    /// Covers: `42`, `42i`, `42j`, `42h`, byte atoms `0x2A`, `0Ni`, `0Wi`,
-    ///         `0Nj`, `0Wj`, `0Nh`, `0Wh`
-    ///
-    /// Note: negative sign is NOT included here; the parser handles unary minus.
-    /// Priority 3 keeps hex above the plain decimal regex (default priority 2).
-    #[regex(r"0x[0-9A-Fa-f]{1,2}", priority = 4)] // byte atom (1-2 hex digits)
-    #[regex(r"0N[ijh]", priority = 5)] // typed nulls (other types have their own variants)
-    #[regex(r"0N", priority = 4)] // bare long null `0N` (longer typed patterns take priority)
-    #[regex(r"0W[ijh]", priority = 5)] // typed infs
-    #[regex(r"[0-9]+[ijh]?")] // plain decimal, optional suffix
+    /// Integer literal: `42`, `42i`, `42j`, `42h`, `0N`, `0W`, `0Ni`, `0wj`.
+    /// The sign is merged by the parser.
+    #[regex(r"[0-9]+[ijh]?|0[NW]|0[NWnw][ijh]")]
     Integer,
 
-    /// Float literal
-    ///
-    /// Covers: `3.14`, `.5`, `3.14e10`, `3.14f`, `3.14e`, `0n`, `0w`, `0Nf`,
-    ///         `0Wf`, `0Ne`, `0We`
-    #[regex(r"0[nw]", priority = 4)] // generic float null/inf (lower-case)
-    #[regex(r"0N[fe]", priority = 5)] // typed float nulls
-    #[regex(r"0W[fe]", priority = 5)] // typed float infs
-    #[regex(r"[0-9]+\.[0-9]*([eE][0-9]+)?[fe]?")] // decimal float
-    #[regex(r"\.[0-9]+([eE][0-9]+)?[fe]?")] // no leading digit: `.5`
-    #[regex(r"[0-9]+[eE][0-9]+[fe]?")] // scientific without dot
-    #[regex(r"[0-9]+f")] // integer-form float: `3f`, `100f`
-    #[regex(r"[0-9]+e")]
-    // integer-form real: `3e`, `100e` (longest-match ensures `3e10` still hits scientific)
+    /// Float literal: `3.14`, `.5`, `1.`, `1e-5`, `3f`, `3e`, `0n`, `0w`, `0Nf`
+    /// (priority: `0n` is a float, not `[0-9]+n`)
+    #[regex(r"([0-9]+\.[0-9]*|\.[0-9]+)(e[-+]?[0-9]+)?[ef]?|[0-9]+(e[-+]?[0-9]+)?[ef]|[0-9]+e[-+]?[0-9]+|0[nw]|0[NWnw][ef]", priority = 10)]
     Float,
 
-    /// Timestamp literal: `2024.01.15D12:30:00.000000000`, `0Np`, `0Wp`
-    #[regex(r"0[NW]p", priority = 6)]
-    #[regex(r"[12][0-9]{3}\.(0[1-9]|1[0-2])\.(0[1-9]|[12][0-9]|3[01])D[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?")]
+    /// Timestamp literal: `2024.01.15D12:30:00.000000000`, `2024.01.15D`, `0p`, `0Np`
+    #[regex(r"(?&ymd)D(?&hms)|[0-9]+p|0[NWnw]p")]
     Timestamp,
 
     /// Date literal: `2024.01.15`, `0Nd`
-    #[regex(r"0Nd")]
-    #[regex(r"[0-9]{4}\.(0[1-9]|1[0-2])\.(0[1-9]|[12][0-9]|3[01])")]
+    #[regex(r"(?&ymd)|0[NWnw]d")]
     Date,
 
-    /// Month literal: `2024.01m`, `0Nm`, `0Wm`
-    #[regex(r"0[NW]m", priority = 6)]
-    #[regex(r"[0-9]{4}\.(0[1-9]|1[0-2])m", priority = 6)]
+    /// Month literal: `2024.01m`, `0Nm`
+    #[regex(r"[0-9]{4}\.(0[1-9]|1[0-2])m|0[NWnw]m")]
     Month,
 
-    /// Guid literal: `0Ng`, `0Wg`
-    #[regex(r"0[NW]g", priority = 6)]
+    /// Guid null: `0Ng`
+    #[regex(r"0[Nn]g")]
     Guid,
 
-    /// Timespan literal: `1D`, `0D00:00:00.000000000`, `0Nn`, `0Wn`
-    #[regex(r"0[NW]n", priority = 6)]
-    #[regex(r"[0-9]+D[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?", priority = 6)]
-    #[regex(r"[0-9]+D", priority = 5)]
+    /// Timespan literal: `1D`, `0D00`, `0D12:30:00.000000000`, `5n`, `0Nn`
+    #[regex(r"[0-9]+D(?&hms)|[0-9]+n|0[NWnw]n")]
     Timespan,
 
-    /// Datetime literal: `0Nz`, `0Wz`
-    #[regex(r"0[NW]z", priority = 6)]
+    /// Datetime literal: `2024.01.15T12:30:00.000`, `0Nz`
+    #[regex(r"(?&ymd)T(?&hms)|0[NWnw]z")]
     Datetime,
 
-    /// Minute literal: `12:30`, `0Nu`, `0Wu`
-    #[regex(r"0[NW]u", priority = 6)]
-    #[regex(r"[0-9]{2}:[0-9]{2}", priority = 6)]
+    /// Minute literal: `12:30`, `12:30u`, `5u`, `0Nu`
+    #[regex(r"[0-9]{2}:[0-5][0-9]u?|[0-9]+u|0[NWnw]u")]
     Minute,
 
-    /// Second literal: `12:30:45`, `0Nv`, `0Wv`
-    #[regex(r"0[NW]v", priority = 6)]
-    #[regex(r"[0-9]{2}:[0-9]{2}:[0-9]{2}", priority = 6)]
+    /// Second literal: `12:30:45`, `5v`, `0Nv`
+    #[regex(r"[0-9]{2}:[0-5][0-9]:[0-5][0-9]v?|[0-9]+v|0[NWnw]v")]
     Second,
 
-    /// Time literal: `12:30:45.678`, `0Nt` (requires fractional seconds)
-    #[regex(r"0Nt")]
-    #[regex(r"[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]+")]
+    /// Time literal: `12:30:45.678`, `12:30:45t`, `5t`, `0Nt`
+    #[regex(r"[0-9]{2}:[0-5][0-9]:[0-5][0-9](\.[0-9]*t?|t)|[0-9]+t|0[NWnw]t")]
     Time,
 
-    /// Byte list literal: `0x2A3`, `0xABCD` (3+ hex digits; 2 per byte)
-    #[regex(r"0x[0-9A-Fa-f]{3,}", priority = 6)]
+    /// Byte literal: `0x2A` (atom), `0x`, `0x2A3B` (list)
+    #[regex(r"0x[0-9A-Fa-f]*")]
     ByteList,
 
     /// String literal: `"hello"`, with escape sequences
@@ -112,16 +91,16 @@ pub enum Token {
     // -----------------------------------------------------------------------
     // Identifiers
     // -----------------------------------------------------------------------
-    /// DSL escape line: `k)expr` or `p)expr`. Entire line is opaque.
-    #[regex(r"[kp]\)[^\r\n]*", priority = 5)]
+    /// DSL escape line: `k)expr` or `p)expr` at line start (recognised by
+    /// the parser, which knows the line context).
     DslLine,
 
-    /// Dotted/namespaced identifier starting with dot: `.q.func`, `.Q.en`, `.z.ts`, `.d`
-    #[regex(r"\.[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)*")]
+    /// Identifier starting with a dot: `.q.func`, `.Q.en`, `.z.ts`, `.d`
+    #[regex(r"\.[a-zA-Z][a-zA-Z0-9_.]*")]
     DottedIdent,
 
-    /// Regular identifier (may include dot-separated segments): `trade`, `myVar`, `assert.true`
-    #[regex(r"[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)*")]
+    /// Identifier; may contain dots (`assert.true`, `.a.1b`, `x.`).
+    #[regex(r"[a-zA-Z][a-zA-Z0-9_.]*")]
     Ident,
 
     // -----------------------------------------------------------------------
@@ -175,9 +154,9 @@ pub enum Token {
     // -----------------------------------------------------------------------
     // Assignment / colon variants
     // -----------------------------------------------------------------------
-    /// Compound assignment operators: `+:`, `-:`, `*:`, etc.
-    /// Must come before individual operator + Colon.
-    #[regex(r"[-+*%><~=_#$!|&?^,@]:", priority = 3)]
+    /// Compound assignment: `+:`, `,:`, and `+::` (which, like `::`, amends
+    /// a global unless a local of that name exists).
+    #[regex(r"[-+*%><~=_#$!|&?^,@]::?", priority = 3)]
     CompoundAssign,
 
     /// File I/O operators `0:`, `1:`, `2:`
@@ -240,18 +219,12 @@ pub enum Token {
     #[regex(r"\r?\n")]
     Newline,
 
-    /// Line comment: `/ comment text` (slash followed by space or end-of-line)
-    /// Also covers full-line comments that begin with `/` or `//`.
-    /// The lexer emits the entire comment (including the leading `/`) as one token.
-    #[regex(r"//[^\r\n]*", priority = 8)] // `//` style comment
-    #[regex(r"/[^\S\r\n][^\r\n]*", priority = 8)] // `/ ` followed by rest of line
-    #[regex(r"/\r?\n", priority = 8)] // bare `/` at end of line
+    /// Line comment: `/` at line start or after whitespace, to end of line.
+    /// Comments need line context, so the parser recognises them.
     LineComment,
 
-    /// Multi-line comment block. Opens with a line containing only `/` and
-    /// closes with a line containing only `\` (or EOF). Greedy match.
-    #[regex(r"/[ \t]*\r?\n(?:[^\n]*\r?\n)*\\[ \t]*(?:\r?\n)?", priority = 7)]
-    #[regex(r"/[ \t]*\r?\n(?:[^\n]*\r?\n)*[^\n]*", priority = 6)]
+    /// Block comment: a column-0 `/` line up to a column-0 `\` line, or a
+    /// column-0 `\` line to the end of the script. Recognised by the parser.
     CommentBlock,
 
     /// Shebang: `#!/usr/bin/env q`
@@ -278,8 +251,9 @@ pub enum Token {
     // -----------------------------------------------------------------------
     // Error (unrecognized input)
     // -----------------------------------------------------------------------
-    /// Catch-all for unrecognized input (logos 0.13+ uses the unit variant
-    /// without `#[error]`; the `Err` side of the iterator carries this).
+    /// Unrecognised input, including number-like words that are no literal
+    /// (`2b`, `1.5i`). Lowest priority, so only wins as the longest match.
+    #[regex(r"\.?[0-9]([0-9A-Za-z.]|e[-+][0-9]|[0-9]:[0-9])*", priority = 0)]
     Error,
 }
 
@@ -295,7 +269,7 @@ mod tests {
     ("42j", "Integer"),
     ("42i", "Integer"),
     ("42h", "Integer"),
-    ("0x2A", "Integer"),
+    ("0x2A", "ByteList"),
     ("0Ni", "Integer"),
     ("0Wi", "Integer"),
     ("0Nh", "Integer"),
@@ -349,7 +323,6 @@ mod tests {
     ("\\\\", "Exit"),
     ("/", "Slash"),
     ("\\", "Backslash"),
-    ("/ this is a comment", "LineComment"),
     ("2024.01.15", "Date"),
     ("0Nd", "Date"),
     ("12:30:00.000", "Time"),
@@ -381,7 +354,7 @@ mod tests {
     ("0Nn", "Timespan"),
     ("0Np", "Timestamp"),
     ("0Wm", "Month"),
-    ("0Wg", "Guid"),
+    ("0Wg", "Error"), // q has no guid infinity
     ("0Wn", "Timespan"),
     ("0Wz", "Datetime"),
     ("0Wu", "Minute"),
@@ -402,15 +375,9 @@ mod tests {
     ("12:30:45.678", "Time"),
     ("0xABCD", "ByteList"),
     ("0x0011223344", "ByteList"),
-    ("0xAB", "Integer"),
+    ("0xAB", "ByteList"),
     ("0x2A3", "ByteList"),
-    ("/\nthis is\nblock comment\n\\\n", "CommentBlock"),
-    ("/\nuntil end of file", "CommentBlock"),
-    ("k)1+2", "DslLine"),
-    ("p)select * from t", "DslLine"),
-    ("k)foo\nbar", "DslLine Newline Ident"),
     ("k", "Ident"),
-    ("/\nblock\nstuff\n\\\ny:2\n", "CommentBlock"),
     ("+:", "CompoundAssign"),
     ("-:", "CompoundAssign"),
     ("*:", "CompoundAssign"),
@@ -429,6 +396,45 @@ mod tests {
     ("^:", "CompoundAssign"),
     (",:", "CompoundAssign"),
     ("@:", "CompoundAssign"),
+    ("x+::1", "Ident CompoundAssign Integer"),
+    // Forms checked against q 4.1.
+    ("0W", "Integer"),
+    ("0wj", "Integer"),
+    (".5", "Float"),
+    ("1.", "Float"),
+    ("1e-5", "Float"),
+    ("1e+5", "Float"),
+    ("1.5e5e", "Float"),
+    ("0nf", "Float"),
+    ("0p", "Timestamp"),
+    ("2000.01.05D", "Timestamp"),
+    ("1970.01.01D00:00", "Timestamp"),
+    ("0wz", "Datetime"),
+    ("2000.01.01T12", "Datetime"),
+    ("0D00", "Timespan"),
+    ("0D1", "Timespan"),
+    ("2000.01.01D0", "Timestamp"),
+    ("0D1:30", "Error"),
+    ("5n", "Timespan"),
+    ("0wu", "Minute"),
+    ("12:30u", "Minute"),
+    ("99:59", "Minute"),
+    ("12:30:00t", "Time"),
+    ("0Wd", "Date"),
+    ("0x", "ByteList"),
+    (".adv.sr.223", "DottedIdent"),
+    ("x.", "Ident"),
+    ("a.1", "Ident"),
+    ("1:2", "FileOp1 Integer"),
+    // Number-like words that are no literal are one error token.
+    ("2b", "Error"),
+    ("1E5", "Error"),
+    ("1.22i", "Error"),
+    ("1e22i", "Error"),
+    ("12:60", "Error"),
+    ("2024.13.01", "Error"),
+    ("1..2", "Error"),
+    ("12:42:62346.123", "Error"),
     ];
 
     #[test]
