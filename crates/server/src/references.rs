@@ -218,7 +218,7 @@ fn is_col_def_in_table(ident_expr: &SyntaxNode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace_index::tests::{doc, index, uri};
+    use crate::workspace_index::tests::{doc, index, markers, uri};
 
     /// Start offsets of single-file references from byte `cursor`.
     fn refs(src: &str, cursor: usize, include_decl: bool) -> Vec<usize> {
@@ -241,20 +241,42 @@ mod tests {
             .collect()
     }
 
+    /// Single-file cases: `«` marks the cursor and `»` each expected
+    /// reference (declarations included). The set must match exactly.
+    #[rustfmt::skip]
+    const CASES: &[&str] = &[
+        "«»x:1; y:»x+»x; z:»x",
+        "x:99; f:{[«»x] »x+1}; y:x",                        // param scope excludes outer x
+        "f:{»a:1; »a:2; «»a}",                              // rebindings are one symbol
+        "»a:1; «»a:2; »a",
+        "a:1«; b:2;",                                       // not on an identifier
+        // Tables named by backtick symbols in upsert / from clauses
+        "\\d .cache\n«»cache:1\n\\d .\n»`.cache.cache upsert 2",
+        "\\d .cache\n«»cache:1\n\\d .\ndelete from »`.cache.cache where 1b",
+        "\\d .cache\n«»cache:1\n\\d .\nupdate x:now from »`.cache.cache where 1b",
+        "\\d .cache\n«»cache:1\n\\d .\ndrop:{delete from »`.cache.cache where id in x}",
+        "\\d .cache\n«»cache:1\n\\d .\nr:select id from ».cache.cache where 1b",
+        // Qualified and bare forms are the same symbol
+        "\\d .cache\n»cache:1\nf:{exec size from »cache}\n\\d .\nshow «».cache.cache",
+        "\\d .cache\n«»cache:1\nf:{if[1b; exec size from »cache; 0]}",
+        "\\d .cache\n«»cache:1\nevict:{[r] r:select lastaccess,id from »cache; r}",
+        // `from` expressions are code; columns (incl. of nested queries) are not
+        "«»f:{x}\nselect from »f[1]",
+        "«»id:0j\nselect from `a xasc select id from t",
+        "«»id:0j\nselect date,id from t",
+        "«»id:0j\n$[1b; update lastaccess:now from t where id=1; 0]",
+        // Symbols that are data, and table column definitions, are not refs
+        "«»id:0j\nr`id",
+        "«»id:0j\nr:`id",
+        "\\d .cache\n«»id:0j\ncache:([id:`u#`long$()] size:`long$())\nuse:»id",
+    ];
+
     #[test]
-    fn finds_global_uses() {
-        let src = "x:1; y:x+x; z:x";
-        let cursor = src.find("x:1").unwrap();
-        let r = refs(src, cursor, true);
-        assert_eq!(
-            r,
-            vec![
-                src.find("x:1").unwrap(),
-                src.find("x+x").unwrap(),
-                src.find("x+x").unwrap() + 2,
-                src.rfind('x').unwrap(),
-            ]
-        );
+    fn single_file_cases() {
+        for case in CASES {
+            let (src, cursor, want) = markers(case);
+            assert_eq!(refs(&src, cursor, true), want, "case {case:?}");
+        }
     }
 
     #[test]
@@ -265,240 +287,6 @@ mod tests {
         // Only the two uses, not the def.
         assert_eq!(r.len(), 2);
         assert!(r.iter().all(|&o| o != src.find("x:1").unwrap()));
-    }
-
-    #[test]
-    fn lambda_param_scope() {
-        let src = "x:99; f:{[x] x+1}; y:x";
-        // Cursor on the parameter `[x]`.
-        let cursor = src.find("[x]").unwrap() + 1;
-        let r = refs(src, cursor, true);
-        // Param def + the `x+1` reference. The outer `x:99` and `y:x`
-        // refer to a *different* x.
-        assert_eq!(r.len(), 2);
-        assert!(r.contains(&(src.find("[x]").unwrap() + 1)));
-        assert!(r.contains(&src.find("x+1").unwrap()));
-    }
-
-    #[test]
-    fn rebindings_in_same_scope_are_one_symbol() {
-        // Two local rebindings + one use — find_refs must return all 3.
-        let src = "f:{a:1; a:2; a}";
-        let cursor = src.rfind('a').unwrap();
-        let r = refs(src, cursor, true);
-        assert_eq!(r.len(), 3, "want all 3 a sites, got {r:?}");
-        assert!(r.contains(&src.find("a:1").unwrap()));
-        assert!(r.contains(&src.find("a:2").unwrap()));
-    }
-
-    #[test]
-    fn global_rebindings_are_one_symbol() {
-        let src = "a:1; a:2; a";
-        let cursor = src.find("a:2").unwrap();
-        let r = refs(src, cursor, true);
-        assert_eq!(r.len(), 3, "want 3 a sites, got {r:?}");
-    }
-
-    #[test]
-    fn symbol_upsert_included_in_refs_from_bare_name() {
-        let src = "\\d .cache\ncache:1\n\\d .\n`.cache.cache upsert 2";
-        let cursor = src.find("cache:1").unwrap();
-        let r = refs(src, cursor, true);
-        let sym_off = src.find("`.cache.cache").unwrap();
-        assert!(r.contains(&sym_off), "upsert symbol ref missing; got {r:?}");
-    }
-
-    #[test]
-    fn symbol_delete_included_in_refs_from_dotted_name() {
-        let src = "\\d .cache\ncache:1\n\\d .\ndelete from `.cache.cache where 1b";
-        let cursor = src.find("cache:1").unwrap();
-        let r = refs(src, cursor, true);
-        let sym_off = src.find("`.cache.cache").unwrap();
-        assert!(r.contains(&sym_off), "delete symbol ref missing; got {r:?}");
-    }
-
-    #[test]
-    fn symbol_update_from_included() {
-        // update with column assignment: `update col:val from `.t where …`
-        let src = "\\d .cache\ncache:1\n\\d .\nupdate x:now from `.cache.cache where 1b";
-        let cursor = src.find("cache:1").unwrap();
-        let r = refs(src, cursor, true);
-        let sym_off = src.find("`.cache.cache").unwrap();
-        assert!(
-            r.contains(&sym_off),
-            "update-from symbol ref missing; got {r:?}"
-        );
-    }
-
-    #[test]
-    fn symbol_delete_in_lambda_included() {
-        let src = "\\d .cache\ncache:1\n\\d .\ndrop:{delete from `.cache.cache where id in x}";
-        let cursor = src.find("cache:1").unwrap();
-        let r = refs(src, cursor, true);
-        let sym_off = src.find("`.cache.cache").unwrap();
-        assert!(
-            r.contains(&sym_off),
-            "lambda delete symbol ref missing; got {r:?}"
-        );
-    }
-
-    #[test]
-    fn ident_from_table_in_select_included() {
-        // `.cache.cache` (dotted ident) as the FROM table in a select.
-        let src = "\\d .cache\ncache:1\n\\d .\nr:select id from .cache.cache where 1b";
-        let cursor = src.find("cache:1").unwrap();
-        let r = refs(src, cursor, true);
-        let tbl_off = src.rfind(".cache.cache").unwrap();
-        assert!(
-            r.contains(&tbl_off),
-            "select from table ref missing; got {r:?}"
-        );
-    }
-
-    #[test]
-    fn refs_from_qualified_name_finds_bare_refs() {
-        // go-to-ref from `.cache.cache` (dotted form) must find bare `cache`
-        // refs inside `\d .cache`, same as go-to-ref from the bare definition.
-        let src = "\\d .cache\ncache:1\nf:{exec size from cache}\n\\d .\nshow .cache.cache";
-        // cursor on `.cache.cache` (the dotted-ident use outside the namespace)
-        let r = refs(src, src.rfind(".cache.cache").unwrap(), true);
-        // Must find the bare `cache` def at line 2.
-        let def_off = src.find("cache:1").unwrap();
-        assert!(
-            r.contains(&def_off),
-            "bare cache def not found from qualified cursor; got {r:?}"
-        );
-        // Must find the bare `cache` use inside the lambda.
-        let use_off = src.rfind("from cache").unwrap() + "from ".len();
-        assert!(
-            r.contains(&use_off),
-            "bare cache use inside lambda not found from qualified cursor; got {r:?}"
-        );
-    }
-
-    #[test]
-    fn exec_from_table_inside_if_included() {
-        // `cache` in `exec size from cache` inside if[…] is the from-table.
-        let src = "\\d .cache\ncache:1\nf:{if[1b; exec size from cache; 0]}";
-        let cursor = src.find("cache:1").unwrap();
-        let r = refs(src, cursor, true);
-        let tbl_off = src.rfind("from cache").unwrap() + "from ".len();
-        assert!(
-            r.contains(&tbl_off),
-            "exec from-table ref inside if missing; got {r:?}"
-        );
-    }
-
-    #[test]
-    fn select_from_table_inside_lambda_included() {
-        // `select … from cache` inside a lambda body.
-        let src = "\\d .cache\ncache:1\nevict:{[r] r:select lastaccess,id from cache; r}";
-        let cursor = src.find("cache:1").unwrap();
-        let r = refs(src, cursor, true);
-        let tbl_off = src.rfind("from cache").unwrap() + "from ".len();
-        assert!(
-            r.contains(&tbl_off),
-            "select from-table ref inside lambda missing; got {r:?}"
-        );
-    }
-
-    #[test]
-    fn from_clause_expression_is_code_but_nested_query_columns_are_not() {
-        // `f` builds the table: a real reference.
-        let src = "f:{x}\nselect from f[1]";
-        let r = refs(src, 0, true);
-        assert!(r.contains(&src.rfind("f[1]").unwrap()), "got {r:?}");
-        // `id` is a column of the query nested in the `from`: not a reference.
-        let src = "id:0j\nselect from `a xasc select id from t";
-        let r = refs(src, 0, true);
-        assert_eq!(r, vec![0], "only the def; got {r:?}");
-    }
-
-    #[test]
-    fn qsql_column_name_not_included_in_refs() {
-        // `id` in select column list is a column name, not a ref to global id
-        let src = "id:0j\nselect date,id from t";
-        let cursor = src.find("id:0j").unwrap();
-        let r = refs(src, cursor, true);
-        let qsql_off = src.find("date,id").unwrap() + "date,".len();
-        assert!(
-            !r.contains(&qsql_off),
-            "qsql column falsely included; got {r:?}"
-        );
-    }
-
-    #[test]
-    fn expr_level_qsql_column_not_included_in_refs() {
-        // update inside $[…].
-        // `id` in the where clause is a column name, not a ref to global id.
-        let src = "id:0j\n$[1b; update lastaccess:now from t where id=1; 0]";
-        let cursor = src.find("id:0j").unwrap();
-        let r = refs(src, cursor, true);
-        let qsql_off = src.find("where id").unwrap() + "where ".len();
-        assert!(
-            !r.contains(&qsql_off),
-            "expr-level qsql col falsely included; got {r:?}"
-        );
-    }
-
-    #[test]
-    fn dict_index_symbol_not_included_in_refs() {
-        // r`id — dict indexing; `id must NOT appear as a ref to global `id`
-        let src = "id:0j\nr`id";
-        let cursor = src.find("id:0j").unwrap();
-        let r = refs(src, cursor, true);
-        let idx_off = src.find("r`id").unwrap() + 1; // offset of `id
-        assert!(
-            !r.contains(&idx_off),
-            "dict index falsely included; got {r:?}"
-        );
-    }
-
-    #[test]
-    fn symbol_assignment_rhs_not_included_in_refs() {
-        // r:`id — `id is just a symbol value being assigned, not a table ref
-        let src = "id:0j\nr:`id";
-        let cursor = src.find("id:0j").unwrap();
-        let r = refs(src, cursor, true);
-        let sym_off = src.find(":`id").unwrap() + 1;
-        assert!(
-            !r.contains(&sym_off),
-            "rhs symbol falsely included; got {r:?}"
-        );
-    }
-
-    #[test]
-    fn table_col_def_lhs_not_included_as_ref() {
-        // `id` in `([id:`u#`long$()]...)` is a column name, not a ref to global id
-        let src = "\\d .cache\nid:0j\ncache:([id:`u#`long$()] size:`long$())\nuse:id";
-        let cursor = src.find("id:0j").unwrap();
-        let r = refs(src, cursor, true);
-        // col def offset
-        let col_off = src.find("([id:").unwrap() + 2; // offset of `id` inside ([
-        assert!(
-            !r.contains(&col_off),
-            "table col def falsely included; got {r:?}"
-        );
-        // the use site SHOULD be included
-        let use_off = src.rfind("use:id").unwrap() + "use:".len();
-        assert!(r.contains(&use_off), "use site missing; got {r:?}");
-    }
-
-    #[test]
-    fn cursor_off_ident_returns_empty() {
-        let src = "a:1; b:2;";
-        // Cursor on the leading semicolon — no ident here.
-        let cursor = src.find(';').unwrap();
-        let r = refs(src, cursor, true);
-        assert!(r.is_empty(), "got {r:?}");
-    }
-
-    #[test]
-    fn find_refs_from_use_site_when_def_is_in_another_file() {
-        // `sharedFn` defined in b.q, used in a.q; cursor on the use.
-        let uris = cross_refs("sharedFn 99", 0, &[("b.q", "sharedFn:{x+1}")]);
-        assert!(uris.contains(&uri("a.q")), "use site in a.q: {uris:?}");
-        assert!(uris.contains(&uri("b.q")), "def site in b.q: {uris:?}");
     }
 
     #[test]

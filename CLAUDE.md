@@ -37,4 +37,7 @@ cargo run -p q-parser --example print_tree -- file.q         # inspect parse tre
 # Tests
 
 - Table-driven: add parser inputs to `CLEAN` (crates/parser/tests/corpus.rs), CST shapes to `SNAPSHOTS`/`SHAPES` (tests/snapshots.rs), lexer cases to `CASES` (lexer/src/token.rs).
-- Server test helpers: `workspace_index::tests::{uri, doc, index}` and `goto_def::tests::locations`.
+- Server unit tables use markers (`workspace_index::tests::markers`): `«` = cursor, `»` = each expected site, e.g. goto-def `CASES`, references `CASES`, hover `CASES`, diagnostics `UNRESOLVED`. Assert exact results, not "contains".
+- `crates/server/tests/lsp.rs` drives the real binary over stdio (document sync, indexing, file watching, config, root detection, request routing). Cross-file and config behaviour is tested there, not duplicated in unit tests.
+- Server test helpers: `workspace_index::tests::{uri, doc, index, markers}` and `goto_def::tests::locations`.
+- Coverage: `rm -rf target/llvm-cov-target && cargo llvm-cov --workspace --summary-only`. Stale builds in that directory skew results badly, so always clear it first.

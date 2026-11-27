@@ -31,7 +31,7 @@ pub fn goto_definition(
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::workspace_index::tests::{doc, index, uri};
+    use crate::workspace_index::tests::{doc, markers, uri};
 
     /// Flatten a goto-definition response, asserting it is non-empty.
     pub fn locations(resp: Option<GotoDefinitionResponse>) -> Vec<Location> {
@@ -44,185 +44,54 @@ pub mod tests {
         locs
     }
 
-    fn def_offset(src: &str, cursor_byte: usize, name: &str) -> Option<usize> {
-        doc(src)
-            .sym_table()
-            .resolve(cursor_byte, name)
-            .map(|o| o as usize)
-    }
-
-    #[test]
-    fn lambda_param_wins_over_top_level() {
-        let src = "fn:99;\nf:{[fn] fn+1}";
-        let cursor = src.find("fn+1").unwrap();
-        let off = def_offset(src, cursor, "fn").expect("found");
-        let expected = src.find("[fn]").unwrap() + 1;
-        assert_eq!(off, expected);
-    }
-
-    #[test]
-    fn local_let_wins_over_top_level() {
-        let src = "fn:99;\nf:{x:42; x+fn}";
-        let cursor = src.find("x+fn").unwrap();
-        let off = def_offset(src, cursor, "x").expect("found");
-        let expected = src.find("x:42").unwrap();
-        assert_eq!(off, expected);
-    }
-
-    #[test]
-    fn top_level_resolves_when_outside_lambda() {
-        let src = "fn:99;\nbar:fn";
-        let cursor = src.rfind("fn").unwrap();
-        let off = def_offset(src, cursor, "fn").expect("found");
-        let expected = src.find("fn:99").unwrap();
-        assert_eq!(off, expected);
-    }
-
-    #[test]
-    fn nested_lambda_param_shadows_outer_param() {
-        let src = "f:{[fn] g:{[fn] fn+1}; fn}";
-        let cursor = src.find("fn+1").unwrap();
-        let off = def_offset(src, cursor, "fn").expect("found");
-        let inner = src.find("g:{[fn]").unwrap() + "g:{[".len();
-        assert_eq!(off, inner);
-    }
-
-    #[test]
-    fn no_closures_inner_lambda_sees_global_not_outer_param() {
-        // q evaluates `{[a] g:{a+1}; g[]} 1` to 101 with global `a:100`.
-        let src = "a:100;\nf:{[a] g:{a+1}; g[]}";
-        let cursor = src.find("a+1").unwrap();
-        assert_eq!(def_offset(src, cursor, "a"), Some(0));
-        // Without a global, the outer param is not visible either.
-        let src = "f:{[a] g:{a+1}; g[]}";
-        assert_eq!(def_offset(src, src.find("a+1").unwrap(), "a"), None);
-    }
-
-    #[test]
-    fn local_in_other_function_is_not_visible() {
-        let src = "f:{[x] fn:99; x};\ng:{[y] fn+y}";
-        let cursor = src.find("fn+y").unwrap();
-        let off = def_offset(src, cursor, "fn");
-        assert!(off.is_none(), "must not see fn from f's body, got {off:?}");
-    }
-
-    #[test]
-    fn last_occurrence_wins() {
-        let src = "a:1;\na:2;\na";
-        let cursor = src.rfind('a').unwrap();
-        let off = def_offset(src, cursor, "a").expect("found");
-        let expected = src.find("a:2").unwrap();
-        assert_eq!(off, expected);
-    }
-
-    #[test]
-    fn forward_reference_to_top_level_resolves() {
-        let src = "a;\na:1";
-        let cursor = src.find('a').unwrap();
-        let off = def_offset(src, cursor, "a").expect("found");
-        let expected = src.find("a:1").unwrap();
-        assert_eq!(off, expected);
-    }
-
-    #[test]
-    fn truly_undefined_returns_none() {
-        let src = "f:{[x] x+y}";
-        let cursor = src.find("y}").unwrap();
-        let off = def_offset(src, cursor, "y");
-        assert!(off.is_none(), "y is not defined anywhere, got {off:?}");
-    }
-
-    #[test]
-    fn dotted_assignment_inside_lambda_is_global() {
-        let src = "init:{.app.cfg:1};\nuse:.app.cfg";
-        let cursor = src.rfind(".app.cfg").unwrap();
-        let off = def_offset(src, cursor, ".app.cfg").expect("found");
-        let expected = src.find(".app.cfg:1").unwrap();
-        assert_eq!(off, expected);
-    }
-
-    #[test]
-    fn double_colon_inside_lambda_is_global() {
-        let src = "init:{counter::5};\nuse:counter";
-        let cursor = src.rfind("counter").unwrap();
-        let off = def_offset(src, cursor, "counter").expect("found");
-        let expected = src.find("counter::5").unwrap();
-        assert_eq!(off, expected);
-    }
-
-    #[test]
-    fn implicit_x_resolves_inside_paramless_lambda() {
-        let src = "{0=count x}";
-        let cursor = src.find("count x").unwrap() + "count ".len();
-        let off = def_offset(src, cursor, "x").expect("found");
-        let lambda_open = src.find('{').unwrap();
-        assert_eq!(off, lambda_open);
-    }
-
-    #[test]
-    fn local_let_shadows_implicit_x() {
-        let src = "{x:42; x+1}";
-        let cursor = src.find("x+1").unwrap();
-        let off = def_offset(src, cursor, "x").expect("found");
-        let expected = src.find("x:42").unwrap();
-        assert_eq!(off, expected, "local let must shadow implicit x");
-    }
-
-    #[test]
-    fn list_pattern_assignment_binds_each_name() {
-        let src = "{[p] (a;b;c):p; a+b+c}";
-        let cursor = src.find("a+b").unwrap();
-        let off = def_offset(src, cursor, "a").expect("found a");
-        let expected = src.find("(a").unwrap() + 1;
-        assert_eq!(off, expected, "expected `a` from `(a;b;c):p`");
-    }
-
-    #[test]
-    fn d_directive_bare_ref_resolves_inside_block() {
-        // Inside \d .cache, `trackperf` refers to .cache.trackperf
-        let src = "\\d .cache\ntrackperf:{[id] id}\nadd:{trackperf[1]}\n\\d .";
-        let cursor = src.find("trackperf[1]").unwrap();
-        let expected = src.find("trackperf:{").unwrap();
-        let off = def_offset(src, cursor, "trackperf").expect("found");
-        assert_eq!(off, expected);
-    }
-
-    #[test]
-    fn d_directive_dotted_ref_resolves_from_outside() {
-        // Outside \d .cache, .cache.trackperf resolves to its definition
-        let src = "\\d .cache\ntrackperf:{[id] id}\n\\d .\nuse:.cache.trackperf";
-        let cursor = src.rfind(".cache.trackperf").unwrap();
-        let expected = src.find("trackperf:{").unwrap();
-        let off = def_offset(src, cursor, ".cache.trackperf").expect("found");
-        assert_eq!(off, expected);
-    }
-
-    #[test]
-    fn cross_file_goto_def() {
-        let idx = index(&[("a.q", "foo:42")]);
-        let doc_b = doc("foo+1");
-        let locs = locations(goto_definition(
-            &doc_b,
-            Position::new(0, 0),
-            &uri("b.q"),
-            &idx,
-        ));
-        assert_eq!(locs[0].uri, uri("a.q"));
-    }
-
-    #[test]
-    fn same_file_def_with_workspace() {
-        let d = doc("bar:99; bar+1");
-        let locs = locations(goto_definition(
+    /// Same-file definition offset for the identifier at byte `cursor`.
+    fn definition(src: &str, cursor: usize) -> Option<usize> {
+        let d = doc(src);
+        let resp = goto_definition(
             &d,
-            d.position_of(8),
+            d.position_of(cursor),
             &uri("x.q"),
-            &index(&[]),
-        ));
-        assert_eq!(
-            (locs[0].uri.clone(), locs[0].range.start),
-            (uri("x.q"), Position::new(0, 0))
+            &WorkspaceIndex::default(),
         );
+        resp.map(|r| d.offset_of(locations(Some(r))[0].range.start))
+    }
+
+    /// Scoping cases: `«` marks the cursor, `»` the expected definition
+    /// (absent = unresolved). Markers are removed before parsing.
+    #[rustfmt::skip]
+    const CASES: &[&str] = &[
+        "fn:99;\nf:{[»fn] «fn+1}",                          // param beats global
+        "fn:99;\nf:{»x:42; «x+fn}",                         // local beats global
+        "»fn:99;\nbar:«fn",                                 // top level
+        "f:{[fn] g:{[»fn] «fn+1}; fn}",                     // inner param shadows outer
+        "»a:100;\nf:{[a] g:{«a+1}; g[]}",                   // no closures: global, not outer param
+        "f:{[a] g:{«a+1}; g[]}",                            // ...and outer param not visible
+        "f:{[x] fn:99; x};\ng:{[y] «fn+y}",                 // other function's local
+        "a:1;\n»a:2;\n«a",                                  // last definition before use
+        "«a;\n»a:1",                                        // forward reference
+        "f:{[x] x+«y}",                                     // undefined
+        "init:{».app.cfg:1};\nuse:«.app.cfg",               // dotted assign in lambda is global
+        "init:{»counter::5};\nuse:«counter",                // `::` in lambda is global
+        "»{0=count «x}",                                    // implicit x
+        "{»x:42; «x+1}",                                    // local shadows implicit x
+        "{[p] (»a;b;c):p; «a+b+c}",                         // list-pattern binding
+        "\\d .cache\n»trackperf:{[id] id}\nadd:{«trackperf[1]}\n\\d .",
+        "\\d .cache\n»trackperf:{[id] id}\n\\d .\nuse:«.cache.trackperf",
+        "f:{[path] »a,:raze 1 2 3; «a}",                    // `,:` introduces a local
+        "f:{»a,:1 2; a,:3 4; «a}",                          // ...only the first one
+        "»g:1\nf:{[x] if[x in «g;:()]; g,:enlist x}",       // `,:` amends an existing global
+    ];
+
+    #[test]
+    fn scoping_cases() {
+        for case in CASES {
+            let (src, cursor, defs) = markers(case);
+            assert_eq!(
+                definition(&src, cursor),
+                defs.first().copied(),
+                "case {case:?}"
+            );
+        }
     }
 
     /// Wide-stack thread: rowan's `GreenNode` drops recursively and
@@ -233,23 +102,11 @@ pub mod tests {
         std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
             .spawn(|| {
-                let src = std::fs::read_to_string(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/../parser/tests/data/real_q/dbmaint.q",
-                ))
-                .expect("dbmaint.q fixture");
-
-                let body_marker = "newVal:fn ";
-                let cursor = src.find(body_marker).unwrap() + "newVal:".len();
+                let src = include_str!("../../parser/tests/data/real_q/dbmaint.q");
+                let cursor = src.find("newVal:fn ").unwrap() + "newVal:".len();
                 let lambda_open = src.find("fn1Col:{[").unwrap();
-                let param_off = src[lambda_open..].find("fn]").unwrap() + lambda_open;
-
-                let off = def_offset(&src, cursor, "fn").expect("found");
-                assert_eq!(
-                    off, param_off,
-                    "expected goto-def to land on fn1Col's `fn` parameter \
-                     at byte {param_off}, got {off}"
-                );
+                let param = src[lambda_open..].find("fn]").unwrap() + lambda_open;
+                assert_eq!(definition(src, cursor), Some(param));
             })
             .unwrap()
             .join()

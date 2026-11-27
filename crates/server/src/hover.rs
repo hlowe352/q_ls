@@ -98,63 +98,26 @@ mod tests {
         })
     }
 
-    #[test]
-    fn bare_name_in_d_block_shows_qualified() {
-        let src = "\\d .cache\ncache:1\n\\d .";
-        // hover on `cache` (the reference side — but here it's the def)
-        let cursor = src.find("cache:1").unwrap();
-        // `cache` is in `\d .cache` context so qualified_for returns .cache.cache
-        // Hover is on the LHS of assignment — but hover resolves it fine
-        let text = hover_text(src, cursor).unwrap_or_default();
-        assert!(text.contains(".cache.cache"), "got: {text}");
-    }
+    /// `(case, exact hover text)`; `«` marks the cursor.
+    #[rustfmt::skip]
+    const CASES: &[(&str, Option<&str>)] = &[
+        ("«count x", Some("**count** - Count elements")),             // builtin doc
+        ("a «: 1", Some("**`:`** - Assign (dyadic) / Identity (monadic)")),
+        ("read0 `«:f.txt", None),                                     // `:` of a symbol isn't an operator
+        ("f:1; «f", Some("**`f`**")),
+        ("«ghost", None),
+        ("\\d .cache\n«cache:1\n\\d .", Some("`cache` → **`.cache.cache`**")), // namespace-qualified
+        ("\\d .cache\ncache:1\n\\d .\n`«.cache.cache upsert 2", Some("**`.cache.cache`**")),
+        ("\\d .cache\nid:0j\ncache:([«id:`u#`long$()] size:`long$())\n\\d .", Some("**`id`**")), // column, not .cache.id
+        ("\\d .cache\nid:0j\nadd:{[id] «id+1}\n\\d .", Some("**`id`**")), // param shadows .cache.id
+    ];
 
     #[test]
-    fn backtick_symbol_resolves_to_table() {
-        let src = "\\d .cache\ncache:1\n\\d .\n`.cache.cache upsert 2";
-        let cursor = src.find("`.cache.cache").unwrap() + 1; // on `.cache.cache`
-        let text = hover_text(src, cursor).unwrap_or_default();
-        assert!(text.contains(".cache.cache"), "got: {text}");
-    }
-
-    #[test]
-    fn table_col_def_not_qualified() {
-        // Column names inside table constructor are not globals.
-        let src = "\\d .cache\ncache:([id:`u#`long$()] size:`long$())\n\\d .";
-        let cursor = src.find("id:`u").unwrap(); // hover on `id` col def
-        let text = hover_text(src, cursor).unwrap_or_default();
-        assert!(
-            !text.contains(".cache.id"),
-            "table col falsely qualified; got: {text}"
-        );
-    }
-
-    #[test]
-    fn param_shadowing_global_not_qualified() {
-        // `id` is both a global (.cache.id) and a lambda param.
-        // Hover over the param should NOT show .cache.id.
-        let src = "\\d .cache\nid:0j\nadd:{[id] id+1}\n\\d .";
-        let cursor = src.find("id+1").unwrap(); // ref to the param inside lambda
-        let text = hover_text(src, cursor).unwrap_or_default();
-        assert!(
-            !text.contains(".cache.id"),
-            "param falsely qualified; got: {text}"
-        );
-    }
-
-    #[test]
-    fn no_operator_doc_inside_symbol() {
-        // `:` of a file symbol is not the assign operator; bare `:` is.
-        assert_eq!(hover_text("read0 `:f.txt", 7), None);
-        assert!(hover_text("a : 1", 2).is_some_and(|t| t.contains("Assign")));
-    }
-
-    #[test]
-    fn builtin_still_works() {
-        let src = "count x";
-        let cursor = src.find("count").unwrap();
-        let text = hover_text(src, cursor).unwrap_or_default();
-        assert!(text.to_lowercase().contains("count"), "got: {text}");
+    fn hover_cases() {
+        for (case, want) in CASES {
+            let (src, cursor, _) = crate::workspace_index::tests::markers(case);
+            assert_eq!(hover_text(&src, cursor).as_deref(), *want, "case {case:?}");
+        }
     }
 
     #[test]

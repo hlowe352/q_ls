@@ -66,6 +66,21 @@ pub mod tests {
         Document::new(src.to_string(), 0)
     }
 
+    /// Strip test markers from `case`: `«` marks the cursor and each `»` an
+    /// expected site. Returns `(source, cursor, sites)` as byte offsets.
+    pub fn markers(case: &str) -> (String, usize, Vec<usize>) {
+        let mut src = String::new();
+        let (mut cursor, mut sites) = (0, Vec::new());
+        for c in case.chars() {
+            match c {
+                '«' => cursor = src.len(),
+                '»' => sites.push(src.len()),
+                _ => src.push(c),
+            }
+        }
+        (src, cursor, sites)
+    }
+
     /// Index built from `(file name, source)` pairs.
     pub fn index(files: &[(&str, &str)]) -> WorkspaceIndex {
         let mut idx = WorkspaceIndex::default();

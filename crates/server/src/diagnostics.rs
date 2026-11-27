@@ -120,318 +120,87 @@ fn unresolved_reference_warnings<'a>(
 mod tests {
     use super::*;
 
-    fn warns_for(src: &str) -> Vec<String> {
+    /// Names flagged as unresolved in `src`, in source order.
+    fn unresolved(src: &str) -> Vec<String> {
         let doc = Document::new(src.to_string(), 0);
-        unindented_close_warnings(&doc).map(|d| d.message).collect()
+        let diags = compute_diagnostics(&doc, &WorkspaceIndex::default(), &Config::default());
+        diags
+            .into_iter()
+            .filter_map(|d| {
+                let name = d.message.strip_prefix("unresolved reference `")?;
+                Some(name.trim_end_matches('`').to_string())
+            })
+            .collect()
     }
 
-    fn unresolved_for(src: &str) -> Vec<String> {
-        unresolved_with_workspace_for(src, &WorkspaceIndex::default())
-    }
-
-    #[test]
-    fn warns_on_unindented_brace_close() {
-        let src = "f:{[x]\n    x+1\n}\n";
-        let warnings = warns_for(src);
-        assert_eq!(warnings.len(), 1, "expected 1 warning, got: {warnings:?}");
-        assert!(warnings[0].contains("closing `}`"));
-    }
-
-    #[test]
-    fn warns_on_unindented_bracket_close() {
-        let src = "f[1;\n2;\n3\n]\n";
-        let warnings = warns_for(src);
-        assert!(
-            warnings.iter().any(|w| w.contains("closing `]`")),
-            "got: {warnings:?}"
-        );
-    }
-
-    #[test]
-    fn warns_on_unindented_paren_close() {
-        let src = "(1;\n2;\n3\n)\n";
-        let warnings = warns_for(src);
-        assert!(
-            warnings.iter().any(|w| w.contains("closing `)`")),
-            "got: {warnings:?}"
-        );
-    }
+    /// `(source, exact unresolved names)`. Cross-file resolution and the
+    /// `suppress_unresolved` config are covered end-to-end in tests/lsp.rs.
+    #[rustfmt::skip]
+    const UNRESOLVED: &[(&str, &[&str])] = &[
+        ("f:{[x] x+y}", &["y"]),
+        ("f:{[x] count x}", &[]),                           // builtin
+        ("f:{[x] x+1}", &[]),                               // param
+        ("f:1; f", &[]),                                    // top-level def
+        ("newName: 42", &[]),                               // assignment LHS is a def
+        ("f:{t:1; g:{t+1}; g[]}", &["t"]),                  // no closures
+        ("select sym, px from t", &[]),                     // qSQL columns and table
+        ("evict:{[r] select lastaccess,id,size from cache}", &[]),
+        (".q.id .Q.dd .z.s", &[]),                          // builtin namespaces
+        ("use:.app.cfg", &[".app.cfg"]),
+        (".app.cfg:1; use:.app.cfg", &[]),
+        ("system \"d .test\"\nval:42\nshow .test.val", &[]),
+        ("\\d .cache\ncache:1\n\\d .\nshow .cache.cache", &[]),
+        ("\\d .foo\nval:42\n\\d .\nshow val", &["val"]),    // back at root: `val` is `.foo.val`
+        ("\\d .cache\ncache:([id:`u#`long$()] )\nfuncs:(`u#`long$())!()\n\\d .\nuse:.cache.cache", &[]),
+        ("loadf:loadf0[0b]   /load a file if it hasn't been loaded", &["loadf0"]), // not comment words
+    ];
 
     #[test]
-    fn no_warning_when_indented() {
-        let src = "f:{[x]\n    x+1\n  }\n";
-        let warnings = warns_for(src);
-        assert!(
-            warnings.is_empty(),
-            "expected no warnings, got: {warnings:?}"
-        );
+    fn unresolved_references() {
+        for (src, want) in UNRESOLVED {
+            assert_eq!(unresolved(src), *want, "source {src:?}");
+        }
     }
+
+    /// `(source, closer expected to be flagged at column 0)`.
+    const UNINDENTED_CLOSE: &[(&str, Option<&str>)] = &[
+        ("f:{[x]\n    x+1\n}\n", Some("}")),
+        ("f[1;\n2;\n3\n]\n", Some("]")),
+        ("(1;\n2;\n3\n)\n", Some(")")),
+        ("f:{[x]\n    x+1\n  }\n", None), // indented
+        ("{x+1}\n", None),                // single line
+    ];
 
     #[test]
-    fn no_warning_for_single_line_scope() {
-        let src = "{x+1}\n";
-        let warnings = warns_for(src);
-        assert!(
-            warnings.is_empty(),
-            "expected no warnings, got: {warnings:?}"
-        );
+    fn unindented_close_warnings() {
+        for (src, want) in UNINDENTED_CLOSE {
+            let doc = Document::new((*src).to_string(), 0);
+            let got: Vec<String> = super::unindented_close_warnings(&doc)
+                .map(|d| d.message)
+                .collect();
+            match want {
+                Some(close) => assert!(
+                    got.len() == 1 && got[0].contains(&format!("closing `{close}`")),
+                    "source {src:?}: {got:?}"
+                ),
+                None => assert!(got.is_empty(), "source {src:?}: {got:?}"),
+            }
+        }
     }
 
-    #[test]
-    fn unresolved_flags_truly_undefined_name() {
-        let src = "f:{[x] x+y}";
-        let warnings = unresolved_for(src);
-        assert!(
-            warnings.iter().any(|w| w.contains("`y`")),
-            "got: {warnings:?}"
-        );
-    }
-
-    #[test]
-    fn unresolved_flags_outer_local_used_in_inner_lambda() {
-        let warnings = unresolved_for("f:{t:1; g:{t+1}; g[]}");
-        assert!(
-            warnings.iter().any(|w| w.contains("`t`")),
-            "got: {warnings:?}"
-        );
-    }
-
-    #[test]
-    fn unresolved_skips_builtins() {
-        let src = "f:{[x] count x}";
-        let warnings = unresolved_for(src);
-        assert!(warnings.is_empty(), "got: {warnings:?}");
-    }
-
-    #[test]
-    fn unresolved_skips_param() {
-        let src = "f:{[x] x+1}";
-        let warnings = unresolved_for(src);
-        assert!(warnings.is_empty(), "got: {warnings:?}");
-    }
-
-    #[test]
-    fn unresolved_skips_top_level_def() {
-        let src = "f:1; f";
-        let warnings = unresolved_for(src);
-        assert!(warnings.is_empty(), "got: {warnings:?}");
-    }
-
-    #[test]
-    fn unresolved_skips_qsql_columns() {
-        let src = "select sym, px from t";
-        let warnings = unresolved_for(src);
-        // `t` would normally be flagged as undefined, but it's the table arg
-        // to `from` which is part of qSQL — currently we suppress all qSQL
-        // refs. Adjust if/when qSQL gets tighter handling.
-        assert!(
-            warnings
-                .iter()
-                .all(|w| !w.contains("`sym`") && !w.contains("`px`")),
-            "qSQL columns must not be flagged: {warnings:?}"
-        );
-    }
-
-    #[test]
-    fn unresolved_skips_expr_level_qsql_columns() {
-        // Column names of qSQL inside a lambda must still be suppressed.
-        let src = "evict:{[r] select lastaccess,id,size from cache}";
-        let warnings = unresolved_for(src);
-        assert!(
-            warnings.iter().all(|w| !w.contains("`lastaccess`")
-                && !w.contains("`id`")
-                && !w.contains("`size`")),
-            "expr-level qSQL columns must not be flagged: {warnings:?}"
-        );
-    }
-
-    #[test]
-    fn unresolved_skips_assignment_lhs() {
-        let src = "newName: 42";
-        let warnings = unresolved_for(src);
-        assert!(
-            warnings.is_empty(),
-            "assignment LHS is a def, got: {warnings:?}"
-        );
-    }
-
-    #[test]
-    fn unresolved_skips_q_namespaces() {
-        let src = ".q.id .Q.dd .z.s";
-        let warnings = unresolved_for(src);
-        assert!(warnings.is_empty(), "got: {warnings:?}");
-    }
-
-    #[test]
-    fn unresolved_flags_user_namespace_member_when_undefined() {
-        let src = "use:.app.cfg";
-        let warnings = unresolved_for(src);
-        assert!(
-            warnings.iter().any(|w| w.contains("`.app.cfg`")),
-            "got: {warnings:?}"
-        );
-    }
-
-    #[test]
-    fn unresolved_resolves_user_namespace_when_defined() {
-        let src = ".app.cfg:1; use:.app.cfg";
-        let warnings = unresolved_for(src);
-        assert!(warnings.is_empty(), "got: {warnings:?}");
-    }
-
-    #[test]
-    fn unresolved_system_d_qualifies_bare_global() {
-        let src = "system \"d .test\"\nval:42\nshow .test.val";
-        let warnings = unresolved_for(src);
-        assert!(warnings.is_empty(), "system d form got: {warnings:?}");
-    }
-
-    #[test]
-    fn unresolved_d_directive_qualifies_bare_global() {
-        // \d .cache puts us in .cache; `cache:` defines .cache.cache
-        let src = "\\d .cache\ncache:1\n\\d .\nshow .cache.cache";
-        let warnings = unresolved_for(src);
-        assert!(warnings.is_empty(), "got: {warnings:?}");
-    }
-
-    #[test]
-    fn unresolved_d_directive_reset_to_root() {
-        // After \d . we're back at root; plain names are global
-        let src = "\\d .foo\nval:42\n\\d .\nshow val";
-        let warnings = unresolved_for(src);
-        // `val` at root scope is not .foo.val, so `show val` should warn
-        assert!(
-            warnings.iter().any(|w| w.contains("`val`")),
-            "got: {warnings:?}"
-        );
-    }
-
-    #[test]
-    fn unresolved_d_directive_cross_ref_qualified() {
-        // .cache.cache in the same file is resolved via \d .cache
-        let src = "\\d .cache\ncache:([id:`u#`long$()] )\nfuncs:(`u#`long$())!()\n\\d .\nuse:.cache.cache";
-        let warnings = unresolved_for(src);
-        assert!(warnings.is_empty(), "got: {warnings:?}");
-    }
-
-    /// Sanity: dbmaint.q is real q. Surface any unresolved-name false
-    /// positives so we can tune the builtin allow-list.
-    ///
-    /// Runs on a wide-stack thread because rowan's `GreenNode` drops
-    /// recursively, and dbmaint.q nests deep enough to overflow the
-    /// default 2 MB test thread stack on teardown — not a logic issue.
+    /// dbmaint.q is real q: it must produce no unresolved-name false
+    /// positives. Wide stack: rowan's recursive `Drop` overflows the default
+    /// 2 MB test thread on this file.
     #[test]
     fn unresolved_dbmaint_noise_floor() {
         std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
             .spawn(|| {
-                let src = std::fs::read_to_string(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/../parser/tests/data/real_q/dbmaint.q",
-                ))
-                .expect("dbmaint.q fixture");
-                let warnings = unresolved_for(&src);
-                if !warnings.is_empty() {
-                    eprintln!(
-                        "dbmaint.q produced {} unresolved-ref warnings:",
-                        warnings.len()
-                    );
-                    for w in &warnings {
-                        eprintln!("  {w}");
-                    }
-                }
-                assert!(
-                    warnings.is_empty(),
-                    "regression: dbmaint.q now reports unresolved refs: {warnings:#?}"
-                );
+                let src = include_str!("../../parser/tests/data/real_q/dbmaint.q");
+                assert_eq!(unresolved(src), Vec::<String>::new());
             })
             .unwrap()
             .join()
             .unwrap();
-    }
-
-    fn unresolved_with_workspace_for(src: &str, workspace: &WorkspaceIndex) -> Vec<String> {
-        let doc = Document::new(src.to_string(), 0);
-        compute_diagnostics(&doc, workspace, &Config::default())
-            .into_iter()
-            .map(|d| d.message)
-            .filter(|m| m.starts_with("unresolved reference"))
-            .collect()
-    }
-
-    #[test]
-    fn unresolved_suppressed_when_defined_in_workspace() {
-        use crate::workspace_index::WorkspaceIndex;
-
-        let mut idx = WorkspaceIndex::default();
-        idx.insert(
-            "file:///other.q".parse().unwrap(),
-            Document::new("helper:{x+1}".to_string(), 0),
-        );
-
-        let warnings = unresolved_with_workspace_for("helper 42", &idx);
-        assert!(
-            warnings.is_empty(),
-            "symbol defined in workspace must not warn: {warnings:?}"
-        );
-    }
-
-    #[test]
-    fn unresolved_still_warns_when_nowhere_defined() {
-        use crate::workspace_index::WorkspaceIndex;
-        let idx = WorkspaceIndex::default();
-        let warnings = unresolved_with_workspace_for("ghost 42", &idx);
-        assert!(
-            warnings.iter().any(|w| w.contains("`ghost`")),
-            "truly undefined name must still warn: {warnings:?}"
-        );
-    }
-
-    #[test]
-    fn suppress_unresolved_via_config() {
-        use crate::config::Config;
-        use crate::workspace_index::WorkspaceIndex;
-        use std::collections::HashSet;
-
-        let cfg = Config {
-            suppress_unresolved: HashSet::from(["proctype".to_string(), "procname".to_string()]),
-        };
-        let doc = Document::new("proctype".to_string(), 0);
-        let idx = WorkspaceIndex::default();
-        let diags = compute_diagnostics(&doc, &idx, &cfg);
-        assert!(diags.is_empty(), "suppressed name must not warn: {diags:?}");
-    }
-
-    #[test]
-    fn unsuppressed_name_still_warns() {
-        use crate::config::Config;
-        use crate::workspace_index::WorkspaceIndex;
-        use std::collections::HashSet;
-
-        let cfg = Config {
-            suppress_unresolved: HashSet::from(["proctype".to_string()]),
-        };
-        let doc = Document::new("ghost".to_string(), 0);
-        let idx = WorkspaceIndex::default();
-        let diags = compute_diagnostics(&doc, &idx, &cfg);
-        assert!(
-            diags.iter().any(|d| d.message.contains("`ghost`")),
-            "non-suppressed name must still warn: {diags:?}"
-        );
-    }
-
-    #[test]
-    fn unresolved_skips_tokens_in_trailing_comment_no_space() {
-        // `expr   /load a file` — `load`, `a`, `file` are inside a comment, not idents
-        let src = "loadf:loadf0[0b]   /load a file if it hasn't been loaded";
-        let warnings = unresolved_for(src);
-        let comment_words: Vec<_> = warnings
-            .iter()
-            .filter(|w| w.contains("`a`") || w.contains("`file`") || w.contains("`load`"))
-            .collect();
-        assert!(
-            comment_words.is_empty(),
-            "words in trailing comment must not be flagged: {warnings:?}"
-        );
     }
 }
