@@ -82,8 +82,9 @@ fn unindented_close_warnings(doc: &Document) -> impl Iterator<Item = Diagnostic>
 
 /// Warn on uses of a global defined neither in this file nor in the
 /// workspace, unless the config's `suppress_unresolved` names it. A
-/// namespace (`.u`) is defined once anything under it is (`.u.x`), and
-/// `t.c` is a column of global `t`.
+/// dotted name is defined when a defined global is a prefix of it at a dot
+/// (`t.c` reads a column of `t`) or it is a prefix of one (`.u` and `ab` are
+/// namespaces once `.u.x` or `ab.b` exist).
 fn unresolved_reference_warnings<'a>(
     doc: &'a Document,
     workspace: &'a WorkspaceIndex,
@@ -95,19 +96,19 @@ fn unresolved_reference_warnings<'a>(
             return None;
         };
         let text = &doc.text()[name.range];
-        let defined = |q: &str| !definitions(q, doc, workspace).is_empty();
+        let defined = |q: &str| is_defined(q, doc, workspace);
         let resolved = name.is_def()
             || defined(qualified)
-            || dotted_head(text, qualified).is_some_and(defined)
+            || defined_prefix(qualified, defined).is_some()
             || config.suppress_unresolved.contains(text)
-            || (qualified.starts_with('.') && {
+            || {
                 let member = format!("{qualified}.");
                 let mut defined = bindings
                     .globals()
                     .map(|(n, _)| n)
                     .chain(workspace.all_idents());
                 defined.any(|n| n.starts_with(&member))
-            });
+            };
         (!resolved).then(|| {
             diagnostic(
                 doc,
@@ -120,67 +121,56 @@ fn unresolved_reference_warnings<'a>(
     })
 }
 
-/// Warn on `d.k` where every definition of global `d` is a dictionary or
-/// keyed-table literal (`d:([a:1])`, `d:([k:1] v:2)`): q's dot notation
-/// reads only tables and namespaces, so it signals.
+/// Warn on `d.k` where every definition of the global `d` it reads holds a
+/// dictionary or keyed-table literal (`d:([a:1])`, `d:([k:1] v:2)`): q's dot
+/// notation reads only tables and namespaces, so it signals.
 fn dictionary_dot_warnings<'a>(
     doc: &'a Document,
     workspace: &'a WorkspaceIndex,
 ) -> impl Iterator<Item = Diagnostic> + 'a {
-    doc.bindings().names().iter().filter_map(move |name| {
+    let bindings = doc.bindings();
+    bindings.names().iter().filter_map(move |name| {
         let Symbol::Global(qualified) = &name.symbol else {
             return None;
         };
+        let defined = |q: &str| is_defined(q, doc, workspace);
+        if name.is_def() || defined(qualified) {
+            return None;
+        }
+        let owner = defined_prefix(qualified, defined)?;
+        let here = bindings.defs(&Symbol::Global(owner.into()));
+        let elsewhere = workspace.resolve_global(owner).into_iter().flatten();
+        let dictionary = here.iter().all(|&off| bindings.holds_dictionary(off))
+            && elsewhere
+                .into_iter()
+                .all(|(uri, off)| workspace.get(uri).is_some_and(|d| d.bindings().holds_dictionary(*off)));
         let text = &doc.text()[name.range];
-        let defs = definitions(dotted_head(text, qualified)?, doc, workspace);
-        let dict = !name.is_def()
-            && definitions(qualified, doc, workspace).is_empty()
-            && !defs.is_empty()
-            && defs.iter().all(|&(d, off)| defines_dictionary(d, off));
-        dict.then(|| {
-            let (start, len) = (name.range.start().into(), text.len());
-            let head = text.split_once('.').map_or(text, |(h, _)| h);
+        let shown = text.get(..text.len().saturating_sub(qualified.len() - owner.len())).unwrap_or(text);
+        dictionary.then(|| {
             let message = format!(
-                "`{head}` is a dictionary or keyed table; `{text}` only reads tables and namespaces"
+                "`{shown}` is a dictionary or keyed table: dot notation reads only tables and namespaces"
             );
-            diagnostic(doc, start, len, DiagnosticSeverity::WARNING, message)
+            diagnostic(doc, name.range.start().into(), text.len(), DiagnosticSeverity::WARNING, message)
         })
     })
 }
 
-/// The global a dotted name reads from: `t` of `t.c` (qualified like the
-/// name, so `.ns.t` under `\d .ns`). `None` for names starting with a dot.
-fn dotted_head<'a>(text: &str, qualified: &'a str) -> Option<&'a str> {
-    let (_, rest) = text.split_once('.').filter(|(h, _)| !h.is_empty())?;
-    Some(&qualified[..qualified.len() - rest.len() - 1])
+/// Is the global `qualified` defined in this file or the workspace?
+fn is_defined(qualified: &str, doc: &Document, workspace: &WorkspaceIndex) -> bool {
+    !doc.bindings()
+        .defs(&Symbol::Global(qualified.into()))
+        .is_empty()
+        || workspace.resolve_global(qualified).is_some()
 }
 
-/// Every definition site of global `qualified`: here and in the workspace.
-fn definitions<'a>(
-    qualified: &str,
-    doc: &'a Document,
-    workspace: &'a WorkspaceIndex,
-) -> Vec<(&'a Document, u32)> {
-    let here = doc.bindings().defs(&Symbol::Global(qualified.into()));
-    let elsewhere = workspace.resolve_global(qualified).into_iter().flatten();
-    here.iter()
-        .map(|&off| (doc, off))
-        .chain(elsewhere.filter_map(|(uri, off)| Some((workspace.get(uri)?, *off))))
-        .collect()
-}
-
-/// Is the definition at `off` assigned a dictionary or keyed-table literal?
-fn defines_dictionary(doc: &Document, off: u32) -> bool {
-    let value = doc
-        .token_at(off as usize)
-        .and_then(|t| t.parent()?.parent())
-        .filter(|bin| bin.kind() == SyntaxKind::BinExpr)
-        .and_then(|bin| bin.children().nth(1));
-    value.is_some_and(|v| {
-        v.kind() == SyntaxKind::DictExpr
-            || (v.kind() == SyntaxKind::TableExpr
-                && v.children().any(|c| c.kind() == SyntaxKind::TableKeys))
-    })
+/// The longest prefix of `qualified` ending before a dot that names a
+/// defined global, which the rest reads into: `t` of `t.c`, `.ns.t` of
+/// `.ns.t.a`.
+fn defined_prefix(qualified: &str, defined: impl Fn(&str) -> bool) -> Option<&str> {
+    qualified
+        .rmatch_indices('.')
+        .map(|(i, _)| &qualified[..i])
+        .find(|prefix| !prefix.is_empty() && defined(prefix))
 }
 
 #[cfg(test)]
@@ -215,10 +205,16 @@ mod tests {
         ("evict:{[r] select lastaccess,id,size from cache}", &["cache"]),
         (".q.id .Q.dd .z.s .q .z", &[]),                    // builtin namespaces
         (".u.x:1; show .u", &[]),                           // a namespace with members
+        ("ab.b:1; show ab", &[]),
+        (".qux", &[".qux"]),                                // not the builtin `.q`
         ("show .u", &[".u"]),
         ("t:([]age:1 2); t.age", &[]),                      // a column of global `t`
         ("\\d .ns\nu:([]c:3 4)\nu.c", &[]),
         ("missing.age", &["missing.age"]),
+        ("([]zz+1)", &["zz"]),                              // a use inside a table
+        ("x:1 2; ([]x+1)", &[]),
+        (".ns.t:([]a:1 2); .ns.t.a", &[]),                   // fully qualified
+        ("\\d .ns\nt:([]a:1 2)\n\\d .\n.ns.t.a", &[]),
         ("use:.app.cfg", &[".app.cfg"]),
         (".app.cfg:1; use:.app.cfg", &[]),
         ("system \"d .test\"\nval:42\nshow .test.val", &[]),
@@ -231,16 +227,16 @@ mod tests {
     /// Dot notation on a global defined only as a dictionary or keyed-table
     /// literal signals in q 4.1; on a table or namespace it reads.
     #[rustfmt::skip]
-    const DICT_DOT: &[(&str, bool)] = &[
-        ("d:([a:1;b:2]); d.a", true),
-        ("k:([k:1 2] v:3 4); k.v", true),
-        ("`d set ([a:1]); d.a", true),
-        ("\\d .ns\nd:([a:1])\nd.a", true),
-        ("t:([]a:1 2); t.a", false),
-        ("d:([a:1]); d:([]a:1 2); d.a", false),             // not only a dictionary
-        ("d:get`:f; d.a", false),                           // value unknown
-        ("d.x:1; d.x", false),                              // namespace member
-        ("([a:1;b:2])", false),                             // keys are not names
+    const DICT_DOT: &[(&str, &[&str])] = &[
+        ("d:([a:1;b:2]); d.a", &["d.a"]),
+        ("k:([k:1 2] v:3 4); k.v", &["k.v"]),
+        ("`d set ([a:1]); d.a", &["d.a"]),
+        ("\\d .ns\nd:([a:1])\nd.a", &["d.a"]),
+        ("t:([]a:1 2); t.a", &[]),
+        ("d:([a:1]); d:([]a:1 2); d.a", &[]),               // not only a dictionary
+        ("d:get`:f; d.a", &[]),                             // value unknown
+        ("d.x:1; d.x", &[]),                                // namespace member
+        ("([a:1;b:2])", &[]),                               // keys are not names
     ];
 
     #[test]
@@ -248,10 +244,12 @@ mod tests {
         for (src, warns) in DICT_DOT {
             let doc = Document::new((*src).to_string(), 0);
             let diags = compute_diagnostics(&doc, &WorkspaceIndex::default(), &Config::default());
-            let found = diags
+            let flagged: Vec<&str> = diags
                 .iter()
-                .any(|d| d.message.contains("is a dictionary or keyed table"));
-            assert_eq!(found, *warns, "source {src:?}: {diags:?}");
+                .filter(|d| d.message.contains("is a dictionary or keyed table"))
+                .map(|d| &src[doc.offset_of(d.range.start)..doc.offset_of(d.range.end)])
+                .collect();
+            assert_eq!(flagged, *warns, "source {src:?}: {diags:?}");
         }
     }
 
