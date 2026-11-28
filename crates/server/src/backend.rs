@@ -35,6 +35,7 @@ pub struct QLanguageServer {
 }
 
 impl QLanguageServer {
+    #[must_use]
     pub fn new(client: Client) -> Self {
         Self {
             client,

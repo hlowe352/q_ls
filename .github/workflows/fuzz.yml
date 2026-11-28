@@ -7,7 +7,7 @@ on:
 
 jobs:
   fuzz:
-    name: parse target (10 min)
+    name: fuzz (10 min)
     uses: ./.github/workflows/_fuzz.yml
     with:
       max_total_time: 600
