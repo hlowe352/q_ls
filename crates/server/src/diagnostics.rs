@@ -80,7 +80,8 @@ fn unindented_close_warnings(doc: &Document) -> impl Iterator<Item = Diagnostic>
 }
 
 /// Warn on uses of a global defined neither in this file nor in the
-/// workspace, unless the config's `suppress_unresolved` names it.
+/// workspace, unless the config's `suppress_unresolved` names it. A
+/// namespace is defined once anything under it is (`.u` by `.u.x`, `ab` by `ab.b`).
 fn unresolved_reference_warnings<'a>(
     doc: &'a Document,
     workspace: &'a WorkspaceIndex,
@@ -95,7 +96,15 @@ fn unresolved_reference_warnings<'a>(
         let resolved = name.is_def()
             || !bindings.defs(&name.symbol).is_empty()
             || workspace.resolve_global(qualified).is_some()
-            || config.suppress_unresolved.contains(text);
+            || config.suppress_unresolved.contains(text)
+            || {
+                let member = format!("{qualified}.");
+                let mut defined = bindings
+                    .globals()
+                    .map(|(n, _)| n)
+                    .chain(workspace.all_idents());
+                defined.any(|n| n.starts_with(&member))
+            };
         (!resolved).then(|| {
             diagnostic(
                 doc,
@@ -138,7 +147,11 @@ mod tests {
         ("select sym, px from t", &["t"]),                  // columns aren't names; `t` is
         ("t:([]sym:`a;px:1); select sym, px from t", &[]),
         ("evict:{[r] select lastaccess,id,size from cache}", &["cache"]),
-        (".q.id .Q.dd .z.s", &[]),                          // builtin namespaces
+        (".q.id .Q.dd .z.s .q .z", &[]),                    // builtin namespaces
+        (".u.x:1; show .u", &[]),                           // a namespace with members
+        ("ab.b:1; show ab", &[]),
+        (".qux", &[".qux"]),                                // not the builtin `.q`
+        ("show .u", &[".u"]),
         ("use:.app.cfg", &[".app.cfg"]),
         (".app.cfg:1; use:.app.cfg", &[]),
         ("system \"d .test\"\nval:42\nshow .test.val", &[]),

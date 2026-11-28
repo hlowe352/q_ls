@@ -212,7 +212,7 @@ const EXTRA_RESERVED: &[&str] = &[
 
 /// Top-level namespace prefixes that are q built-ins. A reference like
 /// `.q.foo`, `.Q.dd`, `.z.s` etc is always treated as resolved.
-const BUILTIN_NS: &[&str] = &[".q.", ".Q.", ".h.", ".j.", ".z.", ".m."];
+const BUILTIN_NS: &[&str] = &[".q", ".Q", ".h", ".j", ".z", ".m"];
 
 /// True if `name` is a q built-in (verb, keyword, reserved word, or
 /// member of a built-in namespace).
@@ -223,7 +223,11 @@ pub fn is_builtin(name: &str) -> bool {
     if EXTRA_RESERVED.binary_search(&name).is_ok() {
         return true;
     }
-    BUILTIN_NS.iter().any(|ns| name.starts_with(ns))
+    // A built-in namespace or one of its members (`.q`, `.q.til`).
+    BUILTIN_NS.iter().any(|ns| {
+        name.strip_prefix(ns)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+    })
 }
 
 /// Doc string for a built-in, if one is registered.
