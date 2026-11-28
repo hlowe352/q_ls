@@ -14,21 +14,6 @@ pub fn first_token(node: &SyntaxNode) -> Option<SyntaxToken> {
     tokens(node).find(|t| !t.kind().is_trivia())
 }
 
-/// Is `node` the left side of a `:` or `::` assignment?
-pub fn is_assignment_lhs(node: &SyntaxNode) -> bool {
-    node.parent().is_some_and(|p| {
-        p.kind() == SyntaxKind::BinExpr
-            && p.first_child().as_ref() == Some(node)
-            && p.children_with_tokens()
-                .filter_map(SyntaxElement::into_token)
-                .any(|t| matches!(t.kind(), SyntaxKind::Colon | SyntaxKind::ColonColon))
-    })
-}
-
-pub fn has_ancestor(node: &SyntaxNode, kind: SyntaxKind) -> bool {
-    node.ancestors().any(|n| n.kind() == kind)
-}
-
 fn is_qsql_stmt(kind: SyntaxKind) -> bool {
     matches!(
         kind,

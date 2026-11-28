@@ -24,6 +24,7 @@ pub fn compute_diagnostics(
     errors
         .chain(unindented_close_warnings(doc))
         .chain(unresolved_reference_warnings(doc, workspace, config))
+        .chain(dictionary_dot_warnings(doc, workspace))
         .collect()
 }
 
@@ -95,10 +96,7 @@ fn unresolved_reference_warnings<'a>(
             return None;
         };
         let text = &doc.text()[name.range];
-        let defined = |q: &str| {
-            !bindings.defs(&Symbol::Global(q.into())).is_empty()
-                || workspace.resolve_global(q).is_some()
-        };
+        let defined = |q: &str| is_defined(q, doc, workspace);
         let resolved = name.is_def()
             || defined(qualified)
             || defined_prefix(qualified, defined).is_some()
@@ -121,6 +119,48 @@ fn unresolved_reference_warnings<'a>(
             )
         })
     })
+}
+
+/// Warn on `d.k` where every definition of the global `d` it reads holds a
+/// dictionary or keyed-table literal (`d:([a:1])`, `d:([k:1] v:2)`): q's dot
+/// notation reads only tables and namespaces, so it signals.
+fn dictionary_dot_warnings<'a>(
+    doc: &'a Document,
+    workspace: &'a WorkspaceIndex,
+) -> impl Iterator<Item = Diagnostic> + 'a {
+    let bindings = doc.bindings();
+    bindings.names().iter().filter_map(move |name| {
+        let Symbol::Global(qualified) = &name.symbol else {
+            return None;
+        };
+        let defined = |q: &str| is_defined(q, doc, workspace);
+        if name.is_def() || defined(qualified) {
+            return None;
+        }
+        let owner = defined_prefix(qualified, defined)?;
+        let here = bindings.defs(&Symbol::Global(owner.into()));
+        let elsewhere = workspace.resolve_global(owner).into_iter().flatten();
+        let dictionary = here.iter().all(|&off| bindings.holds_dictionary(off))
+            && elsewhere
+                .into_iter()
+                .all(|(uri, off)| workspace.get(uri).is_some_and(|d| d.bindings().holds_dictionary(*off)));
+        let text = &doc.text()[name.range];
+        let shown = text.get(..text.len().saturating_sub(qualified.len() - owner.len())).unwrap_or(text);
+        dictionary.then(|| {
+            let message = format!(
+                "`{shown}` is a dictionary or keyed table: dot notation reads only tables and namespaces"
+            );
+            diagnostic(doc, name.range.start().into(), text.len(), DiagnosticSeverity::WARNING, message)
+        })
+    })
+}
+
+/// Is the global `qualified` defined in this file or the workspace?
+fn is_defined(qualified: &str, doc: &Document, workspace: &WorkspaceIndex) -> bool {
+    !doc.bindings()
+        .defs(&Symbol::Global(qualified.into()))
+        .is_empty()
+        || workspace.resolve_global(qualified).is_some()
 }
 
 /// The longest prefix of `qualified` ending before a dot that names a
@@ -171,6 +211,8 @@ mod tests {
         ("t:([]age:1 2); t.age", &[]),                      // a column of global `t`
         ("\\d .ns\nu:([]c:3 4)\nu.c", &[]),
         ("missing.age", &["missing.age"]),
+        ("([]zz+1)", &["zz"]),                              // a use inside a table
+        ("x:1 2; ([]x+1)", &[]),
         (".ns.t:([]a:1 2); .ns.t.a", &[]),                   // fully qualified
         ("\\d .ns\nt:([]a:1 2)\n\\d .\n.ns.t.a", &[]),
         ("use:.app.cfg", &[".app.cfg"]),
@@ -181,6 +223,35 @@ mod tests {
         ("\\d .cache\ncache:([id:`u#`long$()] )\nfuncs:(`u#`long$())!()\n\\d .\nuse:.cache.cache", &[]),
         ("loadf:loadf0[0b]   /load a file if it hasn't been loaded", &["loadf0"]), // not comment words
     ];
+
+    /// Dot notation on a global defined only as a dictionary or keyed-table
+    /// literal signals in q 4.1; on a table or namespace it reads.
+    #[rustfmt::skip]
+    const DICT_DOT: &[(&str, &[&str])] = &[
+        ("d:([a:1;b:2]); d.a", &["d.a"]),
+        ("k:([k:1 2] v:3 4); k.v", &["k.v"]),
+        ("`d set ([a:1]); d.a", &["d.a"]),
+        ("\\d .ns\nd:([a:1])\nd.a", &["d.a"]),
+        ("t:([]a:1 2); t.a", &[]),
+        ("d:([a:1]); d:([]a:1 2); d.a", &[]),               // not only a dictionary
+        ("d:get`:f; d.a", &[]),                             // value unknown
+        ("d.x:1; d.x", &[]),                                // namespace member
+        ("([a:1;b:2])", &[]),                               // keys are not names
+    ];
+
+    #[test]
+    fn dictionary_dot() {
+        for (src, warns) in DICT_DOT {
+            let doc = Document::new((*src).to_string(), 0);
+            let diags = compute_diagnostics(&doc, &WorkspaceIndex::default(), &Config::default());
+            let flagged: Vec<&str> = diags
+                .iter()
+                .filter(|d| d.message.contains("is a dictionary or keyed table"))
+                .map(|d| &src[doc.offset_of(d.range.start)..doc.offset_of(d.range.end)])
+                .collect();
+            assert_eq!(flagged, *warns, "source {src:?}: {diags:?}");
+        }
+    }
 
     #[test]
     fn unresolved_references() {

@@ -279,6 +279,10 @@ const SHAPES: &[(&str, &[&str], &[&str])] = &[
     ("'[f;g]", &["IndexExpr", "VerbExpr"], &[]),
     ("x:'y", &["BinExpr", "AdverbExpr"], &["SignalExpr"]),
     ("'x+1", &["SignalExpr", "BinExpr"], &[]),
+    // Brackets with nothing after are a dictionary; with columns, a table.
+    ("([a:1;b:2])", &["DictExpr"], &["TableExpr", "TableKeys"]),
+    ("([k:1 2] v:3 4)", &["TableExpr", "TableKeys"], &["DictExpr"]),
+    ("([]a:1 2)", &["TableExpr"], &["DictExpr", "TableKeys"]),
     // A verb-valued argument or right operand composes (checked against q).
     ("g f+", &["Composition", "InfixProjection"], &["ApplyExpr"]),
     ("x+y+", &["Composition", "InfixProjection"], &["BinExpr"]),

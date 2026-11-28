@@ -74,6 +74,8 @@ syntax_kinds! {
         LiteralExpr,
         /// `([] col:val; ...)` — table expression.
         TableExpr,
+        /// `([k:v; ...])` — dictionary literal: keys in brackets, nothing after.
+        DictExpr,
         /// `select … from …` qSQL expression.
         SelectExpr,
         /// `update … from …` qSQL expression.

@@ -25,7 +25,7 @@ use q_parser::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, Te
 use smol_str::SmolStr;
 
 use crate::builtins::is_builtin;
-use crate::syntax::{first_token, has_ancestor, in_row_context, is_assignment_lhs, tokens};
+use crate::syntax::{first_token, in_row_context, tokens};
 
 /// What a name refers to.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -68,6 +68,8 @@ pub struct Bindings {
     names: Vec<Name>,
     /// Definition offsets of each symbol, sorted.
     defs: HashMap<Symbol, Vec<u32>>,
+    /// Definitions whose value is a dictionary or keyed-table literal.
+    dictionaries: HashSet<u32>,
 }
 
 impl Bindings {
@@ -109,6 +111,12 @@ impl Bindings {
     /// Every occurrence of `symbol`.
     pub fn occurrences<'a>(&'a self, symbol: &'a Symbol) -> impl Iterator<Item = &'a Name> {
         self.names.iter().filter(move |n| n.symbol == *symbol)
+    }
+
+    /// Does the definition at `offset` assign a dictionary or keyed-table
+    /// literal (`d:([a:1])`, `` `d set ([k:1] v:2) ``)?
+    pub fn holds_dictionary(&self, offset: u32) -> bool {
+        self.dictionaries.contains(&offset)
     }
 
     /// Globals defined in this document, with their definition offsets.
@@ -153,6 +161,8 @@ struct Builder {
     targets: HashMap<u32, Role>,
     /// Offsets of top-level `name::` targets, which are root globals.
     root: HashSet<u32>,
+    /// Offsets of assignment targets whose value is a dictionary literal.
+    dictionaries: HashSet<u32>,
 }
 
 impl Builder {
@@ -192,6 +202,9 @@ impl Builder {
                 }
                 SyntaxKind::LiteralExpr => {
                     if let Some((token, role)) = named_symbol(&node) {
+                        if node.parent().is_some_and(|bin| assigns_dictionary(&bin)) {
+                            self.dictionaries.insert(token.text_range().start().into());
+                        }
                         self.push(token, true, role, lambda, &ns);
                     }
                 }
@@ -225,8 +238,8 @@ impl Builder {
     /// Record the targets of an assignment `BinExpr`; plain `name:` in a
     /// lambda makes the name one of its locals.
     fn assignment(&mut self, bin: &SyntaxNode, lambda: Option<usize>) {
-        if has_ancestor(bin, SyntaxKind::TableExpr) {
-            return; // column definitions
+        if is_literal_entry(bin) {
+            return;
         }
         let Some(op) = bin
             .children_with_tokens()
@@ -247,6 +260,7 @@ impl Builder {
         let declares =
             root || (op.kind() == SyntaxKind::Colon && lhs.kind() != SyntaxKind::IndexExpr);
         let role = if declares { Role::Declare } else { Role::Amend };
+        let dictionary = assigns_dictionary(bin);
         let targets: Vec<SyntaxToken> = if pattern {
             lhs.children()
                 .filter_map(|entry| tokens(&entry).find(is_ident_token))
@@ -264,6 +278,9 @@ impl Builder {
             }
             if root {
                 self.root.insert(off);
+            }
+            if dictionary {
+                self.dictionaries.insert(off);
             }
             self.targets.insert(off, role);
         }
@@ -306,6 +323,9 @@ impl Builder {
                 None if self.root.contains(&start) => Symbol::Global(SmolStr::new(text)),
                 None => Symbol::Global(qualify(text, &p.ns)),
             };
+            if p.role != Role::Use && self.dictionaries.contains(&start) {
+                out.dictionaries.insert(range.start().into());
+            }
             if p.role != Role::Use {
                 out.defs
                     .entry(symbol.clone())
@@ -342,7 +362,42 @@ fn is_name(node: &SyntaxNode, token: &SyntaxToken) -> bool {
     is_ident_token(token)
         && !is_builtin(token.text())
         && !in_row_context(node)
-        && (!has_ancestor(node, SyntaxKind::TableExpr) || !is_assignment_lhs(node))
+        && !node
+            .parent()
+            .is_some_and(|bin| is_literal_entry(&bin) && bin.first_child().as_ref() == Some(node))
+}
+
+/// Is `bin` a column or key `name:value` of a table or dictionary literal
+/// (`([k:1] v:2)`, `([a:1])`)? Those names are not variables.
+fn is_literal_entry(bin: &SyntaxNode) -> bool {
+    let colon = bin
+        .children_with_tokens()
+        .any(|t| t.kind() == SyntaxKind::Colon);
+    let Some(owner) = bin
+        .parent()
+        .filter(|_| colon)
+        .filter(|s| s.kind() == SyntaxKind::ExprStmt)
+        .and_then(|s| s.parent())
+    else {
+        return false;
+    };
+    match owner.kind() {
+        SyntaxKind::TableExpr => true,
+        SyntaxKind::ArgList => owner
+            .parent()
+            .is_some_and(|p| matches!(p.kind(), SyntaxKind::TableKeys | SyntaxKind::DictExpr)),
+        _ => false,
+    }
+}
+
+/// Is `bin`'s right side a dictionary or keyed-table literal?
+fn assigns_dictionary(bin: &SyntaxNode) -> bool {
+    bin.kind() == SyntaxKind::BinExpr
+        && bin.children().nth(1).is_some_and(|v| {
+            v.kind() == SyntaxKind::DictExpr
+                || (v.kind() == SyntaxKind::TableExpr
+                    && v.children().any(|c| c.kind() == SyntaxKind::TableKeys))
+        })
 }
 
 /// A backtick symbol naming a global, with its role: the table of a qSQL
