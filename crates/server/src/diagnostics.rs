@@ -81,8 +81,9 @@ fn unindented_close_warnings(doc: &Document) -> impl Iterator<Item = Diagnostic>
 
 /// Warn on uses of a global defined neither in this file nor in the
 /// workspace, unless the config's `suppress_unresolved` names it. A
-/// namespace (`.u`) is defined once anything under it is (`.u.x`), and
-/// `t.c` is a column of global `t`.
+/// dotted name is defined when a defined global is a prefix of it at a dot
+/// (`t.c` reads a column of `t`) or it is a prefix of one (`.u` and `ab` are
+/// namespaces once `.u.x` or `ab.b` exist).
 fn unresolved_reference_warnings<'a>(
     doc: &'a Document,
     workspace: &'a WorkspaceIndex,
@@ -98,21 +99,18 @@ fn unresolved_reference_warnings<'a>(
             !bindings.defs(&Symbol::Global(q.into())).is_empty()
                 || workspace.resolve_global(q).is_some()
         };
-        // `t.c` reads column `c` of global `t` (in its namespace, `.ns.t`).
-        let head = text.split_once('.').filter(|(h, _)| !h.is_empty());
-        let column_of = head.map(|(_, c)| &qualified[..qualified.len() - c.len() - 1]);
         let resolved = name.is_def()
             || defined(qualified)
-            || column_of.is_some_and(defined)
+            || defined_prefix(qualified, defined).is_some()
             || config.suppress_unresolved.contains(text)
-            || (qualified.starts_with('.') && {
+            || {
                 let member = format!("{qualified}.");
                 let mut defined = bindings
                     .globals()
                     .map(|(n, _)| n)
                     .chain(workspace.all_idents());
                 defined.any(|n| n.starts_with(&member))
-            });
+            };
         (!resolved).then(|| {
             diagnostic(
                 doc,
@@ -123,6 +121,16 @@ fn unresolved_reference_warnings<'a>(
             )
         })
     })
+}
+
+/// The longest prefix of `qualified` ending before a dot that names a
+/// defined global, which the rest reads into: `t` of `t.c`, `.ns.t` of
+/// `.ns.t.a`.
+fn defined_prefix(qualified: &str, defined: impl Fn(&str) -> bool) -> Option<&str> {
+    qualified
+        .rmatch_indices('.')
+        .map(|(i, _)| &qualified[..i])
+        .find(|prefix| !prefix.is_empty() && defined(prefix))
 }
 
 #[cfg(test)]
@@ -157,10 +165,14 @@ mod tests {
         ("evict:{[r] select lastaccess,id,size from cache}", &["cache"]),
         (".q.id .Q.dd .z.s .q .z", &[]),                    // builtin namespaces
         (".u.x:1; show .u", &[]),                           // a namespace with members
+        ("ab.b:1; show ab", &[]),
+        (".qux", &[".qux"]),                                // not the builtin `.q`
         ("show .u", &[".u"]),
         ("t:([]age:1 2); t.age", &[]),                      // a column of global `t`
         ("\\d .ns\nu:([]c:3 4)\nu.c", &[]),
         ("missing.age", &["missing.age"]),
+        (".ns.t:([]a:1 2); .ns.t.a", &[]),                   // fully qualified
+        ("\\d .ns\nt:([]a:1 2)\n\\d .\n.ns.t.a", &[]),
         ("use:.app.cfg", &[".app.cfg"]),
         (".app.cfg:1; use:.app.cfg", &[]),
         ("system \"d .test\"\nval:42\nshow .test.val", &[]),
