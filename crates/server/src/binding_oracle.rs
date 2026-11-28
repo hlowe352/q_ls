@@ -46,6 +46,7 @@ const CASES: &[(&str, &str, &[&str])] = &[
     ("", "`.x.y set 1", &[".x.y"]),
     ("", "`..r set 1", &["r"]),
     ("", "a:0;`a set 1", &["a"]),
+    ("", "`p`q set 3 4", &["p", "q"]),
 ];
 
 /// Cases where our symbol table deliberately differs from q, with why.
