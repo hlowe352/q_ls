@@ -349,8 +349,10 @@ fn is_name(node: &SyntaxNode, token: &SyntaxToken) -> bool {
 /// `from` (a use), or the first argument of `set`, `upsert` or `insert`,
 /// which assign it (`` `t upsert x ``, `` set[`a;1] ``).
 fn named_symbol(lit: &SyntaxNode) -> Option<(SyntaxToken, Role)> {
-    let token =
-        first_token(lit).filter(|t| t.kind() == SyntaxKind::Symbol && t.text().len() > 1)?;
+    // One name: `` `a`b set 3 4 `` defines neither `a` nor `b` in q.
+    let token = first_token(lit).filter(|t| {
+        t.kind() == SyntaxKind::Symbol && t.text().len() > 1 && !t.text()[1..].contains('`')
+    })?;
     let parent = lit.parent()?;
     let verb = match parent.kind() {
         SyntaxKind::FromClause => return Some((token, Role::Use)),
@@ -361,14 +363,14 @@ fn named_symbol(lit: &SyntaxNode) -> Option<(SyntaxToken, Role)> {
             .find(|t| t.kind() == SyntaxKind::Ident)?,
         // `verb[`t;x]`
         SyntaxKind::ExprStmt => {
-            let args = parent
-                .parent()
-                .filter(|a| a.kind() == SyntaxKind::ArgList)?;
-            let call = args
-                .parent()
-                .filter(|c| c.kind() == SyntaxKind::IndexExpr)?;
-            (args.children().next().as_ref() == Some(&parent)).then_some(())?;
-            first_token(&call)?
+            let args = parent.parent().filter(|a| {
+                a.kind() == SyntaxKind::ArgList && a.children().next().as_ref() == Some(&parent)
+            })?;
+            first_token(
+                &args
+                    .parent()
+                    .filter(|c| c.kind() == SyntaxKind::IndexExpr)?,
+            )?
         }
         _ => return None,
     };
