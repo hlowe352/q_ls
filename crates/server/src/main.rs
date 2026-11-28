@@ -1,23 +1,4 @@
-mod backend;
-mod binder;
-#[cfg(test)]
-mod binding_oracle;
-mod builtins;
-mod completion;
-mod config;
-mod diagnostics;
-mod document;
-mod goto_def;
-mod hover;
-mod line_index;
-mod references;
-mod rename;
-mod semantic;
-mod symbols;
-mod syntax;
-mod workspace_index;
-
-use backend::QLanguageServer;
+use q_ls::QLanguageServer;
 use tower_lsp_server::{LspService, Server};
 
 #[tokio::main]

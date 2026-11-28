@@ -1,5 +1,5 @@
 [package]
-name = "q-parser-fuzz"
+name = "q-ls-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
@@ -11,11 +11,21 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 
 [dependencies.q-parser]
-path = ".."
+path = "../crates/parser"
+
+[dependencies.q-ls]
+path = "../crates/server"
 
 [[bin]]
 name = "parse"
 path = "fuzz_targets/parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "document"
+path = "fuzz_targets/document.rs"
 test = false
 doc = false
 bench = false
