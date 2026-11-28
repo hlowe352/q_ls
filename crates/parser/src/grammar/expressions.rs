@@ -258,7 +258,8 @@ fn parse_bracketed(p: &mut Parser, kind: SyntaxKind) -> CompletedMarker {
     m.complete(p, kind)
 }
 
-/// `(expr)`, `(a;b;c)`, `()`, or a table `([keys] col:val; ...)`.
+/// `(expr)`, `(a;b;c)`, `()`, a table `([keys] col:val; ...)`, or a
+/// dictionary `([k:v; ...])`.
 fn parse_paren(p: &mut Parser) -> CompletedMarker {
     let m = p.start();
     let kind = with_qsql_flags(p, false, false, |p| {
@@ -271,9 +272,12 @@ fn parse_paren(p: &mut Parser) -> CompletedMarker {
                 p.bump(); // [
                 p.bump(); // ]
             } else {
-                let km = p.start();
-                parse_bracketed(p, ArgList);
-                km.complete(p, TableKeys);
+                let keys = parse_bracketed(p, ArgList);
+                // Nothing after the brackets: a dictionary, `([a:1;b:2])`.
+                if p.eat(RParen) {
+                    return DictExpr;
+                }
+                keys.precede(p).complete(p, TableKeys);
             }
             while !p.at(RParen) && !p.at_end() {
                 stmt(p);

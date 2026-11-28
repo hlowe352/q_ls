@@ -87,7 +87,8 @@ pub mod tests {
         "f:{[a] »a::5; «a}",                                // `::` on a param assigns the param
         "»g:1\nf:{[x] if[x in «g;:()]; g,:enlist x}",       // `,:` amends an existing global
         "init:{»n+::1};\nuse:«n",                           // `+::` in lambda is global
-        "init:{op::+};\nuse:«op",                           // `op::+` composes: no definition
+        "init:{op::+};\nuse:«op",
+        "t:([]f:enlist {»x:1; «x})",                         // a lambda in a table keeps its locals                           // `op::+` composes: no definition
     ];
 
     #[test]

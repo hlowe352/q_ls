@@ -24,6 +24,7 @@ pub fn compute_diagnostics(
     errors
         .chain(unindented_close_warnings(doc))
         .chain(unresolved_reference_warnings(doc, workspace, config))
+        .chain(dictionary_dot_warnings(doc, workspace))
         .collect()
 }
 
@@ -94,16 +95,10 @@ fn unresolved_reference_warnings<'a>(
             return None;
         };
         let text = &doc.text()[name.range];
-        let defined = |q: &str| {
-            !bindings.defs(&Symbol::Global(q.into())).is_empty()
-                || workspace.resolve_global(q).is_some()
-        };
-        // `t.c` reads column `c` of global `t` (in its namespace, `.ns.t`).
-        let head = text.split_once('.').filter(|(h, _)| !h.is_empty());
-        let column_of = head.map(|(_, c)| &qualified[..qualified.len() - c.len() - 1]);
+        let defined = |q: &str| !definitions(q, doc, workspace).is_empty();
         let resolved = name.is_def()
             || defined(qualified)
-            || column_of.is_some_and(defined)
+            || dotted_head(text, qualified).is_some_and(defined)
             || config.suppress_unresolved.contains(text)
             || (qualified.starts_with('.') && {
                 let member = format!("{qualified}.");
@@ -122,6 +117,69 @@ fn unresolved_reference_warnings<'a>(
                 format!("unresolved reference `{text}`"),
             )
         })
+    })
+}
+
+/// Warn on `d.k` where every definition of global `d` is a dictionary or
+/// keyed-table literal (`d:([a:1])`, `d:([k:1] v:2)`): q's dot notation
+/// reads only tables and namespaces, so it signals.
+fn dictionary_dot_warnings<'a>(
+    doc: &'a Document,
+    workspace: &'a WorkspaceIndex,
+) -> impl Iterator<Item = Diagnostic> + 'a {
+    doc.bindings().names().iter().filter_map(move |name| {
+        let Symbol::Global(qualified) = &name.symbol else {
+            return None;
+        };
+        let text = &doc.text()[name.range];
+        let defs = definitions(dotted_head(text, qualified)?, doc, workspace);
+        let dict = !name.is_def()
+            && definitions(qualified, doc, workspace).is_empty()
+            && !defs.is_empty()
+            && defs.iter().all(|&(d, off)| defines_dictionary(d, off));
+        dict.then(|| {
+            let (start, len) = (name.range.start().into(), text.len());
+            let head = text.split_once('.').map_or(text, |(h, _)| h);
+            let message = format!(
+                "`{head}` is a dictionary or keyed table; `{text}` only reads tables and namespaces"
+            );
+            diagnostic(doc, start, len, DiagnosticSeverity::WARNING, message)
+        })
+    })
+}
+
+/// The global a dotted name reads from: `t` of `t.c` (qualified like the
+/// name, so `.ns.t` under `\d .ns`). `None` for names starting with a dot.
+fn dotted_head<'a>(text: &str, qualified: &'a str) -> Option<&'a str> {
+    let (_, rest) = text.split_once('.').filter(|(h, _)| !h.is_empty())?;
+    Some(&qualified[..qualified.len() - rest.len() - 1])
+}
+
+/// Every definition site of global `qualified`: here and in the workspace.
+fn definitions<'a>(
+    qualified: &str,
+    doc: &'a Document,
+    workspace: &'a WorkspaceIndex,
+) -> Vec<(&'a Document, u32)> {
+    let here = doc.bindings().defs(&Symbol::Global(qualified.into()));
+    let elsewhere = workspace.resolve_global(qualified).into_iter().flatten();
+    here.iter()
+        .map(|&off| (doc, off))
+        .chain(elsewhere.filter_map(|(uri, off)| Some((workspace.get(uri)?, *off))))
+        .collect()
+}
+
+/// Is the definition at `off` assigned a dictionary or keyed-table literal?
+fn defines_dictionary(doc: &Document, off: u32) -> bool {
+    let value = doc
+        .token_at(off as usize)
+        .and_then(|t| t.parent()?.parent())
+        .filter(|bin| bin.kind() == SyntaxKind::BinExpr)
+        .and_then(|bin| bin.children().nth(1));
+    value.is_some_and(|v| {
+        v.kind() == SyntaxKind::DictExpr
+            || (v.kind() == SyntaxKind::TableExpr
+                && v.children().any(|c| c.kind() == SyntaxKind::TableKeys))
     })
 }
 
@@ -169,6 +227,33 @@ mod tests {
         ("\\d .cache\ncache:([id:`u#`long$()] )\nfuncs:(`u#`long$())!()\n\\d .\nuse:.cache.cache", &[]),
         ("loadf:loadf0[0b]   /load a file if it hasn't been loaded", &["loadf0"]), // not comment words
     ];
+
+    /// Dot notation on a global defined only as a dictionary or keyed-table
+    /// literal signals in q 4.1; on a table or namespace it reads.
+    #[rustfmt::skip]
+    const DICT_DOT: &[(&str, bool)] = &[
+        ("d:([a:1;b:2]); d.a", true),
+        ("k:([k:1 2] v:3 4); k.v", true),
+        ("`d set ([a:1]); d.a", true),
+        ("\\d .ns\nd:([a:1])\nd.a", true),
+        ("t:([]a:1 2); t.a", false),
+        ("d:([a:1]); d:([]a:1 2); d.a", false),             // not only a dictionary
+        ("d:get`:f; d.a", false),                           // value unknown
+        ("d.x:1; d.x", false),                              // namespace member
+        ("([a:1;b:2])", false),                             // keys are not names
+    ];
+
+    #[test]
+    fn dictionary_dot() {
+        for (src, warns) in DICT_DOT {
+            let doc = Document::new((*src).to_string(), 0);
+            let diags = compute_diagnostics(&doc, &WorkspaceIndex::default(), &Config::default());
+            let found = diags
+                .iter()
+                .any(|d| d.message.contains("is a dictionary or keyed table"));
+            assert_eq!(found, *warns, "source {src:?}: {diags:?}");
+        }
+    }
 
     #[test]
     fn unresolved_references() {

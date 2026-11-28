@@ -25,7 +25,7 @@ use q_parser::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, Te
 use smol_str::SmolStr;
 
 use crate::builtins::is_builtin;
-use crate::syntax::{first_token, has_ancestor, in_row_context, is_assignment_lhs, tokens};
+use crate::syntax::{first_token, in_row_context, tokens};
 
 /// What a name refers to.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -225,8 +225,8 @@ impl Builder {
     /// Record the targets of an assignment `BinExpr`; plain `name:` in a
     /// lambda makes the name one of its locals.
     fn assignment(&mut self, bin: &SyntaxNode, lambda: Option<usize>) {
-        if has_ancestor(bin, SyntaxKind::TableExpr) {
-            return; // column definitions
+        if is_literal_entry(bin) {
+            return;
         }
         let Some(op) = bin
             .children_with_tokens()
@@ -342,7 +342,28 @@ fn is_name(node: &SyntaxNode, token: &SyntaxToken) -> bool {
     is_ident_token(token)
         && !is_builtin(token.text())
         && !in_row_context(node)
-        && (!has_ancestor(node, SyntaxKind::TableExpr) || !is_assignment_lhs(node))
+        && !node
+            .parent()
+            .is_some_and(|bin| is_literal_entry(&bin) && bin.first_child().as_ref() == Some(node))
+}
+
+/// Is `bin` a column or key `name:value` of a table or dictionary literal
+/// (`([k:1] v:2)`, `([a:1])`)? Those names are not variables.
+fn is_literal_entry(bin: &SyntaxNode) -> bool {
+    let Some(owner) = bin
+        .parent()
+        .filter(|s| s.kind() == SyntaxKind::ExprStmt)
+        .and_then(|s| s.parent())
+    else {
+        return false;
+    };
+    match owner.kind() {
+        SyntaxKind::TableExpr => true,
+        SyntaxKind::ArgList => owner
+            .parent()
+            .is_some_and(|p| matches!(p.kind(), SyntaxKind::TableKeys | SyntaxKind::DictExpr)),
+        _ => false,
+    }
 }
 
 /// A backtick symbol naming a global, with its role: the table of a qSQL
